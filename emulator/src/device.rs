@@ -369,9 +369,7 @@ impl DeviceEmulator {
             20
         };
 
-        // Cap sub-steps to avoid generating excessive samples at high speedup
-        let effective_dt = dt_ms.min(5000);
-        let mut remaining = effective_dt;
+        let mut remaining = dt_ms;
         let sim_time_base = self.sim_time_ms;
 
         while remaining > 0 {
@@ -437,9 +435,7 @@ impl DeviceEmulator {
             dt_ms
         };
 
-        // Cap sub-steps to avoid spinning at high speedup during dwell
-        let effective_dt = dt_ms.min(5000);
-        let mut remaining = effective_dt;
+        let mut remaining = dt_ms;
         let sim_time_base = self.sim_time_ms;
 
         while remaining > 0 {
