@@ -1,0 +1,16 @@
+/// Constants mirrored from firmware config.h
+pub const ARMING_DURATION_MS: u64 = 15_000;
+pub const STOP_DWELL_MS: u64 = 300_000;
+pub const MIN_SPEED_KMH: f64 = 5.0;
+pub const GNSS_RATE_ACTIVE_HZ: u32 = 5;
+pub const GNSS_RATE_SLOW_HZ: u32 = 2;
+pub const IMU_RATE_ACTIVE_HZ: u32 = 50;
+pub const LOW_BATTERY_THRESHOLD_MV: u32 = 11_500;
+pub const UPLOAD_CHUNK_SIZE: usize = 4096;
+pub const RETENTION_WINDOW_HOURS: u32 = 168;
+pub const WIFI_SCAN_INTERVAL_MS: u64 = 60_000;
+pub const MIN_FREE_SD_MB: u32 = 50;
+pub const MAX_TRIP_DURATION_MS: u64 = 14_400_000;
+pub const MAX_HDOP_TENTHS: u16 = 50;
+pub const MIN_SATELLITES: u8 = 4;
+pub const ULP_MOTION_THRESHOLD_MG: u16 = 300;
