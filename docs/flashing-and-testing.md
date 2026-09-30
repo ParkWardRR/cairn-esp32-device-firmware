@@ -96,8 +96,8 @@ Measured on USB power (no car battery):
 | Property | Value |
 |----------|-------|
 | MAC | 7C:9E:BD:FA:7F:F8 |
-| Networks detected | 29-34 (varies by scan) |
-| Home AP signal | -56 to -61 dBm (CH1, CH6) |
+| Networks detected | 26-37 (varies by scan) |
+| Home AP | -62 dBm on CH11 |
 | WPA3 support | Yes (WPA3-PSK networks detected and parsed) |
 
 ### Peripherals
@@ -106,7 +106,7 @@ Measured on USB power (no car battery):
 |--------|--------|
 | LED (GPIO 4) | Working — blinked on command |
 | Buzzer (GPIO 25) | Working — 2kHz tone confirmed |
-| SD card slot (SPI, CS=GPIO 5) | Hardware OK, no card inserted |
+| SD card slot (SPI, CS=GPIO 5) | Working — FAT32 16 GB mounted |
 | Cellular modem (GPIO 27) | Power OFF, confirmed not initializing |
 
 ---
@@ -141,8 +141,7 @@ registers), but wrong in the header.
 
 - **Host:** Raspberry Pi (flash-station.example.lan)
 - **OS:** Debian 13 (trixie), kernel 6.18, aarch64
-- **Serial port:** `/dev/ttyUSB1` (CH340 — the Freematics)
-- **Other serial:** `/dev/ttyUSB0` (FT232 — separate UART adapter, ignore)
+- **Serial port:** `/dev/ttyUSB0` (CH340 — the Freematics; was ttyUSB1 when FT232 adapter was also connected)
 - **Tool:** esptool v5.4.0 in `~/cairn-flash/venv/`
 
 ### Setup (one-time)
@@ -177,9 +176,9 @@ scp firmware/freematics-base/.pio/build/freematics/{bootloader,partitions,firmwa
 
 ssh alfa@flash-station.example.lan "cd ~/cairn-flash && \
   ~/cairn-flash/venv/bin/esptool \
-    --chip esp32 --port /dev/ttyUSB1 --baud 460800 \
+    --chip esp32 --port /dev/ttyUSB0 --baud 460800 \
     --before default-reset --after hard-reset \
-    write-flash -z --flash-mode dio --flash-freq 40m --flash-size 4MB \
+    write_flash -z --flash-mode dio --flash-freq 40m --flash-size 4MB \
     0x1000 bootloader.bin 0x8000 partitions.bin \
     0xe000 boot_app0.bin 0x10000 firmware.bin"
 
@@ -188,9 +187,9 @@ scp firmware/freematics-base/.pio/build/freematics/firmware.bin \
     alfa@flash-station.example.lan:~/cairn-flash/
 ssh alfa@flash-station.example.lan "cd ~/cairn-flash && \
   ~/cairn-flash/venv/bin/esptool \
-    --chip esp32 --port /dev/ttyUSB1 --baud 460800 \
+    --chip esp32 --port /dev/ttyUSB0 --baud 460800 \
     --before default-reset --after hard-reset \
-    write-flash -z --flash-mode dio --flash-freq 40m --flash-size 4MB \
+    write_flash -z --flash-mode dio --flash-freq 40m --flash-size 4MB \
     0x10000 firmware.bin"
 ```
 
@@ -199,7 +198,7 @@ Full flash: ~15s. Firmware-only: ~15s.
 ### Serial monitor
 
 ```bash
-screen /dev/ttyUSB1 115200
+screen /dev/ttyUSB0 115200
 ```
 
 Exit: `Ctrl-A` then `\` then `y`.
@@ -209,7 +208,7 @@ Exit: `Ctrl-A` then `\` then `y`.
 ```bash
 ~/cairn-flash/venv/bin/python3 -c "
 import serial, time
-ser = serial.Serial('/dev/ttyUSB1', 115200)
+ser = serial.Serial('/dev/ttyUSB0', 115200)
 ser.dtr = False; ser.rts = True; time.sleep(0.1)
 ser.rts = False; time.sleep(0.1); ser.close()
 "
@@ -226,23 +225,91 @@ Firmware: Cairn v0.2.
 | Subsystem | Result | Notes |
 |-----------|--------|-------|
 | ESP32 boot | OK | POWERON_RESET, SPI_FAST_FLASH_BOOT |
-| PSRAM | OK | 4 MB usable (8 MB chip, rev 1 addressing limit) |
+| PSRAM | OK | 8 MB (full chip accessible) |
 | OBD coprocessor | OK | Device type 15, ELM327 v1.5 firmware |
 | ICM-42627 IMU | OK | WHO_AM_I 0x20, bias calibrated, self-test bug fixed |
 | GNSS | OK | Internal module, no fix indoors (expected) |
 | WiFi | OK | 29-34 networks, home APs at -56 to -71 dBm |
-| SD card | FAIL | No card inserted |
+| SD card | OK | FAT32 16 GB, mounted, 15177 MB total, /cairn/trips created |
 | Battery | OK | 3.8V on USB, 5.42V via ATRV (expected) |
 | LED | OK | Blink confirmed |
 | Buzzer | OK | 2kHz tone confirmed |
 | Cellular | OFF | GPIO 27 LOW, modem not initializing |
 | State machine | OK | Initialized → SLEEP |
 
+### SD card test (2026-09-30)
+
+FAT32 16 GB microSD inserted. Firmware-only reflash via `/dev/ttyUSB0`.
+Two consecutive boots both report `[SD] Mounted: 15177 MB total, 1 MB used`.
+`SD.mkdir(TRIP_BASE_PATH)` called successfully (creates `/cairn/trips`).
+
+### Credentials
+
+WiFi credentials live in `firmware/freematics-base/src/secrets.h`, which is
+gitignored — this repo is public, so nothing real belongs in a tracked file.
+`config.h` pulls it in with `__has_include`, so a fresh clone builds fine
+without it (SSID and password just default to empty).
+
+```bash
+cp firmware/freematics-base/src/secrets.h.example \
+   firmware/freematics-base/src/secrets.h
+# then edit secrets.h with the real SSID and password
+```
+
+Because it is a compile-time define, changing credentials means rebuild and
+reflash. Verify the build actually picked them up:
+
+```bash
+strings .pio/build/freematics/firmware.bin | grep -c "<your-ssid>"   # expect 1
+```
+
+That check matters — a missing `secrets.h` fails open to an empty SSID and the
+firmware builds clean, so the only symptom would be a silent WiFi failure in the
+field. `-DWIFI_SSID=...` build flags and BLE-provisioned NVS values both
+override the header.
+
+### Network self-test (2026-09-30)
+
+`env:freematics-selftest` is a bench-only build that joins WiFi, resolves
+`SERVER_HOSTNAME`, and fetches `/api/v1/health` at boot, printing each step over
+serial. Flash it to validate connectivity, then reflash `env:freematics` before
+driving — the production binary contains none of this code.
+
+```bash
+pio run -e freematics-selftest
+# flash, then watch serial for [SELFTEST] lines
+```
+
+It caught two real problems on first run:
+
+| Problem | Symptom | Fix |
+|---------|---------|-----|
+| SSID misspelled (one letter off) | `FAIL: "<ssid>" not visible on 2.4 GHz` | Corrected in `src/secrets.h` |
+| Server host was `cairn.local` | mDNS not available to the ESP32 resolver | `SERVER_HOSTNAME` → `cairn.example.lan` |
+
+On failure the self-test dumps every SSID the 2.4 GHz radio can see with
+channel, RSSI and encryption type, which is what identified the misspelling.
+
+Passing run:
+
+```
+[SELFTEST] DNS server 172.16.1.69
+[SELFTEST] cairn.example.lan -> 172.16.6.80
+[SELFTEST] response:
+HTTP/1.1 200 OK
+{"database":true,"service":"ingestd","status":"ok",...}
+[SELFTEST] PASS: server reachable end to end
+```
+
+Note the server is reached by DNS name, not a hardcoded IP — it holds a DHCP
+lease (172.16.6.80 at time of writing, previously .101), so the name is the
+only stable handle.
+
 ### Pending tests
 
-1. Insert FAT32 microSD, verify mount and trip directory creation
-2. GNSS fix acquisition outdoors
-3. Full car test: OBD + battery + trip recording
-4. WiFi home sync (requires `uploadBundle()` implementation)
-5. Standby current measurement
-6. Power-loss recovery
+1. GNSS fix acquisition outdoors
+2. Full car test: OBD + battery + trip recording
+3. WiFi home sync — device-to-server path verified by the self-test above;
+   still needs a real trip bundle uploaded from the device
+4. Standby current measurement
+5. Power-loss recovery
