@@ -37,16 +37,6 @@ const char *link_state_name(LinkState s)
     }
 }
 
-const char *health_state_name(HealthState s)
-{
-    switch (s) {
-    case HealthState::Ok:       return "OK";
-    case HealthState::Degraded: return "DEGRADED";
-    case HealthState::Critical: return "CRITICAL";
-    default:                    return "?";
-    }
-}
-
 /* ── frame flags ──────────────────────────────────────────────────────────── */
 
 /*
@@ -60,7 +50,7 @@ static uint16_t frame_flags(const Lifecycle *lc)
     uint16_t flags = 0;
 
     if (lc->capture == CaptureState::Pretrip) flags |= CAIRN_FLAG_PRETRIP;
-    if (lc->health != HealthState::Ok)        flags |= CAIRN_FLAG_DEGRADED;
+    if (lc->health_state != CAIRN_HEALTH_OK) flags |= CAIRN_FLAG_DEGRADED;
     if (lc->cap.recovery_state != CAIRN_RECOVERY_CLEAN) {
         flags |= CAIRN_FLAG_POST_RECOVERY;
     }
@@ -149,16 +139,6 @@ static void set_link_state(Lifecycle *lc, LinkState next, uint8_t reason)
     lc->link = next;
 }
 
-static void set_health_state(Lifecycle *lc, HealthState next, uint8_t reason)
-{
-    if (lc->health == next) return;
-
-    CAIRN_LOGW(TAG, "health %s -> %s (reason %u)", health_state_name(lc->health),
-               health_state_name(next), reason);
-    emit_transition(lc, CAIRN_REGION_HEALTH, (uint8_t)lc->health, (uint8_t)next,
-                    0, reason);
-    lc->health = next;
-}
 
 /* ── init ─────────────────────────────────────────────────────────────────── */
 
@@ -372,26 +352,76 @@ static void on_obd_silent(Lifecycle *lc)
     lc->have_recent_obd = false;
 }
 
+/*
+ * Compose the degraded-state bitmap from conditions actually observed.
+ *
+ * Every bit is set from evidence, never from inference: DEGRADED_GNSS means no
+ * fix arrived, not that one looks unlikely. And because it is a bitmap rather
+ * than a severity, simultaneous problems all survive — a low battery no longer
+ * hides the fact that position was unavailable too.
+ */
+static uint8_t compose_health_state(const Lifecycle *lc,
+                                    const cairn_device_health_t *h,
+                                    uint64_t free_mib, uint32_t dropped_facts)
+{
+    uint8_t state = CAIRN_HEALTH_OK;
+
+    if (!lc->sensors.gnss || !lc->have_recent_gnss || lc->in_gnss_gap) {
+        state |= CAIRN_HEALTH_DEGRADED_GNSS;
+    }
+
+    if (lc->cap.write_errors > 0 ||
+        (free_mib > 0 && free_mib < CAIRN_LOG_FREE_SPACE_FLOOR_MIB)) {
+        state |= CAIRN_HEALTH_DEGRADED_STORAGE;
+    }
+
+    /*
+     * Set before the first fix of every trip, which is normal rather than
+     * exceptional. Saying so is what stops a reader treating monotonic-only
+     * timestamps as though they were UTC.
+     */
+    if (!lc->have_utc_basis) state |= CAIRN_HEALTH_DEGRADED_TIME;
+
+    /* Only degraded if there is something waiting that could not be delivered.
+     * Being offline with nothing pending is the designed steady state, not a
+     * fault. */
+    if (lc->pending_bundles > 0 && lc->link == LinkState::Offline) {
+        state |= CAIRN_HEALTH_DEGRADED_NETWORK;
+    }
+
+    if (h->battery_mv != CAIRN_U16_UNKNOWN && h->battery_mv < 11500) {
+        state |= CAIRN_HEALTH_LOW_POWER;
+    }
+
+    if (lc->cap.needs_seal ||
+        lc->cap.recovery_state == CAIRN_RECOVERY_SALVAGED) {
+        state |= CAIRN_HEALTH_RECOVERY_REQUIRED;
+    }
+
+    if (!lc->sensors.imu || !lc->sensors.obd || dropped_facts > 0) {
+        state |= CAIRN_HEALTH_DEGRADED_SENSING;
+    }
+
+    return state;
+}
+
 static void on_health(Lifecycle *lc, const fact_t *f)
 {
     cairn_device_health_t h = f->data.health;
 
-    /* The sensing task cannot know these; the controller owns them. */
-    h.health_state = (uint8_t)lc->health;
     h.reboot_count = (uint8_t)lc->boot_count;
 
     int rssi = cairn_sync_rssi();
     h.rssi_dbm = (rssi != 0) ? (int8_t)rssi : CAIRN_I8_UNKNOWN;
 
-    uint64_t total = 0, used = 0;
-    uint64_t free_mib = 0;
+    uint64_t total = 0, used = 0, free_mib = 0;
     if (cairn_fs_space(&total, &used)) {
         free_mib = (total > used) ? (total - used) / (1024 * 1024) : 0;
         h.sd_free_mib = (uint16_t)((free_mib > 0xFFFE) ? 0xFFFE : free_mib);
     }
 
     /*
-     * Dropped facts are reported in the data, not just the log. A queue that
+     * Dropped facts are reported in the data, not just the log: a queue that
      * overflowed means the record stream has holes, and a gap the data does not
      * admit to is worse than one it does.
      */
@@ -406,6 +436,9 @@ static void on_health(Lifecycle *lc, const fact_t *f)
         h.ext_sensor_1 = (uint16_t)((dropped > 0xFFFE) ? 0xFFFE : dropped);
     }
 
+    uint8_t state = compose_health_state(lc, &h, free_mib, dropped);
+    h.health_state = state;
+
     uint8_t payload[16];
     cairn_encode_device_health(&h, payload);
 
@@ -415,34 +448,25 @@ static void on_health(Lifecycle *lc, const fact_t *f)
                          1, frame_flags(lc), f->monotonic_ms, payload,
                          sizeof(payload));
 
-    /* Degradation is derived from what is actually missing or failing. */
-    HealthState want = HealthState::Ok;
-    uint8_t reason = 0;
+    /* A transition is journalled only when the set of active conditions
+     * changes, so the journal records changes rather than a heartbeat. */
+    if (state != lc->health_state) {
+        char before[160], after[160];
+        cairn_health_state_names(lc->health_state, before, sizeof(before));
+        cairn_health_state_names(state, after, sizeof(after));
 
-    if (h.battery_mv != CAIRN_U16_UNKNOWN && h.battery_mv < 11500) {
-        want = HealthState::Critical;
-        reason = 1;
-    } else if (free_mib > 0 && free_mib < CAIRN_LOG_FREE_SPACE_FLOOR_MIB) {
-        want = HealthState::Degraded;
-        reason = 2;
-    } else if (!lc->sensors.gnss || !lc->sensors.imu) {
-        want = HealthState::Degraded;
-        reason = 3;
-    } else if (lc->cap.write_errors > 0) {
-        want = HealthState::Degraded;
-        reason = 4;
-    } else if (dropped > 0) {
-        want = HealthState::Degraded;
-        reason = 5;
+        CAIRN_LOGW(TAG, "health %s -> %s", before, after);
+
+        emit_transition(lc, CAIRN_REGION_HEALTH, lc->health_state, state, 0, 0);
+        lc->health_state = state;
     }
 
-    set_health_state(lc, want, reason);
-
+    char names[160];
+    cairn_health_state_names(state, names, sizeof(names));
     CAIRN_LOGD(TAG, "health: %u mV, %llu MiB free, %u write errors, %u dropped "
                     "facts, state %s",
                (unsigned)h.battery_mv, (unsigned long long)free_mib,
-               (unsigned)lc->cap.write_errors, (unsigned)dropped,
-               health_state_name(lc->health));
+               (unsigned)lc->cap.write_errors, (unsigned)dropped, names);
 }
 
 /* ── sealing and sync ─────────────────────────────────────────────────────── */
@@ -494,7 +518,9 @@ static void maybe_sync(Lifecycle *lc)
 
     uint32_t pending = 0;
     uint64_t bytes = 0;
-    if (!cairn_store_pending_stats(&pending, &bytes) || pending == 0) return;
+    bool have_stats = cairn_store_pending_stats(&pending, &bytes);
+    lc->pending_bundles = have_stats ? pending : 0;
+    if (!have_stats || pending == 0) return;
 
     CAIRN_LOGI(TAG, "%u bundle(s) pending, %llu bytes; attempting sync",
                (unsigned)pending, (unsigned long long)bytes);

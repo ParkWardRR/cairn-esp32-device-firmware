@@ -8,6 +8,7 @@
  * with an exact byte count and a reason.
  */
 
+#include <stdio.h>
 #include <string.h>
 
 #include "cairn_format.h"
@@ -73,6 +74,51 @@ const char *cairn_record_type_name(uint8_t t)
     case CAIRN_REC_GNSS_GAP:         return "GNSS_GAP";
     case CAIRN_REC_POLICY_SNAPSHOT:  return "POLICY_SNAPSHOT";
     default:                         return "UNKNOWN";
+    }
+}
+
+void cairn_health_state_names(uint8_t state, char *out, size_t cap)
+{
+    static const struct {
+        uint8_t     bit;
+        const char *name;
+    } bits[] = {
+        { CAIRN_HEALTH_DEGRADED_GNSS,     "DEGRADED_GNSS" },
+        { CAIRN_HEALTH_DEGRADED_STORAGE,  "DEGRADED_STORAGE" },
+        { CAIRN_HEALTH_DEGRADED_TIME,     "DEGRADED_TIME" },
+        { CAIRN_HEALTH_DEGRADED_NETWORK,  "DEGRADED_NETWORK" },
+        { CAIRN_HEALTH_LOW_POWER,         "LOW_POWER" },
+        { CAIRN_HEALTH_RECOVERY_REQUIRED, "RECOVERY_REQUIRED" },
+        { CAIRN_HEALTH_DEGRADED_SENSING,  "DEGRADED_SENSING" },
+    };
+
+    if (cap == 0) return;
+
+    if (state == CAIRN_HEALTH_OK) {
+        snprintf(out, cap, "OK");
+        return;
+    }
+
+    size_t  used = 0;
+    uint8_t seen = 0;
+
+    out[0] = '\0';
+    for (size_t i = 0; i < sizeof(bits) / sizeof(bits[0]); i++) {
+        if ((state & bits[i].bit) == 0) continue;
+
+        int n = snprintf(out + used, cap - used, "%s%s",
+                         (used > 0) ? "|" : "", bits[i].name);
+        if (n < 0 || (size_t)n >= cap - used) return;
+        used += (size_t)n;
+        seen |= bits[i].bit;
+    }
+
+    /* Render anything this build does not know rather than dropping it, so a
+     * log written by newer firmware stays readable. */
+    uint8_t unknown = (uint8_t)(state & (uint8_t)~seen);
+    if (unknown != 0) {
+        snprintf(out + used, cap - used, "%s0x%02x", (used > 0) ? "|" : "",
+                 unknown);
     }
 }
 

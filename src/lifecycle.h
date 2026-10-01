@@ -48,18 +48,23 @@ enum class LinkState : uint8_t {
     Syncing     = 3,
 };
 
-/* Region 4: health. Degradation is recorded, never a reason to stop capturing. */
-enum class HealthState : uint8_t {
-    Ok       = 0,
-    Degraded = 1,
-    Critical = 2,
-};
+/*
+ * Region 4: health. Degradation is recorded, never a reason to stop capturing.
+ *
+ * Carried as the specification's bitmap (§4.10) rather than a severity, because
+ * degradation is not ordered: a low battery and a missing fix and a full card
+ * are different problems with different fixes, and a scalar would force a
+ * priority between them and discard the rest. See CAIRN_HEALTH_* in
+ * cairn_format.h.
+ */
 
 struct Lifecycle {
     CaptureState capture = CaptureState::Idle;
     BundleState  bundle  = BundleState::Open;
     LinkState    link    = LinkState::Offline;
-    HealthState  health  = HealthState::Ok;
+
+    /* Bitmap of active degraded conditions; CAIRN_HEALTH_OK when none are. */
+    uint8_t      health_state = CAIRN_HEALTH_OK;
 
     cairn_capture_t cap;
     SensorStatus    sensors;
@@ -109,6 +114,10 @@ struct Lifecycle {
     bool     have_utc_basis = false;
 
     uint32_t idle_since_ms = 0;
+
+    /* Sealed bundles awaiting a receipt, refreshed before each sync attempt.
+     * Being offline matters only when something is waiting to go. */
+    uint32_t pending_bundles = 0;
 };
 
 bool lifecycle_begin(Lifecycle *lc);
@@ -118,6 +127,5 @@ void lifecycle_tick(Lifecycle *lc);
 
 const char *capture_state_name(CaptureState s);
 const char *link_state_name(LinkState s);
-const char *health_state_name(HealthState s);
 
 #endif /* CAIRN_LIFECYCLE_H */

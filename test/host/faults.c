@@ -333,6 +333,18 @@ static bool seal_now(cairn_capture_t *cap, char id_out[27], uint8_t root_out[32]
     return true;
 }
 
+static uint8_t g_seen_health_state;
+
+static bool capture_health_cb(const cairn_frame_t *f, void *user)
+{
+    (void)user;
+
+    if (f->record_type == CAIRN_REC_DEVICE_HEALTH && f->payload_len >= 13) {
+        g_seen_health_state = f->payload[12];
+    }
+    return true;
+}
+
 /* ── rows ─────────────────────────────────────────────────────────────────── */
 
 /*
@@ -1377,6 +1389,103 @@ static bool row_preroll_refuses_oversized(void)
     return true;
 }
 
+
+/*
+ * The degraded-state bitmap survives the trip to the card and back.
+ *
+ * Worth a row because the field changed shape: it was a scalar severity, and
+ * the specification says bitmap. A writer that still emitted 0/1/2 would look
+ * fine in isolation and be misread by every decoder.
+ */
+static bool row_health_bitmap_round_trips(void)
+{
+    uint8_t device_id[16], seed[32], pub[32];
+    uint32_t boot = 0;
+    CHECK(cairn_identity_load(device_id, seed, pub, &boot), "identity load failed");
+
+    uint8_t boot_id[16];
+    cairn_new_boot_id(boot_id);
+
+    cairn_capture_t cap;
+    CHECK(cairn_capture_open_or_resume(&cap, device_id, boot_id), "open failed");
+
+    /* Several conditions at once — the case a scalar severity would flatten. */
+    const uint8_t want = (uint8_t)(CAIRN_HEALTH_DEGRADED_GNSS |
+                                   CAIRN_HEALTH_LOW_POWER |
+                                   CAIRN_HEALTH_DEGRADED_TIME);
+
+    cairn_device_health_t h;
+    memset(&h, 0, sizeof(h));
+    h.battery_mv    = 11200;
+    h.sd_free_mib   = 4096;
+    h.device_temp_c = 21;
+    h.rssi_dbm      = CAIRN_I8_UNKNOWN;
+    h.ext_sensor_1  = CAIRN_U16_UNKNOWN;
+    h.ext_sensor_2  = CAIRN_U16_UNKNOWN;
+    h.health_state  = want;
+    h.reboot_count  = 1;
+
+    uint8_t payload[16];
+    cairn_encode_device_health(&h, payload);
+    cairn_host_advance(100);
+
+    CHECK(cairn_capture_append(&cap, CAIRN_CHAIN_JOURNAL,
+                               CAIRN_REC_DEVICE_HEALTH, 1, 0, cairn_millis(),
+                               payload, sizeof(payload)),
+          "health append failed");
+
+    /* Read it back off the card through the scan, not from memory. */
+    char id[27];
+    CHECK(current_capture_id(id, sizeof(id)), "no capture directory");
+
+    char rel[256];
+    snprintf(rel, sizeof(rel), "%s/%s/journal.seg", CAIRN_DIR_CAPTURE, id);
+
+    cairn_file_t *f = cairn_fs_open(rel, CAIRN_FS_READ);
+    CHECK(f != NULL, "cannot open journal.seg");
+
+    uint64_t size = cairn_fs_size(f);
+    cairn_scan_state_t state = { 0, 0 };
+    cairn_scan_result_t res;
+    cairn_err_t err =
+        cairn_scan_segment_stream(fs_read_for_test, f, size, state, &res,
+                                  capture_health_cb, NULL);
+    cairn_fs_close(f);
+
+    CHECK(err == CAIRN_OK, "journal scan failed: %s", cairn_strerror(err));
+    CHECK(res.frames == 1, "journal holds %zu frames, want 1", res.frames);
+    CHECK(g_seen_health_state == want,
+          "health_state read back as 0x%02x, want 0x%02x",
+          (unsigned)g_seen_health_state, (unsigned)want);
+
+    /* Each bit must be independently recoverable; a flattened severity would
+     * lose all but one. */
+    CHECK((g_seen_health_state & CAIRN_HEALTH_DEGRADED_GNSS) != 0,
+          "DEGRADED_GNSS was lost");
+    CHECK((g_seen_health_state & CAIRN_HEALTH_LOW_POWER) != 0,
+          "LOW_POWER was lost");
+    CHECK((g_seen_health_state & CAIRN_HEALTH_DEGRADED_TIME) != 0,
+          "DEGRADED_TIME was lost");
+
+    /* And the renderer must name them all. */
+    char names[160];
+    cairn_health_state_names(want, names, sizeof(names));
+    CHECK(strstr(names, "DEGRADED_GNSS") != NULL, "renderer omitted DEGRADED_GNSS "
+          "from \"%s\"", names);
+    CHECK(strstr(names, "LOW_POWER") != NULL, "renderer omitted LOW_POWER from "
+          "\"%s\"", names);
+    CHECK(strstr(names, "DEGRADED_TIME") != NULL, "renderer omitted DEGRADED_TIME "
+          "from \"%s\"", names);
+
+    /* An unknown bit must be reported, not masked away. */
+    cairn_health_state_names(0x80, names, sizeof(names));
+    CHECK(strstr(names, "0x80") != NULL,
+          "renderer dropped the reserved bit instead of reporting it: \"%s\"",
+          names);
+
+    return true;
+}
+
 /* ── driver ───────────────────────────────────────────────────────────────── */
 
 typedef struct {
@@ -1406,6 +1515,7 @@ static const row_t ROWS[] = {
     { "preroll",  "flush writes in order, flagged PRETRIP",    row_preroll_flush_marks_pretrip },
     { "preroll",  "a wrapped ring keeps the newest window",    row_preroll_wrap_keeps_newest },
     { "preroll",  "refuses an oversized payload",              row_preroll_refuses_oversized },
+    { "health",   "degraded bitmap round-trips through the card", row_health_bitmap_round_trips },
 };
 
 int main(int argc, char **argv)

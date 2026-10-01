@@ -69,6 +69,34 @@ const char *cairn_record_type_name(uint8_t t);
 #define CAIRN_FLAG_ESTIMATED_UTC (1u << 2)
 #define CAIRN_FLAG_POST_RECOVERY (1u << 3)
 
+/* ── degraded-state bitmap (§4.10) ────────────────────────────────────────── */
+
+/*
+ * DEVICE_HEALTH.health_state is a bitmap, not a severity.
+ *
+ * Degradation is not ordered: a vehicle can be low on battery *and* without a
+ * fix *and* out of card space at once, with different causes and different
+ * fixes. A scalar would force a priority between them and discard the rest —
+ * reporting the battery while losing the fact that position was unavailable
+ * too. Each condition gets its own bit so a reader recovers the whole set.
+ */
+#define CAIRN_HEALTH_OK                0x00u
+#define CAIRN_HEALTH_DEGRADED_GNSS     0x01u
+#define CAIRN_HEALTH_DEGRADED_STORAGE  0x02u
+#define CAIRN_HEALTH_DEGRADED_TIME     0x04u
+#define CAIRN_HEALTH_DEGRADED_NETWORK  0x08u
+#define CAIRN_HEALTH_LOW_POWER         0x10u
+#define CAIRN_HEALTH_RECOVERY_REQUIRED 0x20u
+#define CAIRN_HEALTH_DEGRADED_SENSING  0x40u
+/* 0x80 reserved */
+
+/*
+ * Render a bitmap into `out` as a "|"-separated list of names, for logs. Any
+ * unknown bit is rendered rather than dropped, so a log from newer firmware is
+ * still readable here.
+ */
+void cairn_health_state_names(uint8_t state, char *out, size_t cap);
+
 /* ── results ──────────────────────────────────────────────────────────────── */
 
 typedef enum {
