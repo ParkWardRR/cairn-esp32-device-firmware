@@ -289,6 +289,13 @@ void setup()
         cairn_identity_print_enrolment(probe_device, probe_pub);
     }
 
+    /*
+     * TLS credentials live on the card, so they are loaded once it is mounted
+     * and before anything tries to upload. Failure here is not fatal — it
+     * downgrades the transport and says so.
+     */
+    cairn_sync_load_credentials();
+
     /* The card is confirmed, so a pending image has earned its keep. */
     mark_image_valid_if_pending();
 

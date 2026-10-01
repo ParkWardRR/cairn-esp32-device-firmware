@@ -29,6 +29,30 @@
 #define CAIRN_SERVER_PORT 8080
 #endif
 
+#ifndef CAIRN_SERVER_TLS_PORT
+#define CAIRN_SERVER_TLS_PORT 8443
+#endif
+
+/*
+ * mTLS is active only when a CA is pinned at build time. There is no runtime
+ * switch: a transport that could be downgraded by editing a file on the card
+ * would not be worth verifying.
+ */
+#ifdef CAIRN_SERVER_CA_PEM
+#define CAIRN_TLS_AVAILABLE 1
+#else
+#define CAIRN_TLS_AVAILABLE 0
+#endif
+
+/*
+ * Where the device's own certificate and key live. On the card rather than in
+ * firmware so they can be reissued without a reflash — which matters because
+ * the certificate's CommonName must be the device id, and that is not known
+ * until the hardware has booted once.
+ */
+#define CAIRN_PATH_CLIENT_CERT "/cairn/certs/client.crt"
+#define CAIRN_PATH_CLIENT_KEY  "/cairn/certs/client.key"
+
 /*
  * An all-zero key verifies nothing, so an unconfigured device uploads but never
  * prunes. That is the correct failure direction: a full card loses nothing,

@@ -54,6 +54,19 @@ typedef struct {
     uint64_t bytes_sent;
 } cairn_sync_stats_t;
 
+/*
+ * Load the device's TLS credentials from the card. Call once after the card
+ * mounts and before the first sync.
+ *
+ * Returns true when mTLS is usable: a CA pinned at build time *and* a client
+ * certificate and key present on the card. Returns false — and logs exactly
+ * what is missing — when uploads will fall back to plain HTTP. That fallback is
+ * deliberate rather than fatal: the receipt signature, never the transport, is
+ * what authorizes deleting data.
+ */
+bool cairn_sync_load_credentials(void);
+bool cairn_sync_tls_active(void);
+
 /* Bring up the network. Returns false if no usable link appeared in time. */
 bool cairn_sync_connect(uint32_t timeout_ms);
 void cairn_sync_disconnect(void);

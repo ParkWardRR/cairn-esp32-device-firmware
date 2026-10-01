@@ -4,6 +4,7 @@
 #include <HTTPClient.h>
 #include <SD.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -139,9 +140,134 @@ static void tohex(const uint8_t *b, size_t len, char *out)
     out[len * 2] = '\0';
 }
 
+/* ── transport ────────────────────────────────────────────────────────────── */
+
+/*
+ * mTLS when a CA is pinned at build time and the device's own certificate is on
+ * the card; plain HTTP otherwise.
+ *
+ * The split is deliberate. The CA is compiled in because it is the trust
+ * anchor — a CA read from the card could be swapped by anyone holding the card,
+ * which would make verifying the server pointless. The client certificate and
+ * key are on the card because they are rotatable credentials, and because the
+ * certificate's CommonName must be the device id, which is not known until the
+ * hardware has booted once. Requiring a reflash to issue a certificate would
+ * make that a two-step dance every time.
+ *
+ * Falling back to HTTP is a real fallback, not a silent one: it is logged at
+ * WARN on every sync. The receipt signature, never the transport, is what
+ * authorizes deleting data, so HTTP changes who can read an upload rather than
+ * whether a prune is legitimate.
+ */
+
+static bool  s_tls_ready;
+static char *s_client_cert;
+static char *s_client_key;
+
+#if CAIRN_TLS_AVAILABLE
+static WiFiClientSecure s_tls_client;
+#endif
+
+static char *read_text_file(const char *path)
+{
+    cairn_file_t *f = cairn_fs_open(path, CAIRN_FS_READ);
+    if (f == nullptr) return nullptr;
+
+    size_t len = (size_t)cairn_fs_size(f);
+    if (len == 0 || len > 8192) {
+        cairn_fs_close(f);
+        return nullptr;
+    }
+
+    char *buf = (char *)malloc(len + 1);
+    if (buf == nullptr) {
+        cairn_fs_close(f);
+        return nullptr;
+    }
+
+    size_t got = cairn_fs_read(f, buf, len);
+    cairn_fs_close(f);
+
+    if (got != len) {
+        free(buf);
+        return nullptr;
+    }
+
+    buf[len] = '\0';
+    return buf;
+}
+
+/*
+ * Load the client credentials. Called once after the card mounts; safe to call
+ * again, which is what lets a certificate be dropped on the card and picked up
+ * at the next boot without a firmware change.
+ */
+bool cairn_sync_load_credentials(void)
+{
+#if !CAIRN_TLS_AVAILABLE
+    CAIRN_LOGW(TAG, "no CA pinned at build time, so uploads will use plain "
+                    "HTTP. Define CAIRN_SERVER_CA_PEM in secrets.h to enable "
+                    "mTLS.");
+    return false;
+#else
+    free(s_client_cert);
+    free(s_client_key);
+    s_client_cert = read_text_file(CAIRN_PATH_CLIENT_CERT);
+    s_client_key  = read_text_file(CAIRN_PATH_CLIENT_KEY);
+
+    if (s_client_cert == nullptr || s_client_key == nullptr) {
+        /*
+         * A pinned CA with no client certificate means mTLS was intended but is
+         * not provisioned. Say exactly what is missing and what the CommonName
+         * has to be — the server rejects a certificate whose CN is not the
+         * device id, and that is a confusing failure to debug from a TLS alert.
+         */
+        CAIRN_LOGE(TAG, "a CA is pinned but %s / %s are missing, so mTLS cannot "
+                        "be used and uploads fall back to plain HTTP",
+                   CAIRN_PATH_CLIENT_CERT, CAIRN_PATH_CLIENT_KEY);
+        CAIRN_LOGE(TAG, "issue a certificate whose CommonName is this device's "
+                        "id (printed above as device_id) and copy it to the card");
+        free(s_client_cert);
+        free(s_client_key);
+        s_client_cert = nullptr;
+        s_client_key = nullptr;
+        s_tls_ready = false;
+        return false;
+    }
+
+    s_tls_client.setCACert(CAIRN_SERVER_CA_PEM);
+    s_tls_client.setCertificate(s_client_cert);
+    s_tls_client.setPrivateKey(s_client_key);
+
+    s_tls_ready = true;
+    CAIRN_LOGI(TAG, "mTLS ready: CA pinned in firmware, client credentials from "
+                    "the card");
+    return true;
+#endif
+}
+
+bool cairn_sync_tls_active(void) { return s_tls_ready; }
+
 static void base_url(char *out, size_t cap)
 {
-    snprintf(out, cap, "http://%s:%d", CAIRN_SERVER_HOST, (int)CAIRN_SERVER_PORT);
+    if (s_tls_ready) {
+        snprintf(out, cap, "https://%s:%d", CAIRN_SERVER_HOST,
+                 (int)CAIRN_SERVER_TLS_PORT);
+    } else {
+        snprintf(out, cap, "http://%s:%d", CAIRN_SERVER_HOST,
+                 (int)CAIRN_SERVER_PORT);
+    }
+}
+
+/* Begin a request on whichever transport is active. */
+static bool begin_request(HTTPClient &http, const char *url)
+{
+    http.setTimeout(CAIRN_SYNC_HTTP_TIMEOUT_MS);
+
+#if CAIRN_TLS_AVAILABLE
+    if (s_tls_ready) return http.begin(s_tls_client, url);
+#endif
+    return http.begin(url);
 }
 
 static uint8_t *read_whole_file(const char *path, size_t *len)
@@ -428,8 +554,7 @@ static cairn_sync_result_t upload_bundle(const char *id_text,
     snprintf(url, sizeof(url), "%s/api/v2/bundles/offer", base);
 
     HTTPClient http;
-    http.setTimeout(CAIRN_SYNC_HTTP_TIMEOUT_MS);
-    if (!http.begin(url)) {
+    if (!begin_request(http, url)) {
         free(manifest);
         free(sig);
         return CAIRN_SYNC_NO_NETWORK;
@@ -497,8 +622,7 @@ static cairn_sync_result_t upload_bundle(const char *id_text,
                  bundle_hex, digest_hex);
 
         HTTPClient put;
-        put.setTimeout(CAIRN_SYNC_HTTP_TIMEOUT_MS);
-        if (!put.begin(url)) return CAIRN_SYNC_NO_NETWORK;
+        if (!begin_request(put, url)) return CAIRN_SYNC_NO_NETWORK;
 
         put.addHeader("Content-Type", "application/octet-stream");
 
@@ -539,8 +663,7 @@ static cairn_sync_result_t upload_bundle(const char *id_text,
     snprintf(url, sizeof(url), "%s/api/v2/bundles/%s/commit", base, bundle_hex);
 
     HTTPClient commit;
-    commit.setTimeout(CAIRN_SYNC_HTTP_TIMEOUT_MS);
-    if (!commit.begin(url)) return CAIRN_SYNC_NO_NETWORK;
+    if (!begin_request(commit, url)) return CAIRN_SYNC_NO_NETWORK;
 
     int commit_code = commit.POST((uint8_t *)nullptr, 0);
     if (commit_code != 200) {

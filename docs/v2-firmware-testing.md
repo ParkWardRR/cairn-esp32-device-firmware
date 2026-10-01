@@ -126,6 +126,59 @@ The matrix is mutation-checked rather than merely green: deleting the receipt
 signature check fails two prune rows, and skipping the torn-tail truncation
 fails three recovery rows. A matrix that cannot fail is not a matrix.
 
+## Optional: mTLS
+
+Plain HTTP works and is the default. The receipt signature, never the transport,
+is what authorizes deleting data — so HTTP governs who can *read* an upload
+rather than whether a prune is legitimate. Enable mTLS when you want the former.
+
+Where each piece lives is deliberate:
+
+| Material | Location | Why |
+|---|---|---|
+| Private CA | compiled into firmware | It is the trust anchor. A CA read from the card could be swapped by anyone holding the card, which would make verifying the server pointless. |
+| Client certificate + key | `/cairn/certs/` on the card | Rotatable without a reflash — and the certificate's CommonName must be the device id, which is not known until the hardware has booted once. |
+
+```bash
+# 1. CA + server certificate
+./deploy/make-certs.sh init cairn.example.lan
+
+# 2. Embed the CA in firmware (emits a ready-to-paste C literal)
+./deploy/make-certs.sh ca-literal >> firmware/cairn-v2/include/secrets.h
+
+# 3. Boot the device once, read its device_id, then issue its certificate
+./deploy/make-certs.sh device <32-hex-device-id>
+
+# 4. Copy to the card
+cp certs/device-<id>/client.crt certs/device-<id>/client.key \
+   /Volumes/<card>/cairn/certs/
+
+# 5. Run the server with TLS
+cairn-server -data /var/lib/cairn -addr :8443 \
+  -tls-cert certs/server.pem -tls-key certs/server-key.pem \
+  -tls-client-ca certs/ca.pem
+```
+
+The firmware logs `mTLS ready` once the CA is pinned and both files are on the
+card, and falls back to HTTP with an explicit error naming what is missing
+otherwise. It never silently downgrades.
+
+Two failure modes worth knowing, both verified against the real server:
+
+- **`-sha256` must be on every signing step.** macOS ships LibreSSL, which
+  defaults to SHA-1, and Go rejects SHA-1 signatures: the server refuses the
+  handshake with `insecure algorithm ECDSA-SHA1` and sends the client an
+  `unknown ca` alert — which points at the wrong problem entirely. The script
+  pins the digest; don't remove it.
+- **The server certificate needs a SAN.** The ESP32 TLS stack validates the
+  hostname against subjectAltName and ignores CommonName, so a certificate
+  without one fails to verify for a reason the error does not explain. The
+  script adds it.
+
+Enrolment is still required on top of mTLS. The certificate proves *which*
+device is talking; enrolment is what authorizes it to upload, and the server
+checks that the certificate CN matches the device id inside the signed manifest.
+
 ## Flashing
 
 Flash from the Raspberry Pi, not the Mac — the USB-serial path to this board is
