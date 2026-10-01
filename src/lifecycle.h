@@ -22,6 +22,7 @@
 #include <stdint.h>
 
 #include "cairn_store.h"
+#include "policy.h"
 #include "preroll.h"
 #include "sensors.h"
 
@@ -118,6 +119,18 @@ struct Lifecycle {
     /* Sealed bundles awaiting a receipt, refreshed before each sync attempt.
      * Being offline matters only when something is waiting to go. */
     uint32_t pending_bundles = 0;
+
+    /* The policy in force, written into every bundle so a trip captured under
+     * thresholds nobody remembers stays explainable from the trip. */
+    cairn_policy_t policy;
+
+    /* Whether this bundle has had its POLICY_SNAPSHOT written. Once per bundle,
+     * at confirmation — writing it per trip-resume would bloat the journal
+     * without adding information. */
+    bool policy_written = false;
+
+    cairn_dynamics_t dynamics = CAIRN_DYN_IDLE;
+    uint16_t last_speed_cmps = CAIRN_U16_UNKNOWN;
 };
 
 bool lifecycle_begin(Lifecycle *lc);

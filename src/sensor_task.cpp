@@ -12,6 +12,12 @@ static SensorStatus  *s_status;
 static volatile uint32_t s_dropped;
 static volatile bool  s_retry_requested;
 
+/* Current periods, set by the controller. Initialized to the policy defaults so
+ * the first pass before any update samples at nominal rather than at zero. */
+static volatile uint16_t s_gnss_period_ms = CAIRN_GNSS_PERIOD_MS;
+static volatile uint16_t s_imu_window_ms  = CAIRN_IMU_WINDOW_MS;
+static volatile uint16_t s_obd_period_ms  = CAIRN_OBD_PERIOD_MS;
+
 /*
  * 20 ms, giving a 50 Hz accelerometer rate. Ample for RMS and peak over a
  * one-second window, and now independent of whatever the controller is doing.
@@ -48,7 +54,7 @@ static void sensor_task(void *arg)
 
     uint32_t next_gnss   = millis();
     uint32_t next_obd    = millis();
-    uint32_t next_imu    = millis() + CAIRN_IMU_WINDOW_MS;
+    uint32_t next_imu    = millis() + s_imu_window_ms;
     uint32_t next_health = millis();
     uint32_t next_motion = millis();
     uint32_t next_retry  = millis() + 60000;
@@ -74,17 +80,20 @@ static void sensor_task(void *arg)
         }
 
         if ((int32_t)(now - next_imu) >= 0) {
-            next_imu = now + CAIRN_IMU_WINDOW_MS;
+            uint16_t window = s_imu_window_ms;
+            next_imu = now + window;
 
             fact_t f;
             memset(&f, 0, sizeof(f));
             f.kind = FACT_IMU_SUMMARY;
             f.monotonic_ms = now;
-            if (sensors_imu_summarize(CAIRN_IMU_WINDOW_MS, &f.data.imu)) post(&f);
+            /* The window length is passed through so the summary records the
+             * period it actually covers, not the one configured at boot. */
+            if (sensors_imu_summarize(window, &f.data.imu)) post(&f);
         }
 
         if ((int32_t)(now - next_gnss) >= 0) {
-            next_gnss = now + CAIRN_GNSS_PERIOD_MS;
+            next_gnss = now + s_gnss_period_ms;
 
             fact_t f;
             memset(&f, 0, sizeof(f));
@@ -119,7 +128,7 @@ static void sensor_task(void *arg)
         }
 
         if ((int32_t)(now - next_obd) >= 0) {
-            next_obd = now + CAIRN_OBD_PERIOD_MS;
+            next_obd = now + s_obd_period_ms;
 
             fact_t f;
             memset(&f, 0, sizeof(f));
@@ -208,3 +217,10 @@ bool sensor_task_poll(fact_t *out)
 uint32_t sensor_task_dropped(void) { return s_dropped; }
 
 void sensor_task_request_retry(void) { s_retry_requested = true; }
+
+void sensor_task_set_rates(const cairn_rates_t *r)
+{
+    s_gnss_period_ms = r->gnss_period_ms;
+    s_imu_window_ms  = r->imu_window_ms;
+    s_obd_period_ms  = r->obd_period_ms;
+}

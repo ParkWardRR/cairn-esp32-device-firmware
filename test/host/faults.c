@@ -33,6 +33,7 @@
 #include "cairn_platform.h"
 #include "cairn_prune.h"
 #include "cairn_store.h"
+#include "policy.h"
 #include "preroll.h"
 
 /* From platform_host.c / cairn_kv_posix.c. */
@@ -1486,6 +1487,143 @@ static bool row_health_bitmap_round_trips(void)
     return true;
 }
 
+
+/* ── policy ───────────────────────────────────────────────────────────────── */
+
+/*
+ * The invariant that makes adaptive sampling safe: while a trip is active, no
+ * rate may be *slower* than nominal.
+ *
+ * A reader is entitled to assume at least one record per nominal period during
+ * a trip, so a longer gap is a real gap and recorded as one. If adaptation
+ * could slow down, that floor would silently depend on what the device decided
+ * at the time, and every gap would become ambiguous.
+ */
+static bool row_adaptive_never_slower_during_trip(void)
+{
+    cairn_policy_t p;
+    cairn_policy_defaults(&p);
+    CHECK(p.adaptive_sampling, "adaptive sampling is off, so this row proves nothing");
+
+    const cairn_dynamics_t levels[] = {
+        CAIRN_DYN_IDLE, CAIRN_DYN_CRUISE, CAIRN_DYN_ACTIVE, CAIRN_DYN_EVENT,
+    };
+
+    for (size_t i = 0; i < sizeof(levels) / sizeof(levels[0]); i++) {
+        cairn_rates_t r;
+        cairn_policy_rates(&p, levels[i], true, &r);
+
+        CHECK(r.gnss_period_ms <= p.gnss_period_ms,
+              "%s gives a GNSS period of %u ms, slower than the nominal %u ms",
+              cairn_dynamics_name(levels[i]), (unsigned)r.gnss_period_ms,
+              (unsigned)p.gnss_period_ms);
+        CHECK(r.imu_window_ms <= p.imu_window_ms,
+              "%s gives an IMU window of %u ms, longer than the nominal %u ms",
+              cairn_dynamics_name(levels[i]), (unsigned)r.imu_window_ms,
+              (unsigned)p.imu_window_ms);
+        CHECK(r.obd_period_ms <= p.obd_period_ms,
+              "%s gives an OBD period of %u ms, slower than the nominal %u ms",
+              cairn_dynamics_name(levels[i]), (unsigned)r.obd_period_ms,
+              (unsigned)p.obd_period_ms);
+    }
+
+    /* Idle is the one case permitted to slow down, and only with no trip: those
+     * records go to the pre-roll ring, where the guarantee is a window of
+     * history rather than a rate. */
+    cairn_rates_t idle;
+    cairn_policy_rates(&p, CAIRN_DYN_IDLE, false, &idle);
+    CHECK(idle.gnss_period_ms > p.gnss_period_ms,
+          "idle with no trip should sample slower to save power, got %u ms",
+          (unsigned)idle.gnss_period_ms);
+
+    /* An event must actually resolve finer than cruise, or adaptation is inert. */
+    cairn_rates_t cruise, event;
+    cairn_policy_rates(&p, CAIRN_DYN_CRUISE, true, &cruise);
+    cairn_policy_rates(&p, CAIRN_DYN_EVENT, true, &event);
+    CHECK(event.gnss_period_ms < cruise.gnss_period_ms,
+          "an event samples GNSS at %u ms, no faster than cruise at %u ms",
+          (unsigned)event.gnss_period_ms, (unsigned)cruise.gnss_period_ms);
+    CHECK(event.imu_window_ms < cruise.imu_window_ms,
+          "an event summarizes the IMU over %u ms, no shorter than cruise at %u ms",
+          (unsigned)event.imu_window_ms, (unsigned)cruise.imu_window_ms);
+
+    /* Disabling adaptation must give exactly nominal, so the flag in the
+     * snapshot means what it says. */
+    cairn_policy_t fixed = p;
+    fixed.adaptive_sampling = false;
+    cairn_rates_t r;
+    cairn_policy_rates(&fixed, CAIRN_DYN_EVENT, true, &r);
+    CHECK(r.gnss_period_ms == fixed.gnss_period_ms &&
+          r.imu_window_ms == fixed.imu_window_ms &&
+          r.obd_period_ms == fixed.obd_period_ms,
+          "adaptation is off but rates still moved");
+
+    return true;
+}
+
+/*
+ * Classification responds to evidence, and a parked vehicle is never anything
+ * but idle regardless of what the accelerometer reads — a door slam must not
+ * look like a manoeuvre.
+ */
+static bool row_dynamics_classification(void)
+{
+    cairn_policy_t p;
+    cairn_policy_defaults(&p);
+
+    CHECK(cairn_policy_classify(&p, 5000, 0, 0, false) == CAIRN_DYN_IDLE,
+          "a violent jolt with no trip underway was not classified IDLE");
+
+    CHECK(cairn_policy_classify(&p, (uint16_t)(p.motion_accel_rms_mg * 4), 1000,
+                                0, true) == CAIRN_DYN_EVENT,
+          "a large acceleration was not classified EVENT");
+
+    CHECK(cairn_policy_classify(&p, 10, 1000, 900, true) == CAIRN_DYN_EVENT,
+          "a hard speed change was not classified EVENT — the accelerometer RMS "
+          "smooths braking away, which is why speed delta is checked too");
+
+    CHECK(cairn_policy_classify(&p, 10, 1000, 0, true) == CAIRN_DYN_CRUISE,
+          "steady motion was not classified CRUISE");
+
+    return true;
+}
+
+/*
+ * The snapshot encodes deterministically and round-trips, because grouping
+ * bundles by policy depends on identical policy producing identical bytes.
+ */
+static bool row_policy_snapshot_deterministic(void)
+{
+    cairn_policy_t p;
+    cairn_policy_defaults(&p);
+
+    uint8_t a[256], b[256];
+    size_t  la = cairn_policy_encode(&p, a, sizeof(a));
+    size_t  lb = cairn_policy_encode(&p, b, sizeof(b));
+
+    CHECK(la > 0, "policy would not encode");
+    CHECK(la == lb && memcmp(a, b, la) == 0,
+          "encoding the same policy twice gave different bytes");
+
+    /* A changed threshold must change the bytes, or the snapshot could not
+     * distinguish policies. */
+    cairn_policy_t q = p;
+    q.start_dwell_ms = p.start_dwell_ms + 1;
+    uint8_t c[256];
+    size_t  lc = cairn_policy_encode(&q, c, sizeof(c));
+    CHECK(lc > 0, "modified policy would not encode");
+    CHECK(!(lc == la && memcmp(a, c, la) == 0),
+          "changing start_dwell_ms did not change the encoding");
+
+    /* A buffer too small must fail rather than emit a truncated map that would
+     * decode as a different policy. */
+    uint8_t tiny[8];
+    CHECK(cairn_policy_encode(&p, tiny, sizeof(tiny)) == 0,
+          "a short buffer produced output instead of failing");
+
+    return true;
+}
+
 /* ── driver ───────────────────────────────────────────────────────────────── */
 
 typedef struct {
@@ -1516,6 +1654,9 @@ static const row_t ROWS[] = {
     { "preroll",  "a wrapped ring keeps the newest window",    row_preroll_wrap_keeps_newest },
     { "preroll",  "refuses an oversized payload",              row_preroll_refuses_oversized },
     { "health",   "degraded bitmap round-trips through the card", row_health_bitmap_round_trips },
+    { "policy",   "adaptive rates are never slower during a trip", row_adaptive_never_slower_during_trip },
+    { "policy",   "dynamics classification responds to evidence", row_dynamics_classification },
+    { "policy",   "snapshot encoding is deterministic",         row_policy_snapshot_deterministic },
 };
 
 int main(int argc, char **argv)

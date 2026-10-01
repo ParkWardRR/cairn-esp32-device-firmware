@@ -32,7 +32,7 @@ FS_SRC     := $(wildcard $(FS_DIR)/*.c)
 
 # Only the portable application sources; the rest of src/ is Arduino C++.
 SRC_DIR    := ../../src
-APP_SRC    := $(SRC_DIR)/preroll.c
+APP_SRC    := $(SRC_DIR)/preroll.c $(SRC_DIR)/policy.c
 
 CONFORMANCE_SRC := $(FORMAT_SRC) minijson.c conformance.c
 FAULTS_SRC      := $(FORMAT_SRC) $(STORE_SRC) $(FS_SRC) $(APP_SRC) \

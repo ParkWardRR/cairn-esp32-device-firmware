@@ -13,6 +13,7 @@
 #include <stdint.h>
 
 #include "facts.h"
+#include "policy.h"
 #include "sensors.h"
 
 /*
@@ -33,5 +34,19 @@ uint32_t sensor_task_dropped(void);
 /* Ask the task to re-attempt subsystems that failed at boot. GNSS in particular
  * often appears only once the vehicle has been powered for a while. */
 void sensor_task_request_retry(void);
+
+/*
+ * Set the sampling periods.
+ *
+ * The controller decides these, because classifying what the vehicle is doing
+ * needs the whole picture — speed from whichever source answered, the trip
+ * state, the policy — and the sensing task deliberately knows none of that. It
+ * samples at the rate it is told.
+ *
+ * Written without a lock: three independent 16-bit periods, where a torn update
+ * costs one interval at a stale rate. A mutex on the sampling path would be a
+ * worse trade than that.
+ */
+void sensor_task_set_rates(const cairn_rates_t *r);
 
 #endif /* CAIRN_SENSOR_TASK_H */

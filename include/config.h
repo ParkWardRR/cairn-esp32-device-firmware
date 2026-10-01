@@ -77,7 +77,15 @@
  */
 #define CAIRN_POLICY_VERSION 1
 
-/* Sampling cadences, milliseconds. */
+/*
+ * Event-adaptive sampling (§4.9.1). The nominal cadences below become upper
+ * bounds during a trip rather than fixed rates: faster when the vehicle is
+ * doing something worth resolving, never slower. Adaptation can only add
+ * detail, so a reader's floor of one record per nominal period still holds.
+ */
+#define CAIRN_ADAPTIVE_SAMPLING 1
+
+/* Nominal sampling cadences, milliseconds. */
 #define CAIRN_GNSS_PERIOD_MS      1000
 #define CAIRN_IMU_WINDOW_MS       1000
 #define CAIRN_OBD_PERIOD_MS       2000

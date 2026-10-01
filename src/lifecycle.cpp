@@ -10,6 +10,7 @@
 #include "cairn_fs.h"
 #include "cairn_sync.h"
 #include "config.h"
+#include "policy.h"
 #include "preroll.h"
 #include "sensor_task.h"
 
@@ -57,6 +58,36 @@ static uint16_t frame_flags(const Lifecycle *lc)
     if (!lc->have_utc_basis) flags |= CAIRN_FLAG_ESTIMATED_UTC;
 
     return flags;
+}
+
+/*
+ * Write the active policy into the bundle, once, at confirmation.
+ *
+ * Spec §4.9. A version number identifies a policy but does not describe one, so
+ * recording the values makes a trip captured under thresholds nobody remembers
+ * explainable from the trip itself.
+ */
+static void emit_policy_snapshot(Lifecycle *lc)
+{
+    if (lc->policy_written) return;
+
+    uint8_t payload[256];
+    size_t  len = cairn_policy_encode(&lc->policy, payload, sizeof(payload));
+    if (len == 0) {
+        CAIRN_LOGE(TAG, "policy snapshot would not encode; the bundle will not "
+                        "describe its own thresholds");
+        return;
+    }
+
+    if (cairn_capture_append(&lc->cap, CAIRN_CHAIN_CAPTURE,
+                             CAIRN_REC_POLICY_SNAPSHOT, 1, frame_flags(lc),
+                             millis(), payload, len)) {
+        lc->policy_written = true;
+        CAIRN_LOGI(TAG, "policy v%u recorded in the bundle (%u bytes, adaptive "
+                        "sampling %s)",
+                   (unsigned)lc->policy.policy_version, (unsigned)len,
+                   lc->policy.adaptive_sampling ? "on" : "off");
+    }
 }
 
 /*
@@ -169,6 +200,7 @@ bool lifecycle_begin(Lifecycle *lc)
         return false;
     }
 
+    cairn_policy_defaults(&lc->policy);
     cairn_preroll_reset(&lc->preroll);
 
     /*
@@ -501,6 +533,7 @@ static void seal_and_reopen(Lifecycle *lc, uint8_t reason)
     }
     lc->bundle = BundleState::Open;
     lc->have_utc_basis = false;
+    lc->policy_written = false; /* a new bundle must describe its own policy */
 
     emit_transition(lc, CAIRN_REGION_BUNDLE, (uint8_t)BundleState::Sealed,
                     (uint8_t)BundleState::Open, 0, 0);
@@ -582,6 +615,46 @@ void lifecycle_tick(Lifecycle *lc)
 
     update_motion_scores(lc);
 
+    /*
+     * Choose sampling rates from what the vehicle appears to be doing. The
+     * controller owns this because classifying it needs the whole picture —
+     * speed from whichever source answered, the trip state, the policy — and
+     * the sensing task knows none of that by design.
+     */
+    {
+        bool trip_active = (lc->capture == CaptureState::Active ||
+                            lc->capture == CaptureState::Trailing);
+
+        uint16_t speed = CAIRN_U16_UNKNOWN;
+        if (lc->have_recent_obd && lc->last_obd.speed_kph != CAIRN_I16_UNKNOWN) {
+            /* km/h to cm/s. OBD speed is preferred over GNSS when the ECU
+             * answers: it is the vehicle's own measurement and does not lag. */
+            speed = (uint16_t)((int32_t)lc->last_obd.speed_kph * 1000 / 36);
+        } else if (lc->have_recent_gnss) {
+            speed = lc->last_gnss.speed_cmps;
+        }
+
+        int32_t delta = 0;
+        if (speed != CAIRN_U16_UNKNOWN &&
+            lc->last_speed_cmps != CAIRN_U16_UNKNOWN) {
+            delta = (int32_t)speed - (int32_t)lc->last_speed_cmps;
+        }
+        lc->last_speed_cmps = speed;
+
+        cairn_dynamics_t d = cairn_policy_classify(&lc->policy,
+                                                   lc->last_accel_rms_mg, speed,
+                                                   delta, trip_active);
+        if (d != lc->dynamics) {
+            CAIRN_LOGD(TAG, "dynamics %s -> %s", cairn_dynamics_name(lc->dynamics),
+                       cairn_dynamics_name(d));
+            lc->dynamics = d;
+        }
+
+        cairn_rates_t rates;
+        cairn_policy_rates(&lc->policy, d, trip_active, &rates);
+        sensor_task_set_rates(&rates);
+    }
+
     /* ── capture region ───────────────────────────────────────────────────── */
 
     switch (lc->capture) {
@@ -607,6 +680,11 @@ void lifecycle_tick(Lifecycle *lc)
              * and so their PRETRIP flag is the only thing marking them apart.
              */
             set_capture_state(lc, CaptureState::Active, 1, 0);
+
+            /* Policy first, then the pre-roll: the snapshot describes the
+             * thresholds that admitted those very records, so it belongs ahead
+             * of them in the chain. */
+            emit_policy_snapshot(lc);
             cairn_preroll_flush(&lc->preroll, &lc->cap);
         }
         break;
