@@ -163,6 +163,38 @@ bool cairn_identity_load(uint8_t device_id[16], uint8_t seed[32],
     return true;
 }
 
+static void hexify(const uint8_t *b, size_t len, char *out)
+{
+    static const char *d = "0123456789abcdef";
+    for (size_t i = 0; i < len; i++) {
+        out[i * 2]     = d[b[i] >> 4];
+        out[i * 2 + 1] = d[b[i] & 0x0f];
+    }
+    out[len * 2] = '\0';
+}
+
+void cairn_identity_print_enrolment(const uint8_t device_id[16],
+                                    const uint8_t pub[32])
+{
+    char id_hex[33], pub_hex[65];
+
+    hexify(device_id, 16, id_hex);
+    hexify(pub, 32, pub_hex);
+
+    CAIRN_LOGI(TAG, "device_id  %s", id_hex);
+    CAIRN_LOGI(TAG, "public_key %s", pub_hex);
+
+    /*
+     * Printed as a runnable command rather than as two values to assemble.
+     * Transcribing 96 hex characters off a serial console is exactly the step
+     * where a bench session loses twenty minutes.
+     */
+    CAIRN_LOGI(TAG, "to enrol:  cairn-server -enroll %s -enroll-key %s "
+                    "-enroll-name car", id_hex, pub_hex);
+    CAIRN_LOGI(TAG, "until enrolled, uploads are refused with 403 and bundles "
+                    "stay on the card");
+}
+
 void cairn_new_boot_id(uint8_t boot_id[16])
 {
     cairn_random(boot_id, 16);

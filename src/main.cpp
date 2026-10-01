@@ -276,10 +276,17 @@ void setup()
      */
     uint8_t  probe_device[16], probe_seed[32], probe_pub[32];
     uint32_t boot_count = 0;
-    if (cairn_identity_load(probe_device, probe_seed, probe_pub, &boot_count)) {
-        cairn_log_attach_sd(boot_count);
-    } else {
-        cairn_log_attach_sd(0);
+    bool     have_identity =
+        cairn_identity_load(probe_device, probe_seed, probe_pub, &boot_count);
+
+    cairn_log_attach_sd(have_identity ? boot_count : 0);
+
+    /*
+     * After the SD sink is attached, so the enrolment command lands in the log
+     * file too — not only on a console that may not be connected.
+     */
+    if (have_identity) {
+        cairn_identity_print_enrolment(probe_device, probe_pub);
     }
 
     /* The card is confirmed, so a pending image has earned its keep. */

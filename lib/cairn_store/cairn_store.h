@@ -136,6 +136,19 @@ bool cairn_ulid_decode(const char *s, uint8_t out[16]);
 bool cairn_identity_load(uint8_t device_id[16], uint8_t seed[32],
                          uint8_t pub[32], uint32_t *boot_count);
 
+/*
+ * Log the device id and public key in full, plus the exact command that enrols
+ * them.
+ *
+ * The device generates its own signing key on first boot, so it cannot be
+ * enrolled in advance — the server has to be told a key that does not exist
+ * until the hardware has run once. Printing the full values here is what closes
+ * that loop; a truncated prefix in a log line is not something an operator can
+ * enrol.
+ */
+void cairn_identity_print_enrolment(const uint8_t device_id[16],
+                                    const uint8_t pub[32]);
+
 /* A fresh boot id from the hardware RNG. Ordering truth is per-boot. */
 void cairn_new_boot_id(uint8_t boot_id[16]);
 

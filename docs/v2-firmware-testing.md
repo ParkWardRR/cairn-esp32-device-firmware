@@ -31,10 +31,17 @@ $EDITOR include/secrets.h
 `include/secrets.h` is gitignored. The repository is public, so keep real
 hostnames and keys out of everything else.
 
-The pinned receipt key matters for pruning. Get it from the server:
+The pinned receipt key matters for pruning. Get it from the server — this
+creates the key on first run and prints the same value every time after:
 
 ```bash
-cairn-server -print-receipt-key
+cairn-server -data /var/lib/cairn -print-receipt-key
+```
+
+The 64-hex key goes to stdout and the diagnostics to stderr, so it pipes:
+
+```bash
+cairn-server -data /var/lib/cairn -print-receipt-key 2>/dev/null
 ```
 
 If you leave the key as the all-zero placeholder, the device will still capture
@@ -42,7 +49,45 @@ and still upload — it just will never delete anything. That is the intended
 failure direction: a full card loses nothing, a wrongly authorized prune loses a
 trip permanently.
 
-### 2. Run the host suites first
+### 2. Expect to enrol *after* the first boot, not before
+
+This is the ordering that catches people, including the order these steps are
+written in.
+
+The device generates its own Ed25519 signing key on first boot and never
+reveals the private half. So it cannot be enrolled in advance — the server has
+to be told a public key that does not exist until the hardware has run once.
+
+The sequence is therefore:
+
+1. Flash and boot the device.
+2. Read the enrolment line it prints (serial, or `/cairn/logs/boot-*.log`):
+
+   ```
+    STORE INFO  device_id  7a3f...
+    STORE INFO  public_key 82d7...
+    STORE INFO  to enrol:  cairn-server -enroll <32 hex> -enroll-key <64 hex> -enroll-name car
+   ```
+
+3. Run that command on the server. It is printed as a runnable line on purpose:
+   transcribing 96 hex characters off a console is exactly where a bench session
+   loses twenty minutes.
+4. `cairn-server -list-devices` to confirm.
+
+Enrolment takes effect without restarting the server — the registry reloads on
+change, so revoking a stolen unit does not need a maintenance window either.
+
+**Until the device is enrolled, uploads are refused with HTTP 403 and bundles
+stay on the card.** That is correct behaviour and it is non-destructive: capture
+keeps working, and the first sync after enrolment drains the backlog. If you see
+403 in the log, this step is what is missing — not the network.
+
+If the key store is ever wiped (NVS erase, `esptool erase_flash`), the device
+generates a *new* key and must be re-enrolled. The device id is derived from the
+efuse MAC, so that part stays stable; only the key changes. The log says so
+loudly when it happens.
+
+### 3. Run the host suites
 
 A few seconds, and the cheapest check available:
 
