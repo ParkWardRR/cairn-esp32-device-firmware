@@ -13,7 +13,7 @@ pinned key. It also writes a verbose log to the card, which is the main thing
 you will read on the bench.
 
 **This firmware has never run on hardware.** It compiles for the target, and its
-format implementation passes all 20 committed conformance vectors on the host —
+format implementation passes all 25 committed conformance vectors on the host —
 byte-for-byte against the Go reference, including signatures. That rules out a
 large class of bugs but not driver or timing problems. Treat the first boot as
 the first real test.
@@ -98,8 +98,8 @@ make -C firmware/cairn-v2/test/host
 Expect both:
 
 ```
-format v2 conformance (C): 20/20 passed
-firmware storage matrix: 20/20 passed
+format v2 conformance (C): 25/25 passed
+firmware storage matrix: 28/28 passed
 ```
 
 If the first fails, do not flash — the device would write bundles the server

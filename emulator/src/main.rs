@@ -220,10 +220,11 @@ fn run_conformance(vectors: &PathBuf, verbose: bool) {
         }
     };
 
-    if verbose || !report.ok() {
-        for name in &report.skipped {
-            eprintln!("  skip  {name}");
-        }
+    // Always listed, not only when verbose. A skipped vector is not a passing
+    // vector, and hiding the difference on a clean run is how a gap goes
+    // unnoticed.
+    for name in &report.skipped {
+        eprintln!("  skip  {name}");
     }
     for failure in &report.failures {
         eprintln!("  FAIL  {failure}");
@@ -231,10 +232,20 @@ fn run_conformance(vectors: &PathBuf, verbose: bool) {
 
     eprintln!();
     if report.ok() {
-        eprintln!(
-            "conformance: {}/{} vectors pass — this implementation agrees with the specification",
-            report.passed, report.checked
-        );
+        if report.skipped.is_empty() {
+            eprintln!(
+                "conformance: {}/{} vectors pass — this implementation agrees with the specification",
+                report.passed, report.checked
+            );
+        } else {
+            eprintln!(
+                "conformance: {}/{} vectors pass, {} skipped — this implementation \
+                 agrees with the specification on everything it implements",
+                report.passed,
+                report.checked,
+                report.skipped.len()
+            );
+        }
         std::process::exit(0);
     }
 

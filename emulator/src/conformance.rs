@@ -175,7 +175,14 @@ pub fn run(dir: &Path) -> std::io::Result<Report> {
         } else if exp.merkle.is_some() {
             check_merkle(&vdir, &exp)
         } else {
-            report.skipped.push(exp.name.clone());
+            // Named with a reason. A vector nobody runs looks exactly like a
+            // vector that passes, so a silent skip is the same drift the
+            // committed vectors exist to prevent.
+            report.skipped.push(format!(
+                "{} — this implementation decodes frames, manifests and \
+                 receipts, not record payloads or OTA descriptors",
+                exp.name
+            ));
             report.checked -= 1;
             continue;
         };

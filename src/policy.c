@@ -97,6 +97,50 @@ size_t cairn_policy_encode(const cairn_policy_t *p, uint8_t *out, size_t cap)
     return e.len;
 }
 
+bool cairn_policy_decode(const uint8_t *buf, size_t len, cairn_policy_t *out)
+{
+    cairn_cbor_dec_t d;
+    cairn_cbor_dec_init(&d, buf, len);
+
+    size_t n = 0;
+    if (cairn_cbor_map_header(&d, &n) != CAIRN_OK) return false;
+    if (n != POLICY_FIELD_COUNT) return false;
+
+    memset(out, 0, sizeof(*out));
+
+    for (size_t i = 0; i < n; i++) {
+        uint64_t key = 0, v = 0;
+        if (cairn_cbor_uint_read(&d, &key) != CAIRN_OK) return false;
+        if (cairn_cbor_uint_read(&d, &v) != CAIRN_OK) return false;
+
+        switch (key) {
+        case KEY_POLICY_VERSION:   out->policy_version = (uint8_t)v; break;
+        case KEY_GNSS_PERIOD:      out->gnss_period_ms = (uint16_t)v; break;
+        case KEY_IMU_WINDOW:       out->imu_window_ms = (uint16_t)v; break;
+        case KEY_OBD_PERIOD:       out->obd_period_ms = (uint16_t)v; break;
+        case KEY_HEALTH_PERIOD:    out->health_period_ms = (uint32_t)v; break;
+        case KEY_START_SCORE:      out->start_score_threshold_e2 = (uint16_t)v; break;
+        case KEY_STOP_SCORE:       out->stop_score_threshold_e2 = (uint16_t)v; break;
+        case KEY_START_DWELL:      out->start_dwell_ms = (uint32_t)v; break;
+        case KEY_STOP_DWELL:       out->stop_dwell_ms = (uint32_t)v; break;
+        case KEY_MOTION_ACCEL:     out->motion_accel_rms_mg = (uint16_t)v; break;
+        case KEY_MOTION_SPEED:     out->motion_speed_cmps = (uint16_t)v; break;
+        case KEY_PREROLL_WINDOW:   out->preroll_window_ms = (uint32_t)v; break;
+        case KEY_PREROLL_SAMPLES:  out->preroll_ring_samples = (uint16_t)v; break;
+        case KEY_SEGMENT_MAX:      out->segment_max_bytes = (uint32_t)v; break;
+        case KEY_ADAPTIVE:         out->adaptive_sampling = (v != 0); break;
+        default:
+            /* Newer firmware signed this policy. Refuse rather than report a
+             * partial one as complete. */
+            return false;
+        }
+    }
+
+    /* Trailing bytes carry something unaccounted for — the same hazard as an
+     * unknown key. */
+    return d.pos == len;
+}
+
 /* ── adaptive sampling ────────────────────────────────────────────────────── */
 
 const char *cairn_dynamics_name(cairn_dynamics_t d)

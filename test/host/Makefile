@@ -38,7 +38,8 @@ OTA_DIR    := ../../lib/cairn_ota
 SRC_DIR    := ../../src
 APP_SRC    := $(SRC_DIR)/preroll.c $(SRC_DIR)/policy.c $(OTA_DIR)/cairn_ota.c
 
-CONFORMANCE_SRC := $(FORMAT_SRC) minijson.c conformance.c
+# The conformance runner needs the policy codec, which lives in src/.
+CONFORMANCE_SRC := $(FORMAT_SRC) $(SRC_DIR)/policy.c minijson.c conformance.c
 FAULTS_SRC      := $(FORMAT_SRC) $(STORE_SRC) $(FS_SRC) $(APP_SRC) \
                    log_host.c platform_host.c faults.c
 

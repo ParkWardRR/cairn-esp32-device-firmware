@@ -26,6 +26,7 @@
 
 #include "cairn_format.h"
 #include "minijson.h"
+#include "policy.h"
 
 /* The fixed seeds used by server/cmd/mkvectors. Deterministic vectors matter
  * more than unpredictable keys for a test corpus. */
@@ -79,6 +80,12 @@ static uint8_t *read_file(const char *path, size_t *len)
     buf[got] = '\0'; /* so the same loader can serve JSON text */
     *len = got;
     return buf;
+}
+
+static uint32_t get_u32_le(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
+           ((uint32_t)p[3] << 24);
 }
 
 static int hex_nibble(char c)
@@ -710,6 +717,385 @@ static bool check_merkle(const char *dir, const char *vector,
     return true;
 }
 
+
+/* ── policy snapshot ──────────────────────────────────────────────────────── */
+
+/*
+ * The committed payload must decode to the expected values and re-encode to
+ * exactly the committed bytes.
+ *
+ * The re-encode is the point: two bundles captured under identical policy must
+ * have byte-identical snapshots, which is what lets a reader group them without
+ * trusting the version number.
+ */
+static bool check_policy(const char *dir, const char *vector,
+                         const mj_doc_t *doc, const mj_node_t *exp)
+{
+    char path[512];
+    snprintf(path, sizeof(path), "%s/policy.cbor", dir);
+
+    size_t len;
+    uint8_t *raw = read_file(path, &len);
+    if (raw == NULL) {
+        record_failure(vector, "cannot read policy.cbor");
+        return false;
+    }
+
+    cairn_policy_t p;
+    if (!cairn_policy_decode(raw, len, &p)) {
+        record_failure(vector, "policy.cbor does not decode");
+        free(raw);
+        return false;
+    }
+
+    struct {
+        const char *key;
+        uint64_t    got;
+    } fields[] = {
+        { "policy_version",           p.policy_version },
+        { "gnss_period_ms",           p.gnss_period_ms },
+        { "imu_window_ms",            p.imu_window_ms },
+        { "obd_period_ms",            p.obd_period_ms },
+        { "health_period_ms",         p.health_period_ms },
+        { "start_score_threshold_e2", p.start_score_threshold_e2 },
+        { "stop_score_threshold_e2",  p.stop_score_threshold_e2 },
+        { "start_dwell_ms",           p.start_dwell_ms },
+        { "stop_dwell_ms",            p.stop_dwell_ms },
+        { "motion_accel_rms_mg",      p.motion_accel_rms_mg },
+        { "motion_speed_cmps",        p.motion_speed_cmps },
+        { "preroll_window_ms",        p.preroll_window_ms },
+        { "preroll_ring_samples",     p.preroll_ring_samples },
+        { "segment_max_bytes",        p.segment_max_bytes },
+    };
+
+    bool ok = true;
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
+        uint64_t want = (uint64_t)mj_num_or(mj_get(doc, exp, fields[i].key), -1);
+        if (fields[i].got != want) {
+            record_failure(vector, "%s = %llu, want %llu", fields[i].key,
+                           (unsigned long long)fields[i].got,
+                           (unsigned long long)want);
+            ok = false;
+        }
+    }
+
+    bool want_adaptive = mj_bool_or(mj_get(doc, exp, "adaptive_sampling"), false);
+    if (p.adaptive_sampling != want_adaptive) {
+        record_failure(vector, "adaptive_sampling = %d, want %d",
+                       (int)p.adaptive_sampling, (int)want_adaptive);
+        ok = false;
+    }
+
+    uint8_t reencoded[512];
+    size_t  rlen = cairn_policy_encode(&p, reencoded, sizeof(reencoded));
+
+    if (rlen != len) {
+        record_failure(vector, "re-encoding produced %zu bytes, want the "
+                               "committed %zu", rlen, len);
+        ok = false;
+    } else if (memcmp(reencoded, raw, len) != 0) {
+        /* Same length, different bytes — report where, since that is the only
+         * useful thing to know and the length alone would read as a
+         * contradiction. */
+        size_t at = 0;
+        while (at < len && reencoded[at] == raw[at]) at++;
+        record_failure(vector, "re-encoding differs from the committed bytes at "
+                               "offset %zu (got 0x%02x, want 0x%02x) — this "
+                               "implementation does not produce byte-identical "
+                               "output", at, (unsigned)reencoded[at],
+                       (unsigned)raw[at]);
+        ok = false;
+    }
+
+    free(raw);
+    return ok;
+}
+
+/* ── trip events ──────────────────────────────────────────────────────────── */
+
+static size_t  g_event_count;
+static uint8_t g_event_types[32];
+static uint8_t g_event_detail_len[32];
+static int32_t g_event_lat[32];
+static int32_t g_event_lon[32];
+static char    g_event_detail[32][64];
+
+static bool event_collect_cb(const cairn_frame_t *f, void *user)
+{
+    (void)user;
+
+    if (f->record_type != CAIRN_REC_TRIP_EVENT) return true;
+    if (g_event_count >= 32 || f->payload_len < 12) return true;
+
+    size_t i = g_event_count++;
+    g_event_types[i]      = f->payload[0];
+    g_event_detail_len[i] = f->payload[1];
+    g_event_lat[i] = (int32_t)get_u32_le(f->payload + 4);
+    g_event_lon[i] = (int32_t)get_u32_le(f->payload + 8);
+
+    size_t dlen = f->payload[1];
+    if (dlen > sizeof(g_event_detail[0]) - 1) dlen = sizeof(g_event_detail[0]) - 1;
+    memcpy(g_event_detail[i], f->payload + 12, dlen);
+    g_event_detail[i][dlen] = '\0';
+
+    return true;
+}
+
+static bool check_events(const char *dir, const char *vector,
+                         const mj_doc_t *doc, const mj_node_t *exp)
+{
+    char path[512];
+    snprintf(path, sizeof(path), "%s/segment.bin", dir);
+
+    size_t len;
+    uint8_t *bytes = read_file(path, &len);
+    if (bytes == NULL) {
+        record_failure(vector, "cannot read segment.bin");
+        return false;
+    }
+
+    g_event_count = 0;
+
+    cairn_scan_result_t res;
+    cairn_scan_state_t state = { 0, 0 };
+    cairn_err_t err = cairn_scan_segment(bytes, len, state, &res,
+                                         event_collect_cb, NULL);
+    free(bytes);
+
+    if (err != CAIRN_OK) {
+        record_failure(vector, "scan failed: %s", cairn_strerror(err));
+        return false;
+    }
+
+    const mj_node_t *list = mj_get(doc, exp, "events");
+    size_t want_count = mj_len(doc, list);
+
+    if (g_event_count != want_count) {
+        record_failure(vector, "found %zu events, want %zu", g_event_count,
+                       want_count);
+        return false;
+    }
+
+    for (size_t i = 0; i < want_count; i++) {
+        const mj_node_t *e = mj_at(doc, list, i);
+
+        uint8_t want_type = (uint8_t)mj_num_or(mj_get(doc, e, "event_type"), -1);
+        if (g_event_types[i] != want_type) {
+            record_failure(vector, "event %zu type = %u, want %u", i,
+                           (unsigned)g_event_types[i], (unsigned)want_type);
+            return false;
+        }
+
+        /*
+         * The name must match too. An unknown type is expected to be *named* as
+         * unknown rather than discarded, so a newer device's events still
+         * appear with their position and timing intact.
+         */
+        const char *want_name = mj_str_or(mj_get(doc, e, "event_type_name"), "");
+        const char *got_name = cairn_event_type_name(g_event_types[i]);
+        bool known = strcmp(got_name, "UNKNOWN_EVENT") != 0;
+        bool want_known = strncmp(want_name, "UNKNOWN", 7) != 0;
+
+        if (known != want_known) {
+            record_failure(vector, "event %zu named %s, want %s", i, got_name,
+                           want_name);
+            return false;
+        }
+        if (known && strcmp(got_name, want_name) != 0) {
+            record_failure(vector, "event %zu name = %s, want %s", i, got_name,
+                           want_name);
+            return false;
+        }
+
+        int32_t want_lat = (int32_t)mj_num_or(mj_get(doc, e, "lat_e7"), 0);
+        int32_t want_lon = (int32_t)mj_num_or(mj_get(doc, e, "lon_e7"), 0);
+        if (g_event_lat[i] != want_lat || g_event_lon[i] != want_lon) {
+            record_failure(vector, "event %zu position = (%ld, %ld), want "
+                                   "(%ld, %ld)", i, (long)g_event_lat[i],
+                           (long)g_event_lon[i], (long)want_lat, (long)want_lon);
+            return false;
+        }
+
+        const char *want_detail = mj_str_or(mj_get(doc, e, "detail"), "");
+        if (strcmp(g_event_detail[i], want_detail) != 0) {
+            record_failure(vector, "event %zu detail = \"%s\", want \"%s\"", i,
+                           g_event_detail[i], want_detail);
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/* ── degraded-state bitmap ────────────────────────────────────────────────── */
+
+static size_t  g_health_count;
+static uint8_t g_health_states[32];
+
+static bool health_collect_cb(const cairn_frame_t *f, void *user)
+{
+    (void)user;
+
+    if (f->record_type == CAIRN_REC_DEVICE_HEALTH && f->payload_len >= 13 &&
+        g_health_count < 32) {
+        g_health_states[g_health_count++] = f->payload[12];
+    }
+    return true;
+}
+
+static bool check_health(const char *dir, const char *vector,
+                         const mj_doc_t *doc, const mj_node_t *exp)
+{
+    char path[512];
+    snprintf(path, sizeof(path), "%s/segment.bin", dir);
+
+    size_t len;
+    uint8_t *bytes = read_file(path, &len);
+    if (bytes == NULL) {
+        record_failure(vector, "cannot read segment.bin");
+        return false;
+    }
+
+    g_health_count = 0;
+
+    cairn_scan_result_t res;
+    cairn_scan_state_t state = { 0, 0 };
+    cairn_err_t err = cairn_scan_segment(bytes, len, state, &res,
+                                         health_collect_cb, NULL);
+    free(bytes);
+
+    if (err != CAIRN_OK) {
+        record_failure(vector, "scan failed: %s", cairn_strerror(err));
+        return false;
+    }
+
+    const mj_node_t *list = mj_get(doc, exp, "records");
+    size_t want_count = mj_len(doc, list);
+
+    if (g_health_count != want_count) {
+        record_failure(vector, "found %zu health records, want %zu",
+                       g_health_count, want_count);
+        return false;
+    }
+
+    for (size_t i = 0; i < want_count; i++) {
+        const mj_node_t *r = mj_at(doc, list, i);
+
+        uint8_t want_state = (uint8_t)mj_num_or(mj_get(doc, r, "health_state"), -1);
+        if (g_health_states[i] != want_state) {
+            record_failure(vector, "health record %zu state = 0x%02x, want "
+                                   "0x%02x", i, (unsigned)g_health_states[i],
+                           (unsigned)want_state);
+            return false;
+        }
+
+        /* Every expected name must appear, including a reserved bit rendered
+         * as hex rather than masked away. */
+        const mj_node_t *names = mj_get(doc, r, "names");
+        char rendered[256];
+        cairn_health_state_names(g_health_states[i], rendered, sizeof(rendered));
+
+        for (size_t j = 0; j < mj_len(doc, names); j++) {
+            const char *want = mj_str_or(mj_at(doc, names, j), "");
+            if (strstr(rendered, want) == NULL) {
+                record_failure(vector, "health record %zu renders \"%s\", "
+                                       "missing %s", i, rendered, want);
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+/* ── OTA update descriptor ────────────────────────────────────────────────── */
+
+static bool check_update(const char *dir, const char *vector,
+                         const mj_doc_t *doc, const mj_node_t *exp)
+{
+    char path[512];
+
+    snprintf(path, sizeof(path), "%s/descriptor.cbor", dir);
+    size_t enc_len;
+    uint8_t *encoded = read_file(path, &enc_len);
+
+    snprintf(path, sizeof(path), "%s/descriptor.sig", dir);
+    size_t sig_len;
+    uint8_t *sig = read_file(path, &sig_len);
+
+    if (encoded == NULL || sig == NULL || sig_len != 64) {
+        record_failure(vector, "descriptor or signature is missing");
+        free(encoded);
+        free(sig);
+        return false;
+    }
+
+    uint8_t pub[32];
+    if (!unhex(mj_str_or(mj_get(doc, exp, "update_public_key_hex"), ""), pub, 32)) {
+        record_failure(vector, "update_public_key_hex is not 32 bytes of hex");
+        free(encoded);
+        free(sig);
+        return false;
+    }
+
+    bool want_valid = mj_bool_or(mj_get(doc, exp, "signature_valid"), false);
+
+    cairn_update_descriptor_t d;
+    static uint8_t scratch[512];
+    cairn_err_t err = cairn_update_verify(encoded, enc_len, sig, pub, &d,
+                                          scratch, sizeof(scratch));
+
+    free(encoded);
+    free(sig);
+
+    if (want_valid && err != CAIRN_OK) {
+        record_failure(vector, "descriptor should verify: %s",
+                       cairn_strerror(err));
+        return false;
+    }
+    if (!want_valid) {
+        if (err == CAIRN_OK) {
+            record_failure(vector, "descriptor verified but the vector expects "
+                                   "failure");
+            return false;
+        }
+        return true;
+    }
+
+    const char *want_version = mj_str_or(mj_get(doc, exp, "firmware_version"), "");
+    if (strcmp(d.firmware_version, want_version) != 0) {
+        record_failure(vector, "firmware_version = \"%s\", want \"%s\"",
+                       d.firmware_version, want_version);
+        return false;
+    }
+
+    const char *want_min = mj_str_or(mj_get(doc, exp, "min_firmware_version"), "");
+    if (strcmp(d.min_firmware_version, want_min) != 0) {
+        record_failure(vector, "min_firmware_version = \"%s\", want \"%s\"",
+                       d.min_firmware_version, want_min);
+        return false;
+    }
+
+    uint32_t want_len = (uint32_t)mj_num_or(mj_get(doc, exp, "image_length"), 0);
+    if (d.image_length != want_len) {
+        record_failure(vector, "image_length = %u, want %u",
+                       (unsigned)d.image_length, (unsigned)want_len);
+        return false;
+    }
+
+    uint8_t want_digest[32];
+    if (!unhex(mj_str_or(mj_get(doc, exp, "image_sha256_hex"), ""), want_digest, 32)) {
+        record_failure(vector, "image_sha256_hex is not 32 bytes of hex");
+        return false;
+    }
+    if (memcmp(d.image_sha256, want_digest, 32) != 0) {
+        record_failure(vector, "image_sha256 does not match");
+        return false;
+    }
+
+    return true;
+}
+
 /* ── driver ───────────────────────────────────────────────────────────────── */
 
 static int compare_names(const void *a, const void *b)
@@ -753,9 +1139,25 @@ static void run_vector(const char *root, const char *name)
     const mj_node_t *manifest = mj_get(&doc, exp, "manifest");
     const mj_node_t *receipt  = mj_get(&doc, exp, "receipt");
     const mj_node_t *merkle   = mj_get(&doc, exp, "merkle");
+    const mj_node_t *policy   = mj_get(&doc, exp, "policy");
+    const mj_node_t *events   = mj_get(&doc, exp, "events");
+    const mj_node_t *health   = mj_get(&doc, exp, "health");
+    const mj_node_t *update   = mj_get(&doc, exp, "update");
 
     if (segments != NULL && mj_len(&doc, segments) > 0) {
         ok = check_multi_segment(dir, name, &doc, segments);
+    } else if (policy != NULL) {
+        ok = check_policy(dir, name, &doc, policy);
+    } else if (update != NULL) {
+        ok = check_update(dir, name, &doc, update);
+    } else if (events != NULL) {
+        /* These carry a scan too, so the frames are walked and the payloads
+         * checked against the same bytes. */
+        ok = check_scan(dir, name, &doc, scan) &&
+             check_events(dir, name, &doc, events);
+    } else if (health != NULL) {
+        ok = check_scan(dir, name, &doc, scan) &&
+             check_health(dir, name, &doc, health);
     } else if (scan != NULL) {
         ok = check_scan(dir, name, &doc, scan);
     } else if (header != NULL) {

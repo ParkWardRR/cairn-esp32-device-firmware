@@ -63,6 +63,18 @@ void cairn_policy_defaults(cairn_policy_t *p);
  */
 size_t cairn_policy_encode(const cairn_policy_t *p, uint8_t *out, size_t cap);
 
+/*
+ * Decode a snapshot. The device never needs this — it writes policy, it does
+ * not read it — but the conformance runner does: checking against a committed
+ * vector means decoding bytes this implementation did not produce, which is the
+ * only way to catch a divergence rather than confirm a round trip.
+ *
+ * Strict for the same reason the manifest decoder is: an unknown key or a
+ * trailing byte means the policy is only partly understood, and reporting a
+ * partial policy as complete would be worse than reporting none.
+ */
+bool cairn_policy_decode(const uint8_t *buf, size_t len, cairn_policy_t *out);
+
 /* ── adaptive sampling ────────────────────────────────────────────────────── */
 
 /*
