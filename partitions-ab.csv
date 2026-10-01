@@ -1,0 +1,41 @@
+# Cairn v2 partition table — A/B OTA from the first commit.
+#
+# The v1 layout was huge_app.csv: a single app partition with no OTA slots at
+# all. Retrofitting OTA later means reflashing every device over serial, which
+# for a unit wired into a car's OBD port is exactly the kind of job you do not
+# want to discover you need. So the slots exist from the start even though OTA
+# itself is not switched on yet.
+#
+# Budget on 4 MB flash. App slots must be 0x10000-aligned for OTA.
+#
+# The chip on this unit is a 16 MB W25Q128, so roughly 12 MB is left unused.
+# That is deliberate for now: the 1.69 MB slots hold the current image at under
+# two thirds full, and changing the configured flash size alters the bootloader
+# header — a boot-loop class of risk for no benefit this firmware can currently
+# spend. Growing the slots later is a repartition, which OTA already makes
+# routine; it is the absence of OTA slots that would have been unrecoverable.
+#
+#   0x009000  nvs       20 KB   boot_id, policy version, device key
+#   0x00e000  otadata    8 KB   which slot is active, and its rollback state
+#   0x010000  app0     1.69 MB  OTA slot A
+#   0x1c0000  app1     1.69 MB  OTA slot B
+#   0x370000  nvs_keys   4 KB   flash-encryption key (see the note below)
+#   0x371000  errlog    64 KB   error and reboot-cause journal
+#   0x381000  coredump  64 KB   panic dumps, so a crash in a parked car is
+#                               diagnosable after the fact
+#
+# Total used: 0x391000 of 0x400000.
+#
+# nvs_keys is present but flash encryption is NOT enabled by default. Enabling
+# it in release mode is irreversible and makes a mistake unrecoverable on a
+# device that is already in a vehicle; it is a deliberate, separate step. The
+# partition being here means turning it on later does not require repartitioning.
+#
+# Name,     Type, SubType,  Offset,   Size,     Flags
+nvs,        data, nvs,      0x9000,   0x5000,
+otadata,    data, ota,      0xe000,   0x2000,
+app0,       app,  ota_0,    0x10000,  0x1B0000,
+app1,       app,  ota_1,    0x1C0000, 0x1B0000,
+nvs_keys,   data, nvs_keys, 0x370000, 0x1000,
+errlog,     data, spiffs,   0x371000, 0x10000,
+coredump,   data, coredump, 0x381000, 0x10000,
