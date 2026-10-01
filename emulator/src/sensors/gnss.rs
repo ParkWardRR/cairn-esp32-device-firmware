@@ -3,7 +3,7 @@ use rand::{Rng, SeedableRng};
 
 use crate::config::MIN_SATELLITES;
 use crate::math::lerp;
-use crate::types::{clamp_u16, GnssSample};
+use crate::types::{GnssSample, clamp_u16};
 
 pub struct GnssEmulator {
     rng: StdRng,
@@ -117,8 +117,11 @@ impl GnssEmulator {
         } else {
             self.rng.gen_range(4..=7)
         };
-        self.satellites =
-            lerp(self.satellites as f64, target_sats as f64, fix_maturity * 0.3) as i32;
+        self.satellites = lerp(
+            self.satellites as f64,
+            target_sats as f64,
+            fix_maturity * 0.3,
+        ) as i32;
         self.satellites = self.satellites.clamp(0, 14);
 
         let (base_hdop, base_accuracy, noise_m) = if self.degraded {

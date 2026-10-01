@@ -1,8 +1,8 @@
 use rand::Rng;
 
-use crate::device::{default_is_complete, DeviceEmulator, Scenario};
+use crate::device::{DeviceEmulator, Scenario, default_is_complete};
 use crate::driving::{
-    make_city_route, make_highway_route, DrivingSimulator, RouteProfile, RouteSegment,
+    DrivingSimulator, RouteProfile, RouteSegment, make_city_route, make_highway_route,
 };
 use crate::sensors::gnss::GnssEmulator;
 use crate::types::*;
@@ -60,8 +60,12 @@ fn setup_driving(device: &mut DeviceEmulator, route: RouteProfile, start_wp: Way
 struct NormalCommute;
 
 impl Scenario for NormalCommute {
-    fn name(&self) -> &str { "normal_commute" }
-    fn description(&self) -> &str { "25-min city drive, park at destination, Wi-Fi sync at home" }
+    fn name(&self) -> &str {
+        "normal_commute"
+    }
+    fn description(&self) -> &str {
+        "25-min city drive, park at destination, Wi-Fi sync at home"
+    }
 
     fn setup(&mut self, device: &mut DeviceEmulator) {
         let route = make_city_route(
@@ -87,8 +91,12 @@ impl Scenario for NormalCommute {
 struct HighwayTrip;
 
 impl Scenario for HighwayTrip {
-    fn name(&self) -> &str { "highway_trip" }
-    fn description(&self) -> &str { "2-hour highway drive with rest stop" }
+    fn name(&self) -> &str {
+        "highway_trip"
+    }
+    fn description(&self) -> &str {
+        "2-hour highway drive with rest stop"
+    }
 
     fn setup(&mut self, device: &mut DeviceEmulator) {
         let route = make_highway_route(&mut device.rng);
@@ -109,8 +117,12 @@ impl Scenario for HighwayTrip {
 struct ShortErrand;
 
 impl Scenario for ShortErrand {
-    fn name(&self) -> &str { "short_errand" }
-    fn description(&self) -> &str { "3-min trip to corner store" }
+    fn name(&self) -> &str {
+        "short_errand"
+    }
+    fn description(&self) -> &str {
+        "3-min trip to corner store"
+    }
 
     fn setup(&mut self, device: &mut DeviceEmulator) {
         let cruise = device.rng.gen_range(20.0..=35.0);
@@ -156,8 +168,12 @@ impl GarageStart {
 }
 
 impl Scenario for GarageStart {
-    fn name(&self) -> &str { "garage_start" }
-    fn description(&self) -> &str { "Start in underground garage (no GNSS), drive out, get fix" }
+    fn name(&self) -> &str {
+        "garage_start"
+    }
+    fn description(&self) -> &str {
+        "Start in underground garage (no GNSS), drive out, get fix"
+    }
 
     fn setup(&mut self, device: &mut DeviceEmulator) {
         let seed: u64 = device.rng.r#gen();
@@ -200,7 +216,9 @@ impl Scenario for GarageStart {
             home_at_end: true,
         };
         device.driving = Some(DrivingSimulator::new(&mut device.rng, route));
-        device.gnss.set_position(GARAGE_LOCATION.1, GARAGE_LOCATION.2);
+        device
+            .gnss
+            .set_position(GARAGE_LOCATION.1, GARAGE_LOCATION.2);
         device.battery.start_engine();
         device.battery.engine_running();
         self.exit_time_ms = device.sim_time_ms + 30_000;
@@ -226,44 +244,67 @@ impl Scenario for GarageStart {
 struct MultiStopErrands;
 
 impl Scenario for MultiStopErrands {
-    fn name(&self) -> &str { "multi_stop_errands" }
-    fn description(&self) -> &str { "4 stops in 90 minutes" }
+    fn name(&self) -> &str {
+        "multi_stop_errands"
+    }
+    fn description(&self) -> &str {
+        "4 stops in 90 minutes"
+    }
 
     fn setup(&mut self, device: &mut DeviceEmulator) {
         let c = |d: &mut DeviceEmulator| d.rng.gen_range(25.0..=40.0);
         let s = |d: &mut DeviceEmulator| d.rng.gen_range(180.0..=300.0);
 
-        let c1 = c(device); let s1 = s(device);
-        let c2 = c(device); let s2 = s(device);
-        let c3 = c(device); let s3 = s(device);
-        let c4 = c(device); let s4 = s(device);
+        let c1 = c(device);
+        let s1 = s(device);
+        let c2 = c(device);
+        let s2 = s(device);
+        let c3 = c(device);
+        let s3 = s(device);
+        let c4 = c(device);
+        let s4 = s(device);
         let c5 = c(device);
 
         let segments = vec![
             RouteSegment {
-                start: WAYPOINTS[3], end: WAYPOINTS[10],
-                cruise_kmh: c1, stop_at_end_s: s1,
-                profile: "city".to_string(), gnss_override: None,
+                start: WAYPOINTS[3],
+                end: WAYPOINTS[10],
+                cruise_kmh: c1,
+                stop_at_end_s: s1,
+                profile: "city".to_string(),
+                gnss_override: None,
             },
             RouteSegment {
-                start: WAYPOINTS[10], end: WAYPOINTS[4],
-                cruise_kmh: c2, stop_at_end_s: s2,
-                profile: "city".to_string(), gnss_override: None,
+                start: WAYPOINTS[10],
+                end: WAYPOINTS[4],
+                cruise_kmh: c2,
+                stop_at_end_s: s2,
+                profile: "city".to_string(),
+                gnss_override: None,
             },
             RouteSegment {
-                start: WAYPOINTS[4], end: WAYPOINTS[11],
-                cruise_kmh: c3, stop_at_end_s: s3,
-                profile: "city".to_string(), gnss_override: None,
+                start: WAYPOINTS[4],
+                end: WAYPOINTS[11],
+                cruise_kmh: c3,
+                stop_at_end_s: s3,
+                profile: "city".to_string(),
+                gnss_override: None,
             },
             RouteSegment {
-                start: WAYPOINTS[11], end: WAYPOINTS[13],
-                cruise_kmh: c4, stop_at_end_s: s4,
-                profile: "city".to_string(), gnss_override: None,
+                start: WAYPOINTS[11],
+                end: WAYPOINTS[13],
+                cruise_kmh: c4,
+                stop_at_end_s: s4,
+                profile: "city".to_string(),
+                gnss_override: None,
             },
             RouteSegment {
-                start: WAYPOINTS[13], end: WAYPOINTS[3],
-                cruise_kmh: c5, stop_at_end_s: 0.0,
-                profile: "city".to_string(), gnss_override: None,
+                start: WAYPOINTS[13],
+                end: WAYPOINTS[3],
+                cruise_kmh: c5,
+                stop_at_end_s: 0.0,
+                profile: "city".to_string(),
+                gnss_override: None,
             },
         ];
         let route = RouteProfile {
@@ -291,22 +332,25 @@ struct PowerLossRecording {
 
 impl PowerLossRecording {
     fn new() -> Self {
-        Self { loss_triggered: false }
+        Self {
+            loss_triggered: false,
+        }
     }
 }
 
 impl Scenario for PowerLossRecording {
-    fn name(&self) -> &str { "power_loss_recording" }
-    fn description(&self) -> &str { "Power yanked during active recording" }
-    fn expects_errors(&self) -> bool { true }
+    fn name(&self) -> &str {
+        "power_loss_recording"
+    }
+    fn description(&self) -> &str {
+        "Power yanked during active recording"
+    }
+    fn expects_errors(&self) -> bool {
+        true
+    }
 
     fn setup(&mut self, device: &mut DeviceEmulator) {
-        let route = make_city_route(
-            &mut device.rng,
-            &[0, 1, 2, 3, 10, 4],
-            (30.0, 50.0),
-            2,
-        );
+        let route = make_city_route(&mut device.rng, &[0, 1, 2, 3, 10, 4], (30.0, 50.0), 2);
         setup_driving(device, route, WAYPOINTS[0]);
     }
 
@@ -346,17 +390,18 @@ impl PowerLossUpload {
 }
 
 impl Scenario for PowerLossUpload {
-    fn name(&self) -> &str { "power_loss_upload" }
-    fn description(&self) -> &str { "Wi-Fi drops during sync, resume on reconnect" }
-    fn expects_errors(&self) -> bool { true }
+    fn name(&self) -> &str {
+        "power_loss_upload"
+    }
+    fn description(&self) -> &str {
+        "Wi-Fi drops during sync, resume on reconnect"
+    }
+    fn expects_errors(&self) -> bool {
+        true
+    }
 
     fn setup(&mut self, device: &mut DeviceEmulator) {
-        let route = make_city_route(
-            &mut device.rng,
-            &[3, 10, 4, 3],
-            (25.0, 40.0),
-            1,
-        );
+        let route = make_city_route(&mut device.rng, &[3, 10, 4, 3], (25.0, 40.0), 1);
         setup_driving(device, route, WAYPOINTS[3]);
         device.network.force_drop_after(2048);
     }
@@ -401,17 +446,18 @@ impl LowBattery {
 }
 
 impl Scenario for LowBattery {
-    fn name(&self) -> &str { "low_battery" }
-    fn description(&self) -> &str { "Battery drops below threshold during recording" }
-    fn expects_errors(&self) -> bool { true }
+    fn name(&self) -> &str {
+        "low_battery"
+    }
+    fn description(&self) -> &str {
+        "Battery drops below threshold during recording"
+    }
+    fn expects_errors(&self) -> bool {
+        true
+    }
 
     fn setup(&mut self, device: &mut DeviceEmulator) {
-        let route = make_city_route(
-            &mut device.rng,
-            &[0, 1, 2, 3, 10, 4],
-            (25.0, 40.0),
-            2,
-        );
+        let route = make_city_route(&mut device.rng, &[0, 1, 2, 3, 10, 4], (25.0, 40.0), 2);
         setup_driving(device, route, WAYPOINTS[0]);
     }
 
@@ -438,18 +484,19 @@ impl Scenario for LowBattery {
 struct StorageFull;
 
 impl Scenario for StorageFull {
-    fn name(&self) -> &str { "storage_full" }
-    fn description(&self) -> &str { "SD card nearly full, device must handle pressure" }
-    fn expects_errors(&self) -> bool { true }
+    fn name(&self) -> &str {
+        "storage_full"
+    }
+    fn description(&self) -> &str {
+        "SD card nearly full, device must handle pressure"
+    }
+    fn expects_errors(&self) -> bool {
+        true
+    }
 
     fn setup(&mut self, device: &mut DeviceEmulator) {
         device.storage.set_nearly_full(45);
-        let route = make_city_route(
-            &mut device.rng,
-            &[3, 10, 4, 5, 4, 10, 3],
-            (25.0, 40.0),
-            2,
-        );
+        let route = make_city_route(&mut device.rng, &[3, 10, 4, 5, 4, 10, 3], (25.0, 40.0), 2);
         setup_driving(device, route, WAYPOINTS[3]);
     }
 
@@ -475,8 +522,12 @@ impl LongPark {
 }
 
 impl Scenario for LongPark {
-    fn name(&self) -> &str { "long_park" }
-    fn description(&self) -> &str { "Device parked for 8 hours, no false triggers" }
+    fn name(&self) -> &str {
+        "long_park"
+    }
+    fn description(&self) -> &str {
+        "Device parked for 8 hours, no false triggers"
+    }
 
     fn setup(&mut self, device: &mut DeviceEmulator) {
         device.gnss.set_position(WAYPOINTS[5].1, WAYPOINTS[5].2);
@@ -514,8 +565,12 @@ impl TunnelDrive {
 }
 
 impl Scenario for TunnelDrive {
-    fn name(&self) -> &str { "tunnel_drive" }
-    fn description(&self) -> &str { "GNSS loss for 2 minutes mid-highway" }
+    fn name(&self) -> &str {
+        "tunnel_drive"
+    }
+    fn description(&self) -> &str {
+        "GNSS loss for 2 minutes mid-highway"
+    }
 
     fn setup(&mut self, device: &mut DeviceEmulator) {
         let c1 = device.rng.gen_range(30.0..=45.0);
@@ -528,14 +583,70 @@ impl Scenario for TunnelDrive {
         let c8 = device.rng.gen_range(25.0..=40.0);
 
         let segments = vec![
-            RouteSegment { start: WAYPOINTS[3], end: WAYPOINTS[4], cruise_kmh: c1, stop_at_end_s: 0.0, profile: "city".to_string(), gnss_override: None },
-            RouteSegment { start: WAYPOINTS[4], end: WAYPOINTS[15], cruise_kmh: c2, stop_at_end_s: 0.0, profile: "city".to_string(), gnss_override: None },
-            RouteSegment { start: WAYPOINTS[15], end: WAYPOINTS[16], cruise_kmh: c3, stop_at_end_s: 0.0, profile: "highway".to_string(), gnss_override: None },
-            RouteSegment { start: WAYPOINTS[16], end: WAYPOINTS[17], cruise_kmh: c4, stop_at_end_s: 0.0, profile: "highway".to_string(), gnss_override: None },
-            RouteSegment { start: WAYPOINTS[17], end: WAYPOINTS[16], cruise_kmh: c5, stop_at_end_s: 0.0, profile: "highway".to_string(), gnss_override: None },
-            RouteSegment { start: WAYPOINTS[16], end: WAYPOINTS[15], cruise_kmh: c6, stop_at_end_s: 0.0, profile: "highway".to_string(), gnss_override: None },
-            RouteSegment { start: WAYPOINTS[15], end: WAYPOINTS[4], cruise_kmh: c7, stop_at_end_s: 0.0, profile: "city".to_string(), gnss_override: None },
-            RouteSegment { start: WAYPOINTS[4], end: WAYPOINTS[3], cruise_kmh: c8, stop_at_end_s: 0.0, profile: "city".to_string(), gnss_override: None },
+            RouteSegment {
+                start: WAYPOINTS[3],
+                end: WAYPOINTS[4],
+                cruise_kmh: c1,
+                stop_at_end_s: 0.0,
+                profile: "city".to_string(),
+                gnss_override: None,
+            },
+            RouteSegment {
+                start: WAYPOINTS[4],
+                end: WAYPOINTS[15],
+                cruise_kmh: c2,
+                stop_at_end_s: 0.0,
+                profile: "city".to_string(),
+                gnss_override: None,
+            },
+            RouteSegment {
+                start: WAYPOINTS[15],
+                end: WAYPOINTS[16],
+                cruise_kmh: c3,
+                stop_at_end_s: 0.0,
+                profile: "highway".to_string(),
+                gnss_override: None,
+            },
+            RouteSegment {
+                start: WAYPOINTS[16],
+                end: WAYPOINTS[17],
+                cruise_kmh: c4,
+                stop_at_end_s: 0.0,
+                profile: "highway".to_string(),
+                gnss_override: None,
+            },
+            RouteSegment {
+                start: WAYPOINTS[17],
+                end: WAYPOINTS[16],
+                cruise_kmh: c5,
+                stop_at_end_s: 0.0,
+                profile: "highway".to_string(),
+                gnss_override: None,
+            },
+            RouteSegment {
+                start: WAYPOINTS[16],
+                end: WAYPOINTS[15],
+                cruise_kmh: c6,
+                stop_at_end_s: 0.0,
+                profile: "highway".to_string(),
+                gnss_override: None,
+            },
+            RouteSegment {
+                start: WAYPOINTS[15],
+                end: WAYPOINTS[4],
+                cruise_kmh: c7,
+                stop_at_end_s: 0.0,
+                profile: "city".to_string(),
+                gnss_override: None,
+            },
+            RouteSegment {
+                start: WAYPOINTS[4],
+                end: WAYPOINTS[3],
+                cruise_kmh: c8,
+                stop_at_end_s: 0.0,
+                profile: "city".to_string(),
+                gnss_override: None,
+            },
         ];
         let route = RouteProfile {
             name: "tunnel_drive".to_string(),
@@ -578,16 +689,15 @@ impl Scenario for TunnelDrive {
 struct MultiDevice;
 
 impl Scenario for MultiDevice {
-    fn name(&self) -> &str { "multi_device" }
-    fn description(&self) -> &str { "3 emulated devices uploading simultaneously" }
+    fn name(&self) -> &str {
+        "multi_device"
+    }
+    fn description(&self) -> &str {
+        "3 emulated devices uploading simultaneously"
+    }
 
     fn setup(&mut self, device: &mut DeviceEmulator) {
-        let route = make_city_route(
-            &mut device.rng,
-            &[0, 1, 2, 3, 10, 4, 5],
-            (25.0, 45.0),
-            3,
-        );
+        let route = make_city_route(&mut device.rng, &[0, 1, 2, 3, 10, 4, 5], (25.0, 45.0), 3);
         setup_driving(device, route, WAYPOINTS[0]);
     }
 
@@ -643,14 +753,20 @@ impl RapidTrips {
             home_at_end: false,
         };
         device.driving = Some(DrivingSimulator::new(&mut device.rng, route));
-        device.gnss.set_position(WAYPOINTS[start].1, WAYPOINTS[start].2);
+        device
+            .gnss
+            .set_position(WAYPOINTS[start].1, WAYPOINTS[start].2);
         self.trip_count += 1;
     }
 }
 
 impl Scenario for RapidTrips {
-    fn name(&self) -> &str { "rapid_trips" }
-    fn description(&self) -> &str { "10 trips in quick succession (valet parking scenario)" }
+    fn name(&self) -> &str {
+        "rapid_trips"
+    }
+    fn description(&self) -> &str {
+        "10 trips in quick succession (valet parking scenario)"
+    }
 
     fn setup(&mut self, device: &mut DeviceEmulator) {
         self.schedule_next_trip(device);
@@ -686,17 +802,16 @@ impl Scenario for RapidTrips {
 struct DegradedGnss;
 
 impl Scenario for DegradedGnss {
-    fn name(&self) -> &str { "degraded_gnss" }
-    fn description(&self) -> &str { "Driving in urban canyon with intermittent fix quality" }
+    fn name(&self) -> &str {
+        "degraded_gnss"
+    }
+    fn description(&self) -> &str {
+        "Driving in urban canyon with intermittent fix quality"
+    }
 
     fn setup(&mut self, device: &mut DeviceEmulator) {
         device.gnss.set_degraded(true);
-        let route = make_city_route(
-            &mut device.rng,
-            &[2, 4, 5, 12, 10, 3],
-            (20.0, 40.0),
-            3,
-        );
+        let route = make_city_route(&mut device.rng, &[2, 4, 5, 12, 10, 3], (20.0, 40.0), 3);
         setup_driving(device, route, WAYPOINTS[2]);
     }
 
@@ -714,18 +829,17 @@ impl Scenario for DegradedGnss {
 struct ColdStart;
 
 impl Scenario for ColdStart {
-    fn name(&self) -> &str { "cold_start" }
-    fn description(&self) -> &str { "Device first boot, no stored state, cold GNSS fix" }
+    fn name(&self) -> &str {
+        "cold_start"
+    }
+    fn description(&self) -> &str {
+        "Device first boot, no stored state, cold GNSS fix"
+    }
 
     fn setup(&mut self, device: &mut DeviceEmulator) {
         let seed: u64 = device.rng.r#gen();
         device.gnss = GnssEmulator::new(seed, true);
-        let route = make_city_route(
-            &mut device.rng,
-            &[3, 10, 4, 5, 4, 3],
-            (25.0, 40.0),
-            2,
-        );
+        let route = make_city_route(&mut device.rng, &[3, 10, 4, 5, 4, 3], (25.0, 40.0), 2);
         setup_driving(device, route, WAYPOINTS[3]);
     }
 

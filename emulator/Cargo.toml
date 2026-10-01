@@ -17,6 +17,8 @@ rand = "0.8"
 ureq = { version = "2", features = ["json"] }
 chrono = { version = "0.4", features = ["serde"] }
 libc = "0.2"
+ed25519-dalek = "3.0.0"
+crc32fast = "1.5.2"
 
 [profile.release]
 lto = true

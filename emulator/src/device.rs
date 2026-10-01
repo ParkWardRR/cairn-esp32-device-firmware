@@ -2,8 +2,8 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::DateTime;
-use rand::rngs::StdRng;
 use rand::Rng;
+use rand::rngs::StdRng;
 use sha2::{Digest, Sha256};
 
 use crate::config::*;
@@ -279,8 +279,12 @@ impl DeviceEmulator {
         let speed_kmh = check_speed * 3.6;
         let sim_time = self.sim_time_ms;
 
-        let gnss_sample = self.gnss.update(sim_time, lat, lon, check_speed, heading, dt_ms);
-        let imu_sample = self.imu.update(sim_time, check_speed, heading, dt_ms, &profile);
+        let gnss_sample = self
+            .gnss
+            .update(sim_time, lat, lon, check_speed, heading, dt_ms);
+        let imu_sample = self
+            .imu
+            .update(sim_time, check_speed, heading, dt_ms, &profile);
 
         let conditions_met = speed_kmh >= MIN_SPEED_KMH
             && (gnss_sample.speed_kmh() >= MIN_SPEED_KMH
@@ -308,15 +312,25 @@ impl DeviceEmulator {
 
             if self.storage.is_full() {
                 self.log("[ARMING] Storage full -- cannot record");
-                self.events
-                    .add("storage_pressure", self.sim_time_ms, 0.0, 0.0, "SD card full");
+                self.events.add(
+                    "storage_pressure",
+                    self.sim_time_ms,
+                    0.0,
+                    0.0,
+                    "SD card full",
+                );
                 self.transition(DeviceState::Fault);
                 return;
             }
 
             self.storage.open_trip(&trip_id);
-            self.events
-                .add("trip_start", self.sim_time_ms, lat, lon, "recording started");
+            self.events.add(
+                "trip_start",
+                self.sim_time_ms,
+                lat,
+                lon,
+                "recording started",
+            );
             self.log(&format!(
                 "[ARMING] Trip started: {} (speed={:.1} km/h)",
                 trip_id, speed_kmh
@@ -386,14 +400,18 @@ impl DeviceEmulator {
             let sample_ts = sim_time_base - remaining;
 
             if sample_ts - self.last_gnss_ms >= gnss_interval {
-                let sample = self.gnss.update(sample_ts, lat, lon, speed_mps, heading, sub_dt);
+                let sample = self
+                    .gnss
+                    .update(sample_ts, lat, lon, speed_mps, heading, sub_dt);
                 self.gnss_samples.push(sample);
                 self.gnss_sample_count += 1;
                 self.last_gnss_ms = sample_ts;
 
                 for k in 0..imu_per_gnss {
                     let imu_ts = sample_ts - gnss_interval + k as u64 * imu_window_ms;
-                    let imu = self.imu.update(imu_ts, speed_mps, heading, imu_window_ms, &profile);
+                    let imu = self
+                        .imu
+                        .update(imu_ts, speed_mps, heading, imu_window_ms, &profile);
                     self.imu_summaries.push(imu);
                     self.imu_summary_count += 1;
                 }
@@ -452,12 +470,16 @@ impl DeviceEmulator {
             let speed_kmh = speed_mps * 3.6;
 
             if sample_ts - self.last_gnss_ms >= gnss_interval {
-                let sample = self.gnss.update(sample_ts, lat, lon, speed_mps, heading, sub_dt);
+                let sample = self
+                    .gnss
+                    .update(sample_ts, lat, lon, speed_mps, heading, sub_dt);
                 self.gnss_samples.push(sample);
                 self.gnss_sample_count += 1;
                 self.last_gnss_ms = sample_ts;
 
-                let imu = self.imu.update(sample_ts, speed_mps, heading, sub_dt, &profile);
+                let imu = self
+                    .imu
+                    .update(sample_ts, speed_mps, heading, sub_dt, &profile);
                 self.imu_summaries.push(imu);
                 self.imu_summary_count += 1;
 
@@ -641,8 +663,9 @@ impl DeviceEmulator {
             imu_buf.extend_from_slice(&s.to_bytes());
         }
 
-        let events_bytes =
-            serde_json::to_string_pretty(&self.events.events).unwrap_or_default().into_bytes();
+        let events_bytes = serde_json::to_string_pretty(&self.events.events)
+            .unwrap_or_default()
+            .into_bytes();
 
         let ended_ms = self.sim_time_ms;
         let started_at = DateTime::from_timestamp(
@@ -694,11 +717,26 @@ impl DeviceEmulator {
         );
 
         let mut ok = true;
-        ok = ok && self.storage.write_file(&trip_id, "samples.bin", &samples_buf);
-        ok = ok && self.storage.write_file(&trip_id, "imu_summary.bin", &imu_buf);
-        ok = ok && self.storage.write_file(&trip_id, "events.json", &events_bytes);
-        ok = ok && self.storage.write_file(&trip_id, "manifest.json", &manifest_bytes);
-        ok = ok && self.storage.write_file(&trip_id, "sha256sums.txt", sums_text.as_bytes());
+        ok = ok
+            && self
+                .storage
+                .write_file(&trip_id, "samples.bin", &samples_buf);
+        ok = ok
+            && self
+                .storage
+                .write_file(&trip_id, "imu_summary.bin", &imu_buf);
+        ok = ok
+            && self
+                .storage
+                .write_file(&trip_id, "events.json", &events_bytes);
+        ok = ok
+            && self
+                .storage
+                .write_file(&trip_id, "manifest.json", &manifest_bytes);
+        ok = ok
+            && self
+                .storage
+                .write_file(&trip_id, "sha256sums.txt", sums_text.as_bytes());
 
         if ok {
             let duration_s = (ended_ms - self.trip_start_ms) as f64 / 1000.0;

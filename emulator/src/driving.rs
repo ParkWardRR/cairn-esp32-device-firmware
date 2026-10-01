@@ -1,8 +1,8 @@
-use rand::rngs::StdRng;
 use rand::Rng;
+use rand::rngs::StdRng;
 
 use crate::math::{bearing_deg, haversine_m, lerp};
-use crate::types::{Waypoint, WAYPOINTS};
+use crate::types::{WAYPOINTS, Waypoint};
 
 pub struct RouteSegment {
     pub start: Waypoint,
@@ -67,7 +67,10 @@ impl DrivingSimulator {
             .collect();
 
         let first_dist = route_segments.first().map(|s| s.total_dist).unwrap_or(0.0);
-        let first_stop = route_segments.first().map(|s| s.stop_at_end_s).unwrap_or(0.0);
+        let first_stop = route_segments
+            .first()
+            .map(|s| s.stop_at_end_s)
+            .unwrap_or(0.0);
 
         Self {
             route_segments,
@@ -103,9 +106,7 @@ impl DrivingSimulator {
     pub fn step(&mut self, dt_s: f64) -> (f64, f64, f64, f64, String) {
         if self.finished || self.route_segments.is_empty() {
             let seg = self.route_segments.last();
-            let (lat, lon) = seg
-                .map(|s| (s.end_lat, s.end_lon))
-                .unwrap_or((0.0, 0.0));
+            let (lat, lon) = seg.map(|s| (s.end_lat, s.end_lon)).unwrap_or((0.0, 0.0));
             return (lat, lon, 0.0, 0.0, "city".to_string());
         }
 
@@ -252,95 +253,148 @@ pub fn make_city_route(
 pub fn make_highway_route(rng: &mut StdRng) -> RouteProfile {
     let segments = vec![
         RouteSegment {
-            start: WAYPOINTS[3], end: WAYPOINTS[4],
-            cruise_kmh: rng.gen_range(30.0..=45.0), stop_at_end_s: 0.0,
-            profile: "city".to_string(), gnss_override: None,
+            start: WAYPOINTS[3],
+            end: WAYPOINTS[4],
+            cruise_kmh: rng.gen_range(30.0..=45.0),
+            stop_at_end_s: 0.0,
+            profile: "city".to_string(),
+            gnss_override: None,
         },
         RouteSegment {
-            start: WAYPOINTS[4], end: WAYPOINTS[15],
-            cruise_kmh: rng.gen_range(35.0..=50.0), stop_at_end_s: 0.0,
-            profile: "city".to_string(), gnss_override: None,
+            start: WAYPOINTS[4],
+            end: WAYPOINTS[15],
+            cruise_kmh: rng.gen_range(35.0..=50.0),
+            stop_at_end_s: 0.0,
+            profile: "city".to_string(),
+            gnss_override: None,
         },
         RouteSegment {
-            start: WAYPOINTS[15], end: WAYPOINTS[16],
-            cruise_kmh: rng.gen_range(90.0..=115.0), stop_at_end_s: 0.0,
-            profile: "highway".to_string(), gnss_override: None,
+            start: WAYPOINTS[15],
+            end: WAYPOINTS[16],
+            cruise_kmh: rng.gen_range(90.0..=115.0),
+            stop_at_end_s: 0.0,
+            profile: "highway".to_string(),
+            gnss_override: None,
         },
         RouteSegment {
-            start: WAYPOINTS[16], end: WAYPOINTS[17],
-            cruise_kmh: rng.gen_range(95.0..=115.0), stop_at_end_s: 0.0,
-            profile: "highway".to_string(), gnss_override: None,
+            start: WAYPOINTS[16],
+            end: WAYPOINTS[17],
+            cruise_kmh: rng.gen_range(95.0..=115.0),
+            stop_at_end_s: 0.0,
+            profile: "highway".to_string(),
+            gnss_override: None,
         },
         RouteSegment {
-            start: WAYPOINTS[17], end: WAYPOINTS[18],
-            cruise_kmh: rng.gen_range(95.0..=115.0), stop_at_end_s: 0.0,
-            profile: "highway".to_string(), gnss_override: None,
+            start: WAYPOINTS[17],
+            end: WAYPOINTS[18],
+            cruise_kmh: rng.gen_range(95.0..=115.0),
+            stop_at_end_s: 0.0,
+            profile: "highway".to_string(),
+            gnss_override: None,
         },
         RouteSegment {
-            start: WAYPOINTS[18], end: WAYPOINTS[19],
-            cruise_kmh: rng.gen_range(95.0..=115.0), stop_at_end_s: 0.0,
-            profile: "highway".to_string(), gnss_override: None,
+            start: WAYPOINTS[18],
+            end: WAYPOINTS[19],
+            cruise_kmh: rng.gen_range(95.0..=115.0),
+            stop_at_end_s: 0.0,
+            profile: "highway".to_string(),
+            gnss_override: None,
         },
         RouteSegment {
-            start: WAYPOINTS[19], end: WAYPOINTS[20],
-            cruise_kmh: rng.gen_range(95.0..=115.0), stop_at_end_s: 0.0,
-            profile: "highway".to_string(), gnss_override: None,
+            start: WAYPOINTS[19],
+            end: WAYPOINTS[20],
+            cruise_kmh: rng.gen_range(95.0..=115.0),
+            stop_at_end_s: 0.0,
+            profile: "highway".to_string(),
+            gnss_override: None,
         },
         RouteSegment {
-            start: WAYPOINTS[20], end: WAYPOINTS[21],
-            cruise_kmh: rng.gen_range(95.0..=115.0), stop_at_end_s: 0.0,
-            profile: "highway".to_string(), gnss_override: None,
+            start: WAYPOINTS[20],
+            end: WAYPOINTS[21],
+            cruise_kmh: rng.gen_range(95.0..=115.0),
+            stop_at_end_s: 0.0,
+            profile: "highway".to_string(),
+            gnss_override: None,
         },
         RouteSegment {
-            start: WAYPOINTS[21], end: WAYPOINTS[22],
+            start: WAYPOINTS[21],
+            end: WAYPOINTS[22],
             cruise_kmh: rng.gen_range(40.0..=60.0),
             stop_at_end_s: rng.gen_range(300.0..=600.0),
-            profile: "city".to_string(), gnss_override: None,
+            profile: "city".to_string(),
+            gnss_override: None,
         },
         RouteSegment {
-            start: WAYPOINTS[22], end: WAYPOINTS[21],
-            cruise_kmh: rng.gen_range(95.0..=115.0), stop_at_end_s: 0.0,
-            profile: "highway".to_string(), gnss_override: None,
+            start: WAYPOINTS[22],
+            end: WAYPOINTS[21],
+            cruise_kmh: rng.gen_range(95.0..=115.0),
+            stop_at_end_s: 0.0,
+            profile: "highway".to_string(),
+            gnss_override: None,
         },
         RouteSegment {
-            start: WAYPOINTS[21], end: WAYPOINTS[20],
-            cruise_kmh: rng.gen_range(95.0..=115.0), stop_at_end_s: 0.0,
-            profile: "highway".to_string(), gnss_override: None,
+            start: WAYPOINTS[21],
+            end: WAYPOINTS[20],
+            cruise_kmh: rng.gen_range(95.0..=115.0),
+            stop_at_end_s: 0.0,
+            profile: "highway".to_string(),
+            gnss_override: None,
         },
         RouteSegment {
-            start: WAYPOINTS[20], end: WAYPOINTS[19],
-            cruise_kmh: rng.gen_range(95.0..=115.0), stop_at_end_s: 0.0,
-            profile: "highway".to_string(), gnss_override: None,
+            start: WAYPOINTS[20],
+            end: WAYPOINTS[19],
+            cruise_kmh: rng.gen_range(95.0..=115.0),
+            stop_at_end_s: 0.0,
+            profile: "highway".to_string(),
+            gnss_override: None,
         },
         RouteSegment {
-            start: WAYPOINTS[19], end: WAYPOINTS[18],
-            cruise_kmh: rng.gen_range(95.0..=115.0), stop_at_end_s: 0.0,
-            profile: "highway".to_string(), gnss_override: None,
+            start: WAYPOINTS[19],
+            end: WAYPOINTS[18],
+            cruise_kmh: rng.gen_range(95.0..=115.0),
+            stop_at_end_s: 0.0,
+            profile: "highway".to_string(),
+            gnss_override: None,
         },
         RouteSegment {
-            start: WAYPOINTS[18], end: WAYPOINTS[17],
-            cruise_kmh: rng.gen_range(95.0..=115.0), stop_at_end_s: 0.0,
-            profile: "highway".to_string(), gnss_override: None,
+            start: WAYPOINTS[18],
+            end: WAYPOINTS[17],
+            cruise_kmh: rng.gen_range(95.0..=115.0),
+            stop_at_end_s: 0.0,
+            profile: "highway".to_string(),
+            gnss_override: None,
         },
         RouteSegment {
-            start: WAYPOINTS[17], end: WAYPOINTS[16],
-            cruise_kmh: rng.gen_range(95.0..=115.0), stop_at_end_s: 0.0,
-            profile: "highway".to_string(), gnss_override: None,
+            start: WAYPOINTS[17],
+            end: WAYPOINTS[16],
+            cruise_kmh: rng.gen_range(95.0..=115.0),
+            stop_at_end_s: 0.0,
+            profile: "highway".to_string(),
+            gnss_override: None,
         },
         RouteSegment {
-            start: WAYPOINTS[16], end: WAYPOINTS[15],
-            cruise_kmh: rng.gen_range(80.0..=100.0), stop_at_end_s: 0.0,
-            profile: "highway".to_string(), gnss_override: None,
+            start: WAYPOINTS[16],
+            end: WAYPOINTS[15],
+            cruise_kmh: rng.gen_range(80.0..=100.0),
+            stop_at_end_s: 0.0,
+            profile: "highway".to_string(),
+            gnss_override: None,
         },
         RouteSegment {
-            start: WAYPOINTS[15], end: WAYPOINTS[4],
-            cruise_kmh: rng.gen_range(30.0..=45.0), stop_at_end_s: 0.0,
-            profile: "city".to_string(), gnss_override: None,
+            start: WAYPOINTS[15],
+            end: WAYPOINTS[4],
+            cruise_kmh: rng.gen_range(30.0..=45.0),
+            stop_at_end_s: 0.0,
+            profile: "city".to_string(),
+            gnss_override: None,
         },
         RouteSegment {
-            start: WAYPOINTS[4], end: WAYPOINTS[3],
-            cruise_kmh: rng.gen_range(30.0..=40.0), stop_at_end_s: 0.0,
-            profile: "city".to_string(), gnss_override: None,
+            start: WAYPOINTS[4],
+            end: WAYPOINTS[3],
+            cruise_kmh: rng.gen_range(30.0..=40.0),
+            stop_at_end_s: 0.0,
+            profile: "city".to_string(),
+            gnss_override: None,
         },
     ];
     RouteProfile {

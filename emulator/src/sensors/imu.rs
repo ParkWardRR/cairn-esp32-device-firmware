@@ -1,7 +1,7 @@
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-use crate::types::{clamp_i16, clamp_u16, ImuSummary};
+use crate::types::{ImuSummary, clamp_i16, clamp_u16};
 
 pub struct ImuEmulator {
     rng: StdRng,

@@ -1,3 +1,15 @@
+//! Cairn device emulator.
+//!
+//! The v2 rebuild is in progress. `conformance` checks this crate's
+//! independent implementation of bundle format v2 against the committed
+//! vectors; `scenario` still drives the legacy v1 capture path, which is
+//! retired as the v2 device lands.
+
+mod conformance;
+mod format;
+mod v2;
+
+// Legacy v1 capture path. Retired once the v2 device replaces it.
 mod config;
 mod device;
 mod driving;
@@ -9,17 +21,17 @@ mod storage;
 mod types;
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 use chrono::Utc;
 use clap::Parser;
-use rand::rngs::StdRng;
 use rand::SeedableRng;
+use rand::rngs::StdRng;
 
 use device::DeviceEmulator;
-use scenarios::{get_scenario, SCENARIO_NAMES};
+use scenarios::{SCENARIO_NAMES, get_scenario};
 use types::ScenarioResult;
 
 #[derive(Parser)]
@@ -35,6 +47,60 @@ use types::ScenarioResult;
     )
 )]
 struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(clap::Subcommand)]
+enum Command {
+    /// Check this implementation of bundle format v2 against the committed
+    /// conformance vectors.
+    ///
+    /// The vectors are bytes and expected verdicts, not code, so neither
+    /// implementation can quietly drag the other along. A disagreement about a
+    /// single byte fails the run.
+    Conformance {
+        /// Directory holding the vectors.
+        #[arg(long, default_value = "../fixtures/format-v2")]
+        vectors: PathBuf,
+
+        /// Print every vector, not only failures.
+        #[arg(long)]
+        verbose: bool,
+    },
+
+    /// Run the fault-injection property matrix.
+    ///
+    /// Each row states a property the architecture claims, arms a fault that
+    /// would violate it, and asserts what survived. Local durability rows need
+    /// no server; protocol rows are skipped unless --server is given.
+    FaultMatrix {
+        /// Working directory for simulated device storage.
+        #[arg(long, default_value = "output/fault-matrix")]
+        work_dir: PathBuf,
+
+        /// Ingest server base URL. Protocol rows are skipped when absent.
+        #[arg(long, default_value = "")]
+        server: String,
+
+        /// Seed, printed on failure so a run reproduces exactly.
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+
+        /// Transfer chunk size in bytes.
+        #[arg(long, default_value_t = 4096)]
+        chunk_size: usize,
+
+        #[arg(long)]
+        verbose: bool,
+    },
+
+    /// Run a legacy v1 capture scenario.
+    Scenario(ScenarioArgs),
+}
+
+#[derive(clap::Args)]
+struct ScenarioArgs {
     #[arg(long, help = "Scenario to run")]
     scenario: Option<String>,
 
@@ -122,15 +188,128 @@ fn run_multi_device(
         handles.push(handle);
     }
 
-    handles
-        .into_iter()
-        .filter_map(|h| h.join().ok())
-        .collect()
+    handles.into_iter().filter_map(|h| h.join().ok()).collect()
 }
 
 fn main() {
     let cli = Cli::parse();
 
+    match cli.command {
+        Command::Conformance { vectors, verbose } => run_conformance(&vectors, verbose),
+        Command::FaultMatrix {
+            work_dir,
+            server,
+            seed,
+            chunk_size,
+            verbose,
+        } => run_fault_matrix(work_dir, server, seed, chunk_size, verbose),
+        Command::Scenario(args) => run_scenarios(args),
+    }
+}
+
+/// Check the format implementation against the committed vectors.
+fn run_conformance(vectors: &PathBuf, verbose: bool) {
+    let report = match conformance::run(vectors) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("cannot read vectors at {}: {e}", vectors.display());
+            eprintln!(
+                "generate them with: cd ../server && go run ./cmd/mkvectors -out ../fixtures/format-v2"
+            );
+            std::process::exit(2);
+        }
+    };
+
+    if verbose || !report.ok() {
+        for name in &report.skipped {
+            eprintln!("  skip  {name}");
+        }
+    }
+    for failure in &report.failures {
+        eprintln!("  FAIL  {failure}");
+    }
+
+    eprintln!();
+    if report.ok() {
+        eprintln!(
+            "conformance: {}/{} vectors pass — this implementation agrees with the specification",
+            report.passed, report.checked
+        );
+        std::process::exit(0);
+    }
+
+    eprintln!(
+        "conformance: {}/{} vectors pass, {} FAILED",
+        report.passed,
+        report.checked,
+        report.failures.len()
+    );
+    if report.checked == 0 {
+        eprintln!("no vectors were checked");
+    }
+    std::process::exit(1);
+}
+
+/// Run the fault-injection matrix.
+fn run_fault_matrix(
+    work_dir: PathBuf,
+    server: String,
+    seed: u64,
+    chunk_size: usize,
+    verbose: bool,
+) {
+    if let Err(e) = v2::matrix::prepare(&work_dir) {
+        eprintln!("cannot prepare {}: {e}", work_dir.display());
+        std::process::exit(2);
+    }
+
+    let cfg = v2::matrix::Config {
+        work_dir,
+        server,
+        seed,
+        chunk_size,
+        verbose,
+    };
+
+    let report = match v2::matrix::run(&cfg) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("matrix run failed: {e}");
+            std::process::exit(2);
+        }
+    };
+
+    eprintln!();
+    for row in &report.rows {
+        let mark = if row.skipped {
+            "skip"
+        } else if row.passed {
+            "pass"
+        } else {
+            "FAIL"
+        };
+        eprintln!("  {mark}  {}", row.family);
+        eprintln!("        {}", row.property);
+        if verbose || !row.passed || row.skipped {
+            eprintln!("        {}", row.detail);
+        }
+    }
+
+    eprintln!();
+    eprintln!(
+        "fault matrix: {} passed, {} failed, {} skipped",
+        report.passed(),
+        report.failed(),
+        report.skipped()
+    );
+
+    if !report.ok() {
+        eprintln!("reproduce with --seed {}", cfg.seed);
+        std::process::exit(1);
+    }
+}
+
+fn run_scenarios(cli: ScenarioArgs) {
     let output_dir = match &cli.output {
         Some(p) => PathBuf::from(p),
         None => {
@@ -240,8 +419,14 @@ fn ctrlc_set_handler<F: Fn() + Send + 'static>(handler: F) {
         // SAFETY: only called once, before the signal can fire
         unsafe {
             HANDLER = Some(Box::new(handler));
-            libc::signal(libc::SIGINT, signal_trampoline as *const () as libc::sighandler_t);
-            libc::signal(libc::SIGTERM, signal_trampoline as *const () as libc::sighandler_t);
+            libc::signal(
+                libc::SIGINT,
+                signal_trampoline as *const () as libc::sighandler_t,
+            );
+            libc::signal(
+                libc::SIGTERM,
+                signal_trampoline as *const () as libc::sighandler_t,
+            );
         }
     });
 

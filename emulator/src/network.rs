@@ -1,7 +1,7 @@
 use std::path::Path;
 
-use rand::rngs::StdRng;
 use rand::SeedableRng;
+use rand::rngs::StdRng;
 use sha2::{Digest, Sha256};
 
 use crate::config::UPLOAD_CHUNK_SIZE;
@@ -159,9 +159,7 @@ impl NetworkEmulator {
             }
 
             if self.drop_after_bytes >= 0 && offset as i64 >= self.drop_after_bytes {
-                log_fn(&format!(
-                    "[NET] Simulated Wi-Fi drop at offset {offset}"
-                ));
+                log_fn(&format!("[NET] Simulated Wi-Fi drop at offset {offset}"));
                 self.force_drop = true;
                 self.connected = false;
                 return false;
@@ -170,10 +168,7 @@ impl NetworkEmulator {
             let end = (offset + UPLOAD_CHUNK_SIZE).min(data.len());
             let chunk = &data[offset..end];
 
-            let chunk_url = format!(
-                "{}/api/v1/upload/{}/chunk",
-                self.server_url, upload_id
-            );
+            let chunk_url = format!("{}/api/v1/upload/{}/chunk", self.server_url, upload_id);
             let result = ureq::put(&chunk_url)
                 .set("Content-Type", "application/octet-stream")
                 .set("X-Upload-Offset", &offset.to_string())
@@ -186,20 +181,14 @@ impl NetworkEmulator {
 
             offset += chunk.len();
             let pct = ((offset as f64 / data.len() as f64) * 100.0).min(100.0) as u32;
-            log_fn(&format!(
-                "[NET] Chunk: {offset}/{} ({pct}%)",
-                data.len()
-            ));
+            log_fn(&format!("[NET] Chunk: {offset}/{} ({pct}%)", data.len()));
         }
 
         let fin_body = serde_json::json!({
             "content_hash": content_hash,
         });
 
-        let fin_url = format!(
-            "{}/api/v1/upload/{}/finalize",
-            self.server_url, upload_id
-        );
+        let fin_url = format!("{}/api/v1/upload/{}/finalize", self.server_url, upload_id);
         let fin_result = ureq::post(&fin_url)
             .set("Content-Type", "application/json")
             .send_string(&fin_body.to_string());
