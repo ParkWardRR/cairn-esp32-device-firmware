@@ -21,6 +21,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "cairn_ota.h"
 #include "cairn_store.h"
 #include "policy.h"
 #include "preroll.h"
@@ -128,6 +129,9 @@ struct Lifecycle {
      * at confirmation — writing it per trip-resume would bloat the journal
      * without adding information. */
     bool policy_written = false;
+
+    /* Next OTA check. Hourly while parked; see docs/ota.md. */
+    uint32_t next_ota_check_ms = 0;
 
     cairn_dynamics_t dynamics = CAIRN_DYN_IDLE;
     uint16_t last_speed_cmps = CAIRN_U16_UNKNOWN;

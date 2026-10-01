@@ -25,6 +25,7 @@
 #define CAIRN_SYNC_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -67,6 +68,14 @@ typedef struct {
 bool cairn_sync_load_credentials(void);
 bool cairn_sync_tls_active(void);
 
+/*
+ * The server base URL on whichever transport is active, and a request started
+ * on it. Exposed so the OTA path reaches the server exactly as sync does —
+ * including mTLS when it is configured, rather than quietly downgrading for
+ * firmware of all things.
+ */
+void cairn_sync_base_url(char *out, size_t cap);
+
 /* Bring up the network. Returns false if no usable link appeared in time. */
 bool cairn_sync_connect(uint32_t timeout_ms);
 void cairn_sync_disconnect(void);
@@ -88,6 +97,10 @@ int cairn_sync_resume_interrupted_prunes(void);
 
 #ifdef __cplusplus
 }
+
+/* C++ only: HTTPClient is a C++ type, and OTA is the only other caller. */
+class HTTPClient;
+bool cairn_sync_begin_request(HTTPClient &http, const char *url);
 #endif
 
 #endif /* CAIRN_SYNC_H */

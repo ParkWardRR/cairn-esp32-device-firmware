@@ -30,9 +30,13 @@ FORMAT_SRC := $(wildcard $(FORMAT_DIR)/*.c)
 STORE_SRC  := $(wildcard $(STORE_DIR)/*.c)
 FS_SRC     := $(wildcard $(FS_DIR)/*.c)
 
+# The OTA preconditions and version ordering are portable C; the install path
+# behind CAIRN_OTA_AVAILABLE is Arduino and is not built here.
+OTA_DIR    := ../../lib/cairn_ota
+
 # Only the portable application sources; the rest of src/ is Arduino C++.
 SRC_DIR    := ../../src
-APP_SRC    := $(SRC_DIR)/preroll.c $(SRC_DIR)/policy.c
+APP_SRC    := $(SRC_DIR)/preroll.c $(SRC_DIR)/policy.c $(OTA_DIR)/cairn_ota.c
 
 CONFORMANCE_SRC := $(FORMAT_SRC) minijson.c conformance.c
 FAULTS_SRC      := $(FORMAT_SRC) $(STORE_SRC) $(FS_SRC) $(APP_SRC) \
@@ -45,7 +49,7 @@ CFLAGS  ?= -std=c11 -O1 -g \
            -Wall -Wextra -Werror \
            -Wshadow -Wpointer-arith -Wcast-qual -Wstrict-prototypes \
            -Wmissing-prototypes -Wno-unused-parameter \
-           -I$(FORMAT_DIR) -I$(STORE_DIR) -I$(FS_DIR) -I$(LOG_DIR) -I$(INCLUDE_DIR) -I$(SRC_DIR) -I.
+           -I$(FORMAT_DIR) -I$(STORE_DIR) -I$(FS_DIR) -I$(LOG_DIR) -I$(INCLUDE_DIR) -I$(SRC_DIR) -I$(OTA_DIR) -I.
 
 SAN := -fsanitize=address,undefined -fno-omit-frame-pointer
 

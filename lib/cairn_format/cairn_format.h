@@ -493,6 +493,54 @@ cairn_err_t cairn_receipt_verify_acknowledges(const cairn_receipt_t *r,
                                               const uint8_t pub[32],
                                               const uint8_t uploaded_root[32]);
 
+/* ── OTA update descriptor (docs/ota.md) ──────────────────────────────────── */
+
+#define CAIRN_UPDATE_DESCRIPTOR_VERSION 1
+#define CAIRN_MAX_FIRMWARE_VERSION 32
+
+/*
+ * Names a firmware image and the constraints on installing it.
+ *
+ * Signed by an update key kept separate from the receipt key: the receipt key
+ * says "this data is safe to delete", the update key says "this code is safe to
+ * run". A server compromised enough to issue false receipts costs stored trips;
+ * one that could also sign firmware owns the device.
+ */
+typedef struct {
+    uint8_t  descriptor_version;
+    char     firmware_version[CAIRN_MAX_FIRMWARE_VERSION];
+    uint8_t  image_sha256[32];
+    uint32_t image_length;
+    char     min_firmware_version[CAIRN_MAX_FIRMWARE_VERSION];
+    uint64_t build_utc_ms; /* informational; never an ordering key */
+    char     signature_algorithm[16];
+} cairn_update_descriptor_t;
+
+/*
+ * Decode, rejecting anything this implementation would not itself have
+ * produced. Strict because a descriptor whose bytes cannot be reproduced cannot
+ * have its signature re-checked — and this is the one signature whose failure
+ * mode is an unbootable device.
+ */
+cairn_err_t cairn_update_decode(const uint8_t *buf, size_t len,
+                                cairn_update_descriptor_t *out,
+                                uint8_t *scratch, size_t scratch_cap);
+
+/*
+ * Verify the signature, then decode.
+ *
+ * In that order on purpose: the device downloads megabytes on the strength of
+ * this check, so an unsigned or wrongly signed descriptor must cost nothing.
+ */
+cairn_err_t cairn_update_verify(const uint8_t *encoded, size_t len,
+                                const uint8_t sig[64], const uint8_t pub[32],
+                                cairn_update_descriptor_t *out,
+                                uint8_t *scratch, size_t scratch_cap);
+
+/* Encode, for tests and for cross-checking against the reference bytes. */
+cairn_err_t cairn_update_encode(const cairn_update_descriptor_t *d,
+                                uint8_t *out, size_t out_cap, size_t *written);
+
 /* ── payload builders ─────────────────────────────────────────────────────── */
 
 /*

@@ -8,6 +8,7 @@
 #include "board_config.h"
 #include "cairn_log.h"
 #include "cairn_fs.h"
+#include "cairn_ota.h"
 #include "cairn_sync.h"
 #include "config.h"
 #include "policy.h"
@@ -540,6 +541,52 @@ static void seal_and_reopen(Lifecycle *lc, uint8_t reason)
 }
 
 /*
+ * Check for firmware while parked and connected.
+ *
+ * Folded into the sync pass because both want the same conditions — idle,
+ * associated, nothing urgent happening — and bringing the radio up twice would
+ * cost power for no benefit. The preconditions in cairn_ota are checked again
+ * inside, so this is a scheduling hint rather than the gate.
+ */
+static void maybe_update(Lifecycle *lc)
+{
+#if CAIRN_OTA_AVAILABLE
+    uint32_t now = millis();
+    if ((int32_t)(now - lc->next_ota_check_ms) < 0) return;
+    lc->next_ota_check_ms = now + CAIRN_OTA_CHECK_INTERVAL_MS;
+
+    bool parked = (lc->capture == CaptureState::Idle);
+
+    uint16_t battery = CAIRN_U16_UNKNOWN;
+    if (lc->have_recent_obd) battery = sensors_battery_mv();
+
+    bool reboot = false;
+    cairn_ota_result_t r = cairn_ota_check_and_install(parked, battery, &reboot);
+
+    if (r != CAIRN_OTA_BLOCKED && r != CAIRN_OTA_UP_TO_DATE) {
+        CAIRN_LOGI(TAG, "update check: %s", cairn_ota_result_name(r));
+    }
+
+    if (reboot) {
+        /*
+         * Seal and flush before restarting. The staged image is already
+         * verified, so there is no hurry — and rebooting with an open capture
+         * would leave a torn tail for the new firmware to recover, which is
+         * recoverable but pointless when it can be avoided.
+         */
+        CAIRN_LOGW(TAG, "rebooting into the staged image");
+        if (lc->cap.active) seal_and_reopen(lc, 2);
+        cairn_log_flush();
+        cairn_log_detach_sd();
+        delay(200);
+        ESP.restart();
+    }
+#else
+    (void)lc;
+#endif
+}
+
+/*
  * Sync only while idle. Uploading during a drive competes with capture for both
  * the CPU and the SPI bus the card is on, and nothing about this data is
  * time-critical.
@@ -573,6 +620,9 @@ static void maybe_sync(Lifecycle *lc)
     cairn_sync_result_t r = cairn_sync_run(&stats);
 
     CAIRN_LOGI(TAG, "sync result %s", cairn_sync_result_name(r));
+
+    /* While the radio is still up and the device is demonstrably idle. */
+    maybe_update(lc);
 
     cairn_sync_disconnect();
     set_link_state(lc, LinkState::Offline, 0);

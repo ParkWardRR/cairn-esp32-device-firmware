@@ -248,7 +248,7 @@ bool cairn_sync_load_credentials(void)
 
 bool cairn_sync_tls_active(void) { return s_tls_ready; }
 
-static void base_url(char *out, size_t cap)
+void cairn_sync_base_url(char *out, size_t cap)
 {
     if (s_tls_ready) {
         snprintf(out, cap, "https://%s:%d", CAIRN_SERVER_HOST,
@@ -260,7 +260,7 @@ static void base_url(char *out, size_t cap)
 }
 
 /* Begin a request on whichever transport is active. */
-static bool begin_request(HTTPClient &http, const char *url)
+bool cairn_sync_begin_request(HTTPClient &http, const char *url)
 {
     http.setTimeout(CAIRN_SYNC_HTTP_TIMEOUT_MS);
 
@@ -544,7 +544,7 @@ static cairn_sync_result_t upload_bundle(const char *id_text,
      * server's hash check for a reason that looks like corruption.
      */
     char url[320], base[96];
-    base_url(base, sizeof(base));
+    cairn_sync_base_url(base, sizeof(base));
 
     /* ── OFFER ────────────────────────────────────────────────────────────── */
 
@@ -554,7 +554,7 @@ static cairn_sync_result_t upload_bundle(const char *id_text,
     snprintf(url, sizeof(url), "%s/api/v2/bundles/offer", base);
 
     HTTPClient http;
-    if (!begin_request(http, url)) {
+    if (!cairn_sync_begin_request(http, url)) {
         free(manifest);
         free(sig);
         return CAIRN_SYNC_NO_NETWORK;
@@ -622,7 +622,7 @@ static cairn_sync_result_t upload_bundle(const char *id_text,
                  bundle_hex, digest_hex);
 
         HTTPClient put;
-        if (!begin_request(put, url)) return CAIRN_SYNC_NO_NETWORK;
+        if (!cairn_sync_begin_request(put, url)) return CAIRN_SYNC_NO_NETWORK;
 
         put.addHeader("Content-Type", "application/octet-stream");
 
@@ -663,7 +663,7 @@ static cairn_sync_result_t upload_bundle(const char *id_text,
     snprintf(url, sizeof(url), "%s/api/v2/bundles/%s/commit", base, bundle_hex);
 
     HTTPClient commit;
-    if (!begin_request(commit, url)) return CAIRN_SYNC_NO_NETWORK;
+    if (!cairn_sync_begin_request(commit, url)) return CAIRN_SYNC_NO_NETWORK;
 
     int commit_code = commit.POST((uint8_t *)nullptr, 0);
     if (commit_code != 200) {

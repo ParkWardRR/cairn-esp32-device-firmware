@@ -67,6 +67,20 @@
 #define CAIRN_FIRMWARE_VERSION "cairn-v2.0.0-dev"
 #endif
 
+/*
+ * OTA is enabled only when an update key is pinned at build time. A device that
+ * cannot verify an update has no business installing one, so undefined means
+ * off — it will not even fetch.
+ */
+#ifdef CAIRN_UPDATE_KEY_HEX
+#define CAIRN_OTA_AVAILABLE 1
+#else
+#define CAIRN_OTA_AVAILABLE 0
+#endif
+
+/* Checked while parked; see docs/ota.md for why it is not more frequent. */
+#define CAIRN_OTA_CHECK_INTERVAL_MS 3600000
+
 /* ── capture policy ───────────────────────────────────────────────────────── */
 
 /*

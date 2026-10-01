@@ -33,6 +33,7 @@
 #include "cairn_platform.h"
 #include "cairn_prune.h"
 #include "cairn_store.h"
+#include "cairn_ota.h"
 #include "policy.h"
 #include "preroll.h"
 
@@ -846,6 +847,37 @@ static bool sealed_bundle(char id_out[27], uint8_t root_out[32])
     return seal_now(&cap, id_out, root_out);
 }
 
+/* Remove a sealed bundle directly, for rows that need the pending count to be
+ * zero without exercising the receipt gate. */
+static bool delete_bundle_for_test(const char *id)
+{
+    char dir[256];
+    snprintf(dir, sizeof(dir), "%s/%s", CAIRN_DIR_BUNDLES, id);
+
+    cairn_dir_t *d = cairn_fs_opendir(dir);
+    if (d == NULL) return false;
+
+    char   names[24][64];
+    size_t count = 0;
+    char   name[64];
+    bool   is_dir = false;
+
+    while (cairn_fs_readdir(d, name, sizeof(name), &is_dir, NULL)) {
+        if (!is_dir && count < 24) {
+            snprintf(names[count], sizeof(names[0]), "%s", name);
+            count++;
+        }
+    }
+    cairn_fs_closedir(d);
+
+    for (size_t i = 0; i < count; i++) {
+        char path[340];
+        snprintf(path, sizeof(path), "%s/%s", dir, names[i]);
+        cairn_fs_remove(path);
+    }
+    return cairn_fs_rmdir(dir);
+}
+
 static bool bundle_still_present(const char *id)
 {
     char dir[256];
@@ -1624,6 +1656,186 @@ static bool row_policy_snapshot_deterministic(void)
     return true;
 }
 
+
+/* ── OTA ──────────────────────────────────────────────────────────────────── */
+
+/*
+ * The preconditions, each refusing on its own.
+ *
+ * A bad update is the most destructive thing that can happen here — worse than
+ * a corrupt bundle, because a bricked device captures nothing and cannot report
+ * that it is bricked. Every one of these is a reason to wait, and the row
+ * exists so that none of them can be quietly dropped.
+ */
+static bool row_ota_preconditions_each_block(void)
+{
+    cairn_ota_block_t b;
+
+    /* Unreceipted data present: that data exists only on this card, so an
+     * update that fails to boot could lose it permanently. */
+    uint8_t device_id[16], seed[32], pub[32];
+    uint32_t boot = 0;
+    CHECK(cairn_identity_load(device_id, seed, pub, &boot), "identity load failed");
+
+    char    id[27];
+    uint8_t root[32];
+    CHECK(sealed_bundle(id, root), "setup: seal failed");
+
+    CHECK(!cairn_ota_preconditions(true, 13000, &b),
+          "an update was permitted with a bundle awaiting a receipt");
+    CHECK(b.unreceipted_bundles, "the pending bundle was not the reason");
+    CHECK(b.pending_bundles == 1, "pending_bundles is %u, want 1",
+          (unsigned)b.pending_bundles);
+
+    /* Clear the bundle, then check the other three independently. */
+    CHECK(delete_bundle_for_test(id), "cannot clear the sealed bundle");
+
+    CHECK(!cairn_ota_preconditions(false, 13000, &b),
+          "an update was permitted mid-trip");
+    CHECK(b.not_parked, "not_parked was not the reason");
+
+    CHECK(!cairn_ota_preconditions(true, 11000, &b),
+          "an update was permitted on a low supply");
+    CHECK(b.supply_unhealthy, "supply_unhealthy was not the reason");
+
+    /* An unknown voltage must block. Updating on the strength of a reading the
+     * device could not take is exactly the wrong direction. */
+    CHECK(!cairn_ota_preconditions(true, CAIRN_U16_UNKNOWN, &b),
+          "an update was permitted with an unknown supply voltage");
+    CHECK(b.supply_unhealthy, "an unknown voltage was not treated as unhealthy");
+
+    /* With nothing pending, parked, and a healthy supply, the only remaining
+     * gate is whether a key is pinned at build time. */
+    bool all = cairn_ota_preconditions(true, 13000, &b);
+#if CAIRN_OTA_AVAILABLE
+    CHECK(all, "every precondition held but the update was still blocked");
+#else
+    CHECK(!all && b.no_update_key,
+          "OTA is compiled out but that was not the reported reason");
+#endif
+
+    /* The description must name the reason; "blocked" alone is unactionable. */
+    cairn_ota_preconditions(false, 11000, &b);
+    char why[256];
+    cairn_ota_describe_block(&b, why, sizeof(why));
+    CHECK(strstr(why, "trip") != NULL, "the block description omits the trip: \"%s\"",
+          why);
+    CHECK(strstr(why, "mV") != NULL, "the block description omits the supply: \"%s\"",
+          why);
+
+    return true;
+}
+
+/*
+ * Version ordering, including the case that must refuse rather than guess.
+ *
+ * An unparseable version on either side means the device cannot tell whether an
+ * image is newer. Guessing is how a device installs something older than
+ * itself, which is the one outcome an update must never produce.
+ */
+static bool row_ota_version_ordering(void)
+{
+    bool ok = false;
+
+    CHECK(cairn_ota_version_compare("cairn-v2.1.0", "cairn-v2.0.0", &ok) > 0 && ok,
+          "2.1.0 was not ordered above 2.0.0");
+    CHECK(cairn_ota_version_compare("cairn-v2.0.0", "cairn-v2.0.1", &ok) < 0 && ok,
+          "2.0.0 was not ordered below 2.0.1");
+    CHECK(cairn_ota_version_compare("cairn-v2.0.0", "cairn-v2.0.0", &ok) == 0 && ok,
+          "equal versions did not compare equal");
+    CHECK(cairn_ota_version_compare("cairn-v10.0.0", "cairn-v9.0.0", &ok) > 0 && ok,
+          "10.0.0 was not ordered above 9.0.0 — string comparison would get "
+          "this backwards");
+
+    cairn_ota_version_compare("not-a-version", "cairn-v2.0.0", &ok);
+    CHECK(!ok, "an unparseable version was silently ordered");
+
+    cairn_ota_version_compare("cairn-v2.0", "cairn-v2.0.0", &ok);
+    CHECK(!ok, "a two-component version was accepted");
+
+    /* A pre-release suffix is deliberately not ordered: there is no single
+     * correct answer, and refusing is safer than choosing one. */
+    cairn_ota_version_compare("cairn-v2.1.0-rc1", "cairn-v2.0.0", &ok);
+    CHECK(!ok, "a pre-release suffix was ordered anyway");
+
+    return true;
+}
+
+/*
+ * The descriptor decoder refuses anything it would not have produced.
+ *
+ * This is the one signature whose failure mode is an unbootable device, so a
+ * descriptor that parses loosely is worse here than anywhere else in the
+ * system.
+ */
+static bool row_ota_descriptor_strictness(void)
+{
+    cairn_update_descriptor_t d;
+    memset(&d, 0, sizeof(d));
+    d.descriptor_version = CAIRN_UPDATE_DESCRIPTOR_VERSION;
+    snprintf(d.firmware_version, sizeof(d.firmware_version), "cairn-v2.1.0");
+    snprintf(d.min_firmware_version, sizeof(d.min_firmware_version), "cairn-v2.0.0");
+    snprintf(d.signature_algorithm, sizeof(d.signature_algorithm), "%s",
+             CAIRN_SIGALG_ED25519);
+    d.image_length = 1114112;
+    d.build_utc_ms = 1760000000000ULL;
+    memset(d.image_sha256, 0xAB, 32);
+
+    uint8_t enc[512];
+    size_t  len = 0;
+    CHECK(cairn_update_encode(&d, enc, sizeof(enc), &len) == CAIRN_OK,
+          "descriptor would not encode");
+
+    uint8_t scratch[512];
+    cairn_update_descriptor_t back;
+    CHECK(cairn_update_decode(enc, len, &back, scratch, sizeof(scratch)) == CAIRN_OK,
+          "descriptor did not round-trip");
+    CHECK(strcmp(back.firmware_version, d.firmware_version) == 0,
+          "firmware_version did not survive");
+    CHECK(back.image_length == d.image_length, "image_length did not survive");
+    CHECK(memcmp(back.image_sha256, d.image_sha256, 32) == 0,
+          "image_sha256 did not survive");
+
+    /* Trailing bytes. */
+    uint8_t padded[513];
+    memcpy(padded, enc, len);
+    padded[len] = 0x00;
+    CHECK(cairn_update_decode(padded, len + 1, &back, scratch, sizeof(scratch))
+              != CAIRN_OK, "a trailing byte was accepted");
+
+    /* Truncation. */
+    CHECK(cairn_update_decode(enc, len - 1, &back, scratch, sizeof(scratch))
+              != CAIRN_OK, "a truncated descriptor was accepted");
+
+    /* A zero-length image names nothing installable. */
+    cairn_update_descriptor_t zero = d;
+    zero.image_length = 0;
+    uint8_t zenc[512];
+    size_t  zlen = 0;
+    CHECK(cairn_update_encode(&zero, zenc, sizeof(zenc), &zlen) == CAIRN_OK,
+          "zero-length descriptor would not encode");
+    CHECK(cairn_update_decode(zenc, zlen, &back, scratch, sizeof(scratch))
+              != CAIRN_OK, "a zero-length image was accepted");
+
+    /* A signature over the wrong key must fail, and must fail *before* the
+     * contents are trusted. */
+    uint8_t seed[32], pub[32], other_pub[32], sig[64];
+    memset(seed, 0x11, sizeof(seed));
+    cairn_ed25519_public_from_seed(seed, pub);
+    uint8_t other[32];
+    memset(other, 0x22, sizeof(other));
+    cairn_ed25519_public_from_seed(other, other_pub);
+
+    cairn_ed25519_sign(enc, len, seed, pub, sig);
+    CHECK(cairn_update_verify(enc, len, sig, pub, &back, scratch, sizeof(scratch))
+              == CAIRN_OK, "a correctly signed descriptor did not verify");
+    CHECK(cairn_update_verify(enc, len, sig, other_pub, &back, scratch,
+                              sizeof(scratch)) == CAIRN_ERR_BAD_SIGNATURE,
+          "a descriptor verified against the wrong key");
+
+    return true;
+}
+
 /* ── driver ───────────────────────────────────────────────────────────────── */
 
 typedef struct {
@@ -1657,6 +1869,9 @@ static const row_t ROWS[] = {
     { "policy",   "adaptive rates are never slower during a trip", row_adaptive_never_slower_during_trip },
     { "policy",   "dynamics classification responds to evidence", row_dynamics_classification },
     { "policy",   "snapshot encoding is deterministic",         row_policy_snapshot_deterministic },
+    { "ota",      "every precondition blocks on its own",       row_ota_preconditions_each_block },
+    { "ota",      "version ordering refuses rather than guesses", row_ota_version_ordering },
+    { "ota",      "descriptor decoding is strict",              row_ota_descriptor_strictness },
 };
 
 int main(int argc, char **argv)
