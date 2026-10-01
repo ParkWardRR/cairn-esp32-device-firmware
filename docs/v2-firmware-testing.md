@@ -314,6 +314,62 @@ Logging yields to data. Below 64 MiB free the SD sink shuts itself off and
 logging continues over UART only, and the whole log tree is capped at 16 MiB
 oldest-first. A testing aid must not be able to cost a trip.
 
+## Verifying the card without a server
+
+After a drive, `cairn-verify` reads bundles straight off the card and checks
+them with no server, no network and no enrolment involved.
+
+This exists because a failed sync is ambiguous. A bad bundle, a refused
+enrolment, a wrong receipt key and no Wi-Fi all look similar from the device's
+own logs. Verifying the card separates *"the firmware recorded this correctly"*
+from *"the upload worked"* — different problems with different fixes.
+
+```bash
+go run ./server/cmd/cairn-verify /Volumes/<card>/cairn
+
+# with signature and receipt checking
+go run ./server/cmd/cairn-verify \
+  -device-key $(: the public_key the firmware printed at boot) \
+  -server-key $(cairn-server -data /var/lib/cairn -print-receipt-key 2>/dev/null) \
+  -v /Volumes/<card>/cairn
+```
+
+It takes a card root, a `bundles/` directory, or a single bundle directory, and
+reports:
+
+```
+OK  /Volumes/card/cairn/bundles/01J...
+  bundle       0000000000005d9e88204a5ce12f2bc0
+  device       8777228e31648b23f6f783d28eee3e26  firmware cairn-v2.0.0
+  content root 77db4376f36801c4230a91a47c22dec6...
+  recovery     clean
+  seg-00000000.seg     EOF            1042 frame(s)  seq 0..1041
+  journal.seg          EOF              18 frame(s)  seq 0..17  (own chain)
+  pass  manifest parses as canonical deterministic CBOR
+  pass  re-encoding reproduces manifest.cbor byte-for-byte
+  pass  all 2 member(s) present, correct length and matching digest
+  pass  content root recomputes from the members
+  pass  1 chunk(s) cover exactly the 1088 bytes the members total
+  pass  manifest's seq range 0..1041 matches the segments
+  pass  record counts match the segments exactly
+```
+
+The last two checks are the ones nothing else performs. The manifest is a
+*claim* about the segments, and a firmware bug could make it a false claim while
+every signature still verified — so the record counts and sequence range are
+recomputed from the data and compared.
+
+Unsealed captures are reported too, labelled `(unsealed)`. That is the open
+bundle the device is still writing to, or one interrupted before sealing; its
+segments are scanned even though there is no manifest to check them against.
+
+It uses `server/format`, the reference implementation the specification is
+written against, so this is the Go implementation checking what the C firmware
+produced — a cross-implementation check on a real bundle rather than on a
+committed fixture. Verified to catch damage: flipping one byte in a segment or
+truncating it fails on the member digest, the sequence range *and* the record
+counts, independently.
+
 ## The card layout
 
 ```

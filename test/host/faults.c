@@ -93,6 +93,20 @@ static void rm_rf(const char *path)
     if (system(cmd) != 0) { /* a missing tree is fine */ }
 }
 
+/*
+ * CAIRN_TEST_KEEP=1 leaves each row's tree in /tmp instead of deleting it.
+ *
+ * Useful on its own for inspecting a failure, and it is how a bundle produced
+ * by *this* code gets handed to cairn-verify — which checks it with the Go
+ * reference implementation. That is a cross-implementation check on a real
+ * bundle rather than on a committed fixture.
+ */
+static bool keep_trees(void)
+{
+    const char *v = getenv("CAIRN_TEST_KEEP");
+    return v != NULL && v[0] == '1';
+}
+
 static bool fresh_tree(const char *row)
 {
     snprintf(g_root, sizeof(g_root), "/tmp/cairn-fault-%s", row);
@@ -1427,9 +1441,11 @@ int main(int argc, char **argv)
             printf("  FAIL  [%-8s] %s\n", ROWS[i].family, ROWS[i].name);
         }
 
-        char tree[700];
-        snprintf(tree, sizeof(tree), "/tmp/cairn-fault-%s", slug);
-        rm_rf(tree);
+        if (!keep_trees()) {
+            char tree[700];
+            snprintf(tree, sizeof(tree), "/tmp/cairn-fault-%s", slug);
+            rm_rf(tree);
+        }
     }
 
     printf("\nfirmware storage matrix: %d/%zu passed\n", g_pass, n);
