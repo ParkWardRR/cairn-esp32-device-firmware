@@ -337,6 +337,30 @@ static bool seal_now(cairn_capture_t *cap, char id_out[27], uint8_t root_out[32]
 
 static uint8_t g_seen_health_state;
 
+static uint8_t g_seen_event_type;
+static uint8_t g_seen_event_len;
+static int32_t g_seen_lat;
+static int32_t g_seen_lon;
+
+static bool capture_event_cb(const cairn_frame_t *f, void *user)
+{
+    (void)user;
+
+    if (f->record_type == CAIRN_REC_TRIP_EVENT && f->payload_len >= 12) {
+        g_seen_event_type = f->payload[0];
+        g_seen_event_len  = f->payload[1];
+        g_seen_lat = (int32_t)((uint32_t)f->payload[4] |
+                               ((uint32_t)f->payload[5] << 8) |
+                               ((uint32_t)f->payload[6] << 16) |
+                               ((uint32_t)f->payload[7] << 24));
+        g_seen_lon = (int32_t)((uint32_t)f->payload[8] |
+                               ((uint32_t)f->payload[9] << 8) |
+                               ((uint32_t)f->payload[10] << 16) |
+                               ((uint32_t)f->payload[11] << 24));
+    }
+    return true;
+}
+
 static bool capture_health_cb(const cairn_frame_t *f, void *user)
 {
     (void)user;
@@ -1836,6 +1860,119 @@ static bool row_ota_descriptor_strictness(void)
     return true;
 }
 
+
+/* ── trip events ──────────────────────────────────────────────────────────── */
+
+/*
+ * Events encode and round-trip through the card, and attribution is honest
+ * about what it cannot know.
+ *
+ * The attribution half is the point. Braking and cornering are
+ * indistinguishable from accelerometer magnitude alone, so with no speed signal
+ * the device must say HARSH_MOTION rather than pick one — a guessed label is
+ * indistinguishable from a measured one, which is the failure this project is
+ * built to avoid.
+ */
+static bool row_trip_event_round_trip(void)
+{
+    uint8_t device_id[16], seed[32], pub[32];
+    uint32_t boot = 0;
+    CHECK(cairn_identity_load(device_id, seed, pub, &boot), "identity load failed");
+
+    uint8_t boot_id[16];
+    cairn_new_boot_id(boot_id);
+
+    cairn_capture_t cap;
+    CHECK(cairn_capture_open_or_resume(&cap, device_id, boot_id), "open failed");
+
+    /* A detail string and a real position. */
+    const char *detail = "rms=1800mg dv=-640cm/s";
+    uint8_t payload[12 + CAIRN_MAX_EVENT_DETAIL];
+    size_t  len = 0;
+    CHECK(cairn_encode_trip_event(CAIRN_EVENT_HARSH_BRAKE, 340000000, -1185000000,
+                                  detail, payload, sizeof(payload), &len)
+              == CAIRN_OK, "event would not encode");
+    CHECK(len == 12 + strlen(detail), "encoded %zu bytes, want %zu", len,
+          12 + strlen(detail));
+
+    cairn_host_advance(100);
+    CHECK(cairn_capture_append(&cap, CAIRN_CHAIN_CAPTURE, CAIRN_REC_TRIP_EVENT,
+                               1, 0, cairn_millis(), payload, len),
+          "event append failed");
+
+    /* Read it back off the card. */
+    char id[27];
+    CHECK(current_capture_id(id, sizeof(id)), "no capture directory");
+
+    char rel[256];
+    snprintf(rel, sizeof(rel), "%s/%s/seg-00000000.seg", CAIRN_DIR_CAPTURE, id);
+
+    cairn_file_t *f = cairn_fs_open(rel, CAIRN_FS_READ);
+    CHECK(f != NULL, "cannot open the segment");
+
+    uint64_t size = cairn_fs_size(f);
+    cairn_scan_state_t state = { 0, 0 };
+    cairn_scan_result_t res;
+    g_seen_event_type = 0;
+    g_seen_event_len = 0;
+    cairn_err_t err = cairn_scan_segment_stream(fs_read_for_test, f, size, state,
+                                                &res, capture_event_cb, NULL);
+    cairn_fs_close(f);
+
+    CHECK(err == CAIRN_OK, "scan failed: %s", cairn_strerror(err));
+    CHECK(res.frames == 1, "segment holds %zu frames, want 1", res.frames);
+    CHECK(g_seen_event_type == CAIRN_EVENT_HARSH_BRAKE,
+          "event_type read back as %u, want %u", (unsigned)g_seen_event_type,
+          (unsigned)CAIRN_EVENT_HARSH_BRAKE);
+    CHECK(g_seen_event_len == strlen(detail),
+          "detail_len read back as %u, want %zu", (unsigned)g_seen_event_len,
+          strlen(detail));
+    CHECK(g_seen_lat == 340000000, "lat_e7 read back as %ld", (long)g_seen_lat);
+    CHECK(g_seen_lon == -1185000000, "lon_e7 read back as %ld", (long)g_seen_lon);
+
+    /* No detail, and no position, must both be representable. */
+    CHECK(cairn_encode_trip_event(CAIRN_EVENT_TRIP_START, 0, 0, NULL, payload,
+                                  sizeof(payload), &len) == CAIRN_OK,
+          "a detail-free event would not encode");
+    CHECK(len == 12, "a detail-free event encoded %zu bytes, want 12", len);
+    CHECK(payload[1] == 0, "detail_len is %u with no detail", (unsigned)payload[1]);
+
+    /* An oversized detail is truncated to the field, never overflowed. */
+    char huge[CAIRN_MAX_EVENT_DETAIL * 2];
+    memset(huge, 'x', sizeof(huge) - 1);
+    huge[sizeof(huge) - 1] = '\0';
+    CHECK(cairn_encode_trip_event(CAIRN_EVENT_IMPACT, 0, 0, huge, payload,
+                                  sizeof(payload), &len) == CAIRN_OK,
+          "an oversized detail was rejected outright");
+    CHECK(len == 12 + CAIRN_MAX_EVENT_DETAIL,
+          "oversized detail produced %zu bytes, want %d", len,
+          12 + CAIRN_MAX_EVENT_DETAIL);
+
+    /* A buffer too small must fail rather than write past it. */
+    uint8_t tiny[8];
+    CHECK(cairn_encode_trip_event(CAIRN_EVENT_TRIP_END, 0, 0, NULL, tiny,
+                                  sizeof(tiny), &len)
+              == CAIRN_ERR_BUFFER_TOO_SMALL,
+          "a short buffer did not fail");
+
+    /* Every defined type names itself, and an unknown one is still named
+     * rather than dropped. */
+    const uint8_t types[] = {
+        CAIRN_EVENT_TRIP_START, CAIRN_EVENT_TRIP_END, CAIRN_EVENT_HARSH_BRAKE,
+        CAIRN_EVENT_HARSH_ACCEL, CAIRN_EVENT_HARSH_CORNERING,
+        CAIRN_EVENT_IMPACT, CAIRN_EVENT_HARSH_MOTION,
+        CAIRN_EVENT_CAPTURE_RECOVERED,
+    };
+    for (size_t i = 0; i < sizeof(types) / sizeof(types[0]); i++) {
+        CHECK(strcmp(cairn_event_type_name(types[i]), "UNKNOWN_EVENT") != 0,
+              "event type %u has no name", (unsigned)types[i]);
+    }
+    CHECK(strcmp(cairn_event_type_name(200), "UNKNOWN_EVENT") == 0,
+          "an unrecognized event type was not reported as unknown");
+
+    return true;
+}
+
 /* ── driver ───────────────────────────────────────────────────────────────── */
 
 typedef struct {
@@ -1872,6 +2009,7 @@ static const row_t ROWS[] = {
     { "ota",      "every precondition blocks on its own",       row_ota_preconditions_each_block },
     { "ota",      "version ordering refuses rather than guesses", row_ota_version_ordering },
     { "ota",      "descriptor decoding is strict",              row_ota_descriptor_strictness },
+    { "events",   "trip events round-trip through the card",    row_trip_event_round_trip },
 };
 
 int main(int argc, char **argv)

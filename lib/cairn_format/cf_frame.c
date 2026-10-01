@@ -77,6 +77,44 @@ const char *cairn_record_type_name(uint8_t t)
     }
 }
 
+const char *cairn_event_type_name(uint8_t t)
+{
+    switch (t) {
+    case CAIRN_EVENT_TRIP_START:        return "TRIP_START";
+    case CAIRN_EVENT_TRIP_END:          return "TRIP_END";
+    case CAIRN_EVENT_HARSH_BRAKE:       return "HARSH_BRAKE";
+    case CAIRN_EVENT_HARSH_ACCEL:       return "HARSH_ACCELERATION";
+    case CAIRN_EVENT_HARSH_CORNERING:   return "HARSH_CORNERING";
+    case CAIRN_EVENT_IMPACT:            return "IMPACT";
+    case CAIRN_EVENT_HARSH_MOTION:      return "HARSH_MOTION";
+    case CAIRN_EVENT_CAPTURE_RECOVERED: return "CAPTURE_RECOVERED";
+    default:                            return "UNKNOWN_EVENT";
+    }
+}
+
+cairn_err_t cairn_encode_trip_event(uint8_t event_type, int32_t lat_e7,
+                                    int32_t lon_e7, const char *detail,
+                                    uint8_t *out, size_t out_cap,
+                                    size_t *written)
+{
+    size_t dlen = (detail != NULL) ? strlen(detail) : 0;
+    if (dlen > CAIRN_MAX_EVENT_DETAIL) dlen = CAIRN_MAX_EVENT_DETAIL;
+
+    size_t total = 12 + dlen;
+    if (out_cap < total) return CAIRN_ERR_BUFFER_TOO_SMALL;
+
+    memset(out, 0, total);
+    out[0] = event_type;
+    out[1] = (uint8_t)dlen;
+    /* out[2..3] reserved, zero */
+    put_u32(out + 4, (uint32_t)lat_e7);
+    put_u32(out + 8, (uint32_t)lon_e7);
+    if (dlen > 0) memcpy(out + 12, detail, dlen);
+
+    *written = total;
+    return CAIRN_OK;
+}
+
 void cairn_health_state_names(uint8_t state, char *out, size_t cap)
 {
     static const struct {

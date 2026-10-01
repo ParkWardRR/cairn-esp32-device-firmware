@@ -62,6 +62,67 @@ static uint16_t frame_flags(const Lifecycle *lc)
 }
 
 /*
+ * Record a trip event at the last known position.
+ *
+ * Position is taken from the most recent *valid* fix and is zero when there was
+ * none — never a stale fix carried forward, because an event placed at a
+ * position the vehicle has since left is worse than one with no position at
+ * all. Validity travels with the nearest GNSS_SAMPLE, as the spec requires.
+ */
+static void emit_trip_event(Lifecycle *lc, uint8_t event_type, const char *detail)
+{
+    int32_t lat = 0, lon = 0;
+    if (lc->have_recent_gnss && lc->last_gnss.fix_type >= 2) {
+        lat = lc->last_gnss.lat_e7;
+        lon = lc->last_gnss.lon_e7;
+    }
+
+    uint8_t payload[12 + CAIRN_MAX_EVENT_DETAIL];
+    size_t  len = 0;
+
+    if (cairn_encode_trip_event(event_type, lat, lon, detail, payload,
+                                sizeof(payload), &len) != CAIRN_OK) {
+        CAIRN_LOGE(TAG, "could not encode a %s event",
+                   cairn_event_type_name(event_type));
+        return;
+    }
+
+    cairn_capture_append(&lc->cap, CAIRN_CHAIN_CAPTURE, CAIRN_REC_TRIP_EVENT, 1,
+                         frame_flags(lc), millis(), payload, len);
+
+    CAIRN_LOGI(TAG, "event %s%s%s", cairn_event_type_name(event_type),
+               (detail != NULL) ? ": " : "", (detail != NULL) ? detail : "");
+}
+
+/*
+ * Attribute decisive dynamics to a cause, or admit that it cannot be done.
+ *
+ * Braking and cornering are indistinguishable from accelerometer magnitude
+ * alone: telling them apart needs either the mounting orientation, which is
+ * unknown without calibration, or a speed signal, which needs the ECU to be
+ * answering. When neither is available the motion is recorded as
+ * HARSH_MOTION — real, decisive, and honestly unattributed. A guess would be
+ * indistinguishable from a measurement.
+ */
+static uint8_t attribute_event(const Lifecycle *lc, int32_t speed_delta_cmps,
+                               bool have_speed)
+{
+    /* Far beyond any driving manoeuvre. Checked first because an impact must
+     * not be filed as enthusiastic braking. */
+    if (lc->last_accel_rms_mg >= 2000) return CAIRN_EVENT_IMPACT;
+
+    if (have_speed) {
+        if (speed_delta_cmps <= -500) return CAIRN_EVENT_HARSH_BRAKE;
+        if (speed_delta_cmps >= 500) return CAIRN_EVENT_HARSH_ACCEL;
+
+        /* Decisive lateral motion with the speed holding steady. */
+        return CAIRN_EVENT_HARSH_CORNERING;
+    }
+
+    return CAIRN_EVENT_HARSH_MOTION;
+}
+
+/*
  * Write the active policy into the bundle, once, at confirmation.
  *
  * Spec §4.9. A version number identifies a policy but does not describe one, so
@@ -697,6 +758,22 @@ void lifecycle_tick(Lifecycle *lc)
         if (d != lc->dynamics) {
             CAIRN_LOGD(TAG, "dynamics %s -> %s", cairn_dynamics_name(lc->dynamics),
                        cairn_dynamics_name(d));
+
+            /*
+             * One event per entry into EVENT, not per tick while it lasts. A
+             * single hard stop is one event; emitting at 50 Hz for its duration
+             * would bury it in its own repetitions.
+             */
+            if (d == CAIRN_DYN_EVENT && lc->dynamics != CAIRN_DYN_EVENT &&
+                lc->capture == CaptureState::Active) {
+                char detail[CAIRN_MAX_EVENT_DETAIL];
+                snprintf(detail, sizeof(detail), "rms=%umg dv=%ldcm/s",
+                         (unsigned)lc->last_accel_rms_mg, (long)delta);
+                emit_trip_event(lc, attribute_event(lc, delta,
+                                                    speed != CAIRN_U16_UNKNOWN),
+                                detail);
+            }
+
             lc->dynamics = d;
         }
 
@@ -736,6 +813,23 @@ void lifecycle_tick(Lifecycle *lc)
              * of them in the chain. */
             emit_policy_snapshot(lc);
             cairn_preroll_flush(&lc->preroll, &lc->cap);
+
+            /*
+             * After the pre-roll, so the event marks where the *trip* was
+             * declared rather than where the buffered history begins. The
+             * PRETRIP flag already distinguishes those records.
+             */
+            emit_trip_event(lc, CAIRN_EVENT_TRIP_START, nullptr);
+
+            /* A bundle that resumed an interrupted write says so in the data,
+             * not only in the manifest's recovery_state. */
+            if (lc->cap.recovery_state != CAIRN_RECOVERY_CLEAN) {
+                char detail[CAIRN_MAX_EVENT_DETAIL];
+                snprintf(detail, sizeof(detail), "state=%u discarded=%u",
+                         (unsigned)lc->cap.recovery_state,
+                         (unsigned)lc->cap.discarded_tail_bytes);
+                emit_trip_event(lc, CAIRN_EVENT_CAPTURE_RECOVERED, detail);
+            }
         }
         break;
 
@@ -759,6 +853,7 @@ void lifecycle_tick(Lifecycle *lc)
             /* Close any open gap before sealing, so the bundle's last word
              * about GNSS is accurate. */
             close_gnss_gap(lc, CAIRN_GAP_NO_FIX);
+            emit_trip_event(lc, CAIRN_EVENT_TRIP_END, nullptr);
             seal_and_reopen(lc, 0);
         }
         break;

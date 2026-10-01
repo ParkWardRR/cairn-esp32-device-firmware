@@ -651,6 +651,38 @@ typedef struct {
 
 void cairn_encode_state_transition(const cairn_state_transition_t *s, uint8_t out[20]);
 
+/* ── TRIP_EVENT (§4.6) ────────────────────────────────────────────────────── */
+
+#define CAIRN_EVENT_TRIP_START        1
+#define CAIRN_EVENT_TRIP_END          2
+#define CAIRN_EVENT_HARSH_BRAKE       3
+#define CAIRN_EVENT_HARSH_ACCEL       4
+#define CAIRN_EVENT_HARSH_CORNERING   5
+#define CAIRN_EVENT_IMPACT            6
+/*
+ * Decisive dynamics the device could not attribute. Attribution needs either
+ * the mounting orientation, which is unknown without calibration, or a speed
+ * signal, which needs the ECU answering. With neither, the motion is still real
+ * and still worth recording — guessing between brake and corner would produce a
+ * label indistinguishable from a measured one.
+ */
+#define CAIRN_EVENT_HARSH_MOTION      7
+#define CAIRN_EVENT_CAPTURE_RECOVERED 8
+
+const char *cairn_event_type_name(uint8_t t);
+
+#define CAIRN_MAX_EVENT_DETAIL 48
+
+/*
+ * Encode a trip event. `detail` may be NULL. Position is passed in rather than
+ * read from anywhere, because an event's position must be the nearest *known*
+ * fix — zero when there was none, never a stale one carried forward.
+ */
+cairn_err_t cairn_encode_trip_event(uint8_t event_type, int32_t lat_e7,
+                                    int32_t lon_e7, const char *detail,
+                                    uint8_t *out, size_t out_cap,
+                                    size_t *written);
+
 #ifdef __cplusplus
 }
 #endif
