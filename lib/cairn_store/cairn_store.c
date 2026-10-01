@@ -1,40 +1,45 @@
-#include "cairn_store.h"
+/*
+ * Storage: framed append, atomic seal, boot recovery.
+ *
+ * Portable C over cairn_fs / cairn_kv / cairn_platform, with no Arduino or IDF
+ * dependency. That is not tidiness — it is what makes this file's claims
+ * testable. "A torn tail is truncated to the last valid frame with an exact
+ * discarded byte count" and "an interrupted seal completes idempotently at the
+ * next boot" are properties about crash behaviour, and the host fault tests in
+ * test/host exercise exactly this code by tearing files and re-opening them.
+ */
 
-#include <Arduino.h>
-#include <Preferences.h>
-#include <SD.h>
-#include <esp_mac.h>
-#include <esp_random.h>
-#include <esp_system.h>
-#include <esp_timer.h>
+#include "cairn_store.h"
 
 #include <stdio.h>
 #include <string.h>
 
 #include "board_config.h"
+#include "cairn_fs.h"
+#include "cairn_kv.h"
 #include "cairn_log.h"
+#include "cairn_platform.h"
 
 static const char *TAG = "STORE";
 
-/*
- * 256 KiB chunks, the specification's default. With CAIRN_MAX_CHUNKS at 64 this
- * bounds a bundle at 16 MiB, comfortably above the 15 MiB that
- * CAIRN_MAX_MEMBERS segments can hold.
- */
+/* 256 KiB chunks, the specification's default. With CAIRN_MAX_CHUNKS at 64 this
+ * bounds a bundle at 16 MiB, above what CAIRN_MAX_MEMBERS segments can hold. */
 #define CHUNK_BYTES (256u * 1024u)
 
-/* Streaming I/O block. Large enough to keep SPI efficient, small enough to sit
+/* Streaming I/O block: large enough to keep SPI efficient, small enough to sit
  * in DRAM alongside everything else. */
 #define IO_BLOCK 2048
+
+#define PATH_MAX_LEN 160
 
 /* ── ULID ─────────────────────────────────────────────────────────────────── */
 
 static const char CROCKFORD[] = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 /*
- * A ULID is the operational handle for a bundle, not its identity: identity is
- * content_root. The timestamp prefix exists only so directory listings sort
- * chronologically, so a device with no valid clock yields a zero prefix rather
+ * A ULID is the operational handle for a bundle, not its identity — identity is
+ * content_root. The timestamp prefix exists only so listings sort
+ * chronologically, so a device with no valid clock gets a zero prefix rather
  * than a fabricated time.
  */
 static void ulid_generate(uint8_t out[16], uint64_t utc_ms)
@@ -46,23 +51,21 @@ static void ulid_generate(uint8_t out[16], uint64_t utc_ms)
     out[4] = (uint8_t)(utc_ms >> 8);
     out[5] = (uint8_t)(utc_ms);
 
-    esp_fill_random(out + 6, 10);
+    cairn_random(out + 6, 10);
 }
 
-static void ulid_encode(const uint8_t id[16], char out[27])
+void cairn_ulid_encode(const uint8_t id[16], char out[27])
 {
-    /* 128 bits into 26 base32 characters, most significant first. The top
+    /* 128 bits as 26 base32 characters, most significant first. The leading
      * character carries only 3 bits, which is inherent to 26 * 5 = 130. */
     for (int i = 0; i < 26; i++) {
-        int bit_pos = i * 5 - 2; /* the first character is short by 2 bits */
+        int      bit_pos = i * 5 - 2;
         uint32_t v = 0;
 
         for (int b = 0; b < 5; b++) {
-            int pos = bit_pos + b;
+            int      pos = bit_pos + b;
             uint32_t bit = 0;
-            if (pos >= 0 && pos < 128) {
-                bit = (id[pos / 8] >> (7 - (pos % 8))) & 1u;
-            }
+            if (pos >= 0 && pos < 128) bit = (id[pos / 8] >> (7 - (pos % 8))) & 1u;
             v = (v << 1) | bit;
         }
         out[i] = CROCKFORD[v & 0x1f];
@@ -78,7 +81,7 @@ static int crockford_value(char c)
     return -1;
 }
 
-static bool ulid_decode(const char *s, uint8_t out[16])
+bool cairn_ulid_decode(const char *s, uint8_t out[16])
 {
     if (strlen(s) != 26) return false;
 
@@ -91,8 +94,9 @@ static bool ulid_decode(const char *s, uint8_t out[16])
         for (int b = 0; b < 5; b++) {
             int pos = bit_pos + b;
             if (pos < 0 || pos >= 128) continue;
-            uint32_t bit = (uint32_t)(v >> (4 - b)) & 1u;
-            if (bit) out[pos / 8] |= (uint8_t)(1u << (7 - (pos % 8)));
+            if (((uint32_t)(v >> (4 - b)) & 1u) != 0) {
+                out[pos / 8] |= (uint8_t)(1u << (7 - (pos % 8)));
+            }
         }
     }
     return true;
@@ -103,77 +107,71 @@ static bool ulid_decode(const char *s, uint8_t out[16])
 bool cairn_identity_load(uint8_t device_id[16], uint8_t seed[32],
                          uint8_t pub[32], uint32_t *boot_count)
 {
-    Preferences prefs;
-    if (!prefs.begin("cairn", false)) {
-        CAIRN_LOGE(TAG, "NVS open failed; identity unavailable");
+    if (!cairn_kv_begin()) {
+        CAIRN_LOGE(TAG, "identity store unavailable");
         return false;
     }
 
     /*
-     * device_id is derived from the efuse MAC, so wiping NVS does not change
-     * which vehicle the data came from.
+     * device_id is derived from a hardware-unique value, so wiping the key
+     * store does not change which vehicle the data came from.
      */
-    if (prefs.getBytesLength("device_id") != 16) {
-        uint8_t mac[6] = { 0 };
-        esp_read_mac(mac, ESP_MAC_WIFI_STA);
-
+    if (!cairn_kv_get_blob("device_id", device_id, 16)) {
+        uint8_t unique[6];
         uint8_t digest[32];
-        cairn_sha256(mac, sizeof(mac), digest);
+
+        cairn_hw_unique_id(unique);
+        cairn_sha256(unique, sizeof(unique), digest);
         memcpy(device_id, digest, 16);
 
-        prefs.putBytes("device_id", device_id, 16);
-        CAIRN_LOGW(TAG, "device_id initialized from the efuse MAC");
-    } else {
-        prefs.getBytes("device_id", device_id, 16);
+        cairn_kv_set_blob("device_id", device_id, 16);
+        CAIRN_LOGW(TAG, "device_id initialized from the hardware id");
     }
 
     /*
-     * The signing seed is generated once from the hardware RNG. It cannot be
-     * re-derived, so losing NVS means a new key and re-enrolment on the server
-     * — which is the correct outcome, and loud rather than silent.
+     * The signing seed is generated once from the hardware RNG and cannot be
+     * re-derived, so losing the key store means a new key and re-enrolment on
+     * the server. That is the correct outcome, and it is loud rather than
+     * silent.
      *
      * Flash encryption is deliberately not enabled (see partitions-ab.csv), so
-     * this seed is readable from a physically extracted chip. That is an
-     * accepted trade for a device that must be recoverable on a bench; the key
-     * authorizes uploads, not deletion, and the server can revoke it.
+     * this seed is readable from a physically extracted chip. Accepted trade
+     * for a device that must stay recoverable on a bench: the key authorizes
+     * uploads, not deletions, and the server can revoke it.
      */
-    if (prefs.getBytesLength("key_seed") != 32) {
-        esp_fill_random(seed, 32);
-        prefs.putBytes("key_seed", seed, 32);
+    if (!cairn_kv_get_blob("key_seed", seed, 32)) {
+        cairn_random(seed, 32);
+        cairn_kv_set_blob("key_seed", seed, 32);
         CAIRN_LOGW(TAG, "generated a new device signing key; the server must "
                         "enrol this device before it can upload");
-    } else {
-        prefs.getBytes("key_seed", seed, 32);
     }
 
-    uint32_t count = prefs.getUInt("boot_count", 0) + 1;
-    prefs.putUInt("boot_count", count);
+    uint32_t count = cairn_kv_get_u32("boot_count", 0) + 1;
+    cairn_kv_set_u32("boot_count", count);
     *boot_count = count;
-
-    prefs.end();
 
     cairn_ed25519_public_from_seed(seed, pub);
 
     uint8_t key_id[8];
     cairn_device_key_id(pub, key_id);
-    CAIRN_LOGI(TAG,
-               "identity: device %02x%02x%02x%02x.. key_id %02x%02x%02x%02x%02x%02x%02x%02x boot %u",
+    CAIRN_LOGI(TAG, "identity: device %02x%02x%02x%02x.. key_id "
+                    "%02x%02x%02x%02x%02x%02x%02x%02x boot %u",
                device_id[0], device_id[1], device_id[2], device_id[3],
-               key_id[0], key_id[1], key_id[2], key_id[3],
-               key_id[4], key_id[5], key_id[6], key_id[7], (unsigned)count);
+               key_id[0], key_id[1], key_id[2], key_id[3], key_id[4],
+               key_id[5], key_id[6], key_id[7], (unsigned)count);
 
     return true;
 }
 
 void cairn_new_boot_id(uint8_t boot_id[16])
 {
-    esp_fill_random(boot_id, 16);
+    cairn_random(boot_id, 16);
 }
 
 /* ── paths ────────────────────────────────────────────────────────────────── */
 
-static void segment_path(const cairn_capture_t *cap, uint32_t index,
-                         char *out, size_t cap_len)
+static void segment_path(const cairn_capture_t *cap, uint32_t index, char *out,
+                         size_t cap_len)
 {
     snprintf(out, cap_len, "%s/seg-%08u.seg", cap->dir, (unsigned)index);
 }
@@ -191,7 +189,7 @@ bool cairn_store_init(void)
     };
 
     for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
-        if (!SD.exists(dirs[i]) && !SD.mkdir(dirs[i])) {
+        if (!cairn_fs_mkdir(dirs[i])) {
             CAIRN_LOGE(TAG, "mkdir %s failed", dirs[i]);
             return false;
         }
@@ -199,7 +197,7 @@ bool cairn_store_init(void)
     return true;
 }
 
-/* ── segment writing ──────────────────────────────────────────────────────── */
+/* ── segment creation ─────────────────────────────────────────────────────── */
 
 static bool write_segment_header(const cairn_capture_t *cap, const char *path,
                                  uint32_t segment_index, uint32_t first_seq)
@@ -212,24 +210,24 @@ static bool write_segment_header(const cairn_capture_t *cap, const char *path,
     memcpy(h.boot_id, cap->boot_id, 16);
     h.segment_index       = segment_index;
     h.first_seq           = first_seq;
-    h.opened_monotonic_us = (uint64_t)esp_timer_get_time();
+    h.opened_monotonic_us = cairn_micros();
 
-    uint8_t buf[CAIRN_SEGMENT_HEADER_SIZE];
+    uint8_t     buf[CAIRN_SEGMENT_HEADER_SIZE];
     cairn_err_t err = cairn_encode_segment_header(&h, buf, sizeof(buf));
     if (err != CAIRN_OK) {
         CAIRN_LOGE(TAG, "encode segment header: %s", cairn_strerror(err));
         return false;
     }
 
-    File f = SD.open(path, FILE_WRITE);
-    if (!f) {
+    cairn_file_t *f = cairn_fs_open(path, CAIRN_FS_WRITE);
+    if (f == NULL) {
         CAIRN_LOGE(TAG, "cannot create %s", path);
         return false;
     }
 
-    size_t n = f.write(buf, sizeof(buf));
-    f.flush();
-    f.close();
+    size_t n = cairn_fs_write(f, buf, sizeof(buf));
+    cairn_fs_flush(f);
+    cairn_fs_close(f);
 
     if (n != sizeof(buf)) {
         CAIRN_LOGE(TAG, "short write on %s header", path);
@@ -243,40 +241,36 @@ static bool write_segment_header(const cairn_capture_t *cap, const char *path,
 
 /* ── recovery ─────────────────────────────────────────────────────────────── */
 
-/* Reader backing the streaming scan with an open file on the card. */
-struct sd_reader {
-    File *f;
-};
-
-static bool sd_read(void *user, uint64_t offset, uint8_t *buf, size_t len)
+static bool fs_read_at(void *user, uint64_t offset, uint8_t *buf, size_t len)
 {
-    struct sd_reader *r = (struct sd_reader *)user;
+    cairn_file_t *f = (cairn_file_t *)user;
 
-    if (!r->f->seek((uint32_t)offset)) return false;
-    return r->f->read(buf, len) == (int)len;
+    if (!cairn_fs_seek(f, offset)) return false;
+    return cairn_fs_read(f, buf, len) == len;
 }
 
 /*
  * Truncate a segment to `keep` bytes.
  *
- * FatFs has no truncate through the Arduino File API, so the surviving prefix is
- * copied to a sibling and renamed over the original. The copy is written and
- * flushed before the original is removed, so an interruption leaves either the
- * original (recoverable again next boot) or the complete replacement — never a
+ * There is no truncate in the filesystem abstraction because FatFs does not
+ * offer one through the Arduino File API. The surviving prefix is copied to a
+ * sibling and renamed over the original; the copy is fully written and flushed
+ * before the original is removed, so an interruption leaves either the original
+ * — recoverable again next boot — or the complete replacement. Never a
  * half-truncated segment.
  */
 static bool truncate_segment(const char *path, uint32_t keep)
 {
-    char tmp[112];
+    char tmp[PATH_MAX_LEN];
     snprintf(tmp, sizeof(tmp), "%s.trunc", path);
 
-    File src = SD.open(path, FILE_READ);
-    if (!src) return false;
+    cairn_file_t *src = cairn_fs_open(path, CAIRN_FS_READ);
+    if (src == NULL) return false;
 
-    SD.remove(tmp);
-    File dst = SD.open(tmp, FILE_WRITE);
-    if (!dst) {
-        src.close();
+    cairn_fs_remove(tmp);
+    cairn_file_t *dst = cairn_fs_open(tmp, CAIRN_FS_WRITE);
+    if (dst == NULL) {
+        cairn_fs_close(src);
         return false;
     }
 
@@ -288,30 +282,26 @@ static bool truncate_segment(const char *path, uint32_t keep)
         size_t want = keep - copied;
         if (want > sizeof(block)) want = sizeof(block);
 
-        int got = src.read(block, want);
-        if (got <= 0) {
-            ok = false;
-            break;
-        }
-        if (dst.write(block, (size_t)got) != (size_t)got) {
+        size_t got = cairn_fs_read(src, block, want);
+        if (got == 0 || cairn_fs_write(dst, block, got) != got) {
             ok = false;
             break;
         }
         copied += (uint32_t)got;
     }
 
-    dst.flush();
-    dst.close();
-    src.close();
+    cairn_fs_flush(dst);
+    cairn_fs_close(dst);
+    cairn_fs_close(src);
 
     if (!ok || copied != keep) {
-        SD.remove(tmp);
+        cairn_fs_remove(tmp);
         CAIRN_LOGE(TAG, "truncate copy failed for %s (%u of %u bytes)", path,
                    (unsigned)copied, (unsigned)keep);
         return false;
     }
 
-    if (!SD.remove(path) || !SD.rename(tmp, path)) {
+    if (!cairn_fs_remove(path) || !cairn_fs_rename(tmp, path)) {
         CAIRN_LOGE(TAG, "truncate rename failed for %s", path);
         return false;
     }
@@ -323,20 +313,19 @@ static bool truncate_segment(const char *path, uint32_t keep)
  * Scan one segment, truncate any torn tail, and fold its tallies into the
  * capture state.
  *
- * `chain` is carried in and out so capture segments continue a single sequence
+ * `chain` is carried in and out so capture segments continue one sequence
  * across rotations. A header error leaves the file untouched: the segment is
- * unusable, but deleting it would discard data the server might still salvage,
- * and nothing here is permitted to delete bundle data.
+ * unusable here, but deleting it would discard data the server might still
+ * salvage, and nothing in this module may delete bundle data.
  */
 static bool recover_segment(cairn_capture_t *cap, const char *path,
                             cairn_chain_t *chain, bool fold_counts,
                             uint32_t *bytes_out)
 {
-    File f = SD.open(path, FILE_READ);
-    if (!f) return false;
+    cairn_file_t *f = cairn_fs_open(path, CAIRN_FS_READ);
+    if (f == NULL) return false;
 
-    uint32_t size = (uint32_t)f.size();
-    struct sd_reader reader = { &f };
+    uint64_t size = cairn_fs_size(f);
 
     cairn_scan_state_t state;
     state.expected_seq  = chain->next_seq;
@@ -344,8 +333,8 @@ static bool recover_segment(cairn_capture_t *cap, const char *path,
 
     cairn_scan_result_t res;
     cairn_err_t err =
-        cairn_scan_segment_stream(sd_read, &reader, size, state, &res, NULL, NULL);
-    f.close();
+        cairn_scan_segment_stream(fs_read_at, f, size, state, &res, NULL, NULL);
+    cairn_fs_close(f);
 
     if (err != CAIRN_OK) {
         CAIRN_LOGE(TAG, "%s is unusable (%s); leaving it in place for the server",
@@ -360,14 +349,14 @@ static bool recover_segment(cairn_capture_t *cap, const char *path,
 
     if (res.discarded_tail_bytes > 0) {
         /*
-         * Honest incompleteness: the exact byte count goes into the manifest,
-         * and the recovery state is raised so the server knows this bundle was
+         * Honest incompleteness: the exact byte count goes into the manifest
+         * and the recovery state is raised, so the server knows this bundle was
          * reconstructed rather than cleanly sealed.
          */
         cap->discarded_tail_bytes += res.discarded_tail_bytes;
-        cap->recovery_state =
-            (res.stop == CAIRN_STOP_TORN_TAIL) ? CAIRN_RECOVERY_RECOVERED_TAIL
-                                               : CAIRN_RECOVERY_SALVAGED;
+        cap->recovery_state = (res.stop == CAIRN_STOP_TORN_TAIL)
+                                  ? CAIRN_RECOVERY_RECOVERED_TAIL
+                                  : CAIRN_RECOVERY_SALVAGED;
 
         if (!truncate_segment(path, (uint32_t)res.stop_offset)) {
             CAIRN_LOGW(TAG, "could not truncate %s; appending would corrupt the "
@@ -388,9 +377,9 @@ static bool recover_segment(cairn_capture_t *cap, const char *path,
         }
     }
 
-    chain->next_seq    = res.next.expected_seq;
-    chain->prev_crc32  = res.next.expected_prev;
-    *bytes_out         = (uint32_t)res.stop_offset;
+    chain->next_seq   = res.next.expected_seq;
+    chain->prev_crc32 = res.next.expected_prev;
+    *bytes_out        = (uint32_t)res.stop_offset;
 
     return true;
 }
@@ -399,29 +388,24 @@ static bool recover_segment(cairn_capture_t *cap, const char *path,
 
 static bool find_open_capture(char *out, size_t cap_len)
 {
-    File dir = SD.open(CAIRN_DIR_CAPTURE);
-    if (!dir) return false;
+    cairn_dir_t *dir = cairn_fs_opendir(CAIRN_DIR_CAPTURE);
+    if (dir == NULL) return false;
 
     bool found = false;
-    for (;;) {
-        File entry = dir.openNextFile();
-        if (!entry) break;
+    char name[64];
+    bool is_dir = false;
 
-        if (entry.isDirectory()) {
-            const char *name = entry.name();
-            const char *base = strrchr(name, '/');
-            base = (base != nullptr) ? base + 1 : name;
+    while (cairn_fs_readdir(dir, name, sizeof(name), &is_dir, NULL)) {
+        if (!is_dir) continue;
 
-            uint8_t probe[16];
-            if (ulid_decode(base, probe)) {
-                snprintf(out, cap_len, "%s", base);
-                found = true;
-            }
+        uint8_t probe[16];
+        if (cairn_ulid_decode(name, probe)) {
+            snprintf(out, cap_len, "%s", name);
+            found = true;
+            break;
         }
-        entry.close();
-        if (found) break;
     }
-    dir.close();
+    cairn_fs_closedir(dir);
     return found;
 }
 
@@ -432,30 +416,30 @@ bool cairn_capture_open_or_resume(cairn_capture_t *cap,
     memset(cap, 0, sizeof(*cap));
     memcpy(cap->device_id, device_id, 16);
     memcpy(cap->boot_id, boot_id, 16);
-    cap->capture_started_monotonic_us = (uint64_t)esp_timer_get_time();
-    cap->last_flush_ms = millis();
+    cap->capture_started_monotonic_us = cairn_micros();
+    cap->last_flush_ms = cairn_millis();
 
     char id_text[27];
+    char path[PATH_MAX_LEN];
 
     if (find_open_capture(id_text, sizeof(id_text))) {
-        if (!ulid_decode(id_text, cap->bundle_id)) return false;
+        if (!cairn_ulid_decode(id_text, cap->bundle_id)) return false;
         snprintf(cap->dir, sizeof(cap->dir), "%s/%s", CAIRN_DIR_CAPTURE, id_text);
 
         CAIRN_LOGW(TAG, "resuming interrupted capture %s", id_text);
 
         /*
-         * Walk capture segments in index order. A single chain spans them, so
-         * they must be scanned in order for the continuity check to mean
-         * anything.
+         * Capture segments are walked in index order. A single chain spans
+         * them, so out-of-order scanning would make the continuity check
+         * meaningless.
          */
         uint32_t index = 0;
         uint32_t last_bytes = CAIRN_SEGMENT_HEADER_SIZE;
         bool     chain_intact = true;
 
         for (; index < CAIRN_MAX_MEMBERS; index++) {
-            char path[112];
             segment_path(cap, index, path, sizeof(path));
-            if (!SD.exists(path)) break;
+            if (!cairn_fs_exists(path)) break;
 
             uint32_t bytes = 0;
             if (!recover_segment(cap, path, &cap->capture_chain, true, &bytes)) {
@@ -466,14 +450,10 @@ bool cairn_capture_open_or_resume(cairn_capture_t *cap,
         }
 
         if (index == 0) {
-            /* A capture directory with no segments: treat it as fresh. */
             CAIRN_LOGW(TAG, "capture %s had no segments; starting segment 0",
                        id_text);
-
-            char path0[112];
-            segment_path(cap, 0, path0, sizeof(path0));
-            if (!write_segment_header(cap, path0, 0, 0)) return false;
-
+            segment_path(cap, 0, path, sizeof(path));
+            if (!write_segment_header(cap, path, 0, 0)) return false;
             cap->segment_index = 0;
             cap->segment_bytes = CAIRN_SEGMENT_HEADER_SIZE;
         } else {
@@ -481,17 +461,16 @@ bool cairn_capture_open_or_resume(cairn_capture_t *cap,
             cap->segment_bytes = last_bytes;
         }
 
-        char jpath[112];
-        journal_path(cap, jpath, sizeof(jpath));
-        if (SD.exists(jpath)) {
+        journal_path(cap, path, sizeof(path));
+        if (cairn_fs_exists(path)) {
             uint32_t jbytes = 0;
-            if (recover_segment(cap, jpath, &cap->journal_chain, false, &jbytes)) {
+            if (recover_segment(cap, path, &cap->journal_chain, false, &jbytes)) {
                 cap->journal_bytes = jbytes;
             } else {
                 chain_intact = false;
             }
         } else {
-            if (!write_segment_header(cap, jpath, 0, 0)) return false;
+            if (!write_segment_header(cap, path, 0, 0)) return false;
             cap->journal_bytes = CAIRN_SEGMENT_HEADER_SIZE;
         }
 
@@ -519,15 +498,14 @@ bool cairn_capture_open_or_resume(cairn_capture_t *cap,
 
     /* Nothing open: start a fresh capture. */
     ulid_generate(cap->bundle_id, 0);
-    ulid_encode(cap->bundle_id, id_text);
+    cairn_ulid_encode(cap->bundle_id, id_text);
     snprintf(cap->dir, sizeof(cap->dir), "%s/%s", CAIRN_DIR_CAPTURE, id_text);
 
-    if (!SD.mkdir(cap->dir)) {
+    if (!cairn_fs_mkdir(cap->dir)) {
         CAIRN_LOGE(TAG, "mkdir %s failed", cap->dir);
         return false;
     }
 
-    char path[112];
     segment_path(cap, 0, path, sizeof(path));
     if (!write_segment_header(cap, path, 0, 0)) return false;
     cap->segment_bytes = CAIRN_SEGMENT_HEADER_SIZE;
@@ -546,9 +524,9 @@ bool cairn_capture_open_or_resume(cairn_capture_t *cap,
 static bool rotate_segment(cairn_capture_t *cap)
 {
     /*
-     * A bundle may hold at most CAIRN_MAX_MEMBERS members, one of which is
-     * journal.seg. Running out of members is a reason to seal, not a reason to
-     * fail an append, so the lifecycle is told rather than the data dropped.
+     * A bundle holds at most CAIRN_MAX_MEMBERS members, one of which is
+     * journal.seg. Exhausting the budget is a reason to seal, not a reason to
+     * fail an append silently, so the lifecycle is told rather than data lost.
      */
     if (cap->segment_index + 1 >= CAIRN_MAX_MEMBERS - 1) {
         cap->needs_seal = true;
@@ -558,15 +536,15 @@ static bool rotate_segment(cairn_capture_t *cap)
     }
 
     uint32_t next = cap->segment_index + 1;
-    char path[112];
+    char     path[PATH_MAX_LEN];
     segment_path(cap, next, path, sizeof(path));
 
     if (!write_segment_header(cap, path, next, cap->capture_chain.next_seq)) {
         return false;
     }
 
-    cap->segment_index    = next;
-    cap->segment_bytes    = CAIRN_SEGMENT_HEADER_SIZE;
+    cap->segment_index     = next;
+    cap->segment_bytes     = CAIRN_SEGMENT_HEADER_SIZE;
     cap->segment_first_seq = cap->capture_chain.next_seq;
 
     return true;
@@ -579,11 +557,11 @@ bool cairn_capture_append(cairn_capture_t *cap, cairn_chain_id_t chain_id,
 {
     if (!cap->active) return false;
 
-    cairn_chain_t *chain =
-        (chain_id == CAIRN_CHAIN_JOURNAL) ? &cap->journal_chain : &cap->capture_chain;
+    cairn_chain_t *chain = (chain_id == CAIRN_CHAIN_JOURNAL) ? &cap->journal_chain
+                                                             : &cap->capture_chain;
 
-    uint8_t stage[CAIRN_STAGE_BYTES];
-    size_t  written = 0;
+    uint8_t  stage[CAIRN_STAGE_BYTES];
+    size_t   written = 0;
     uint32_t crc = 0;
 
     cairn_err_t err = cairn_encode_frame(record_type, schema_version, flags,
@@ -596,7 +574,7 @@ bool cairn_capture_append(cairn_capture_t *cap, cairn_chain_id_t chain_id,
         return false;
     }
 
-    char path[112];
+    char path[PATH_MAX_LEN];
     if (chain_id == CAIRN_CHAIN_JOURNAL) {
         journal_path(cap, path, sizeof(path));
     } else {
@@ -606,38 +584,38 @@ bool cairn_capture_append(cairn_capture_t *cap, cairn_chain_id_t chain_id,
         segment_path(cap, cap->segment_index, path, sizeof(path));
     }
 
-    File f = SD.open(path, FILE_APPEND);
-    if (!f) {
+    cairn_file_t *f = cairn_fs_open(path, CAIRN_FS_APPEND);
+    if (f == NULL) {
         cap->write_errors++;
         CAIRN_LOGE(TAG, "cannot append to %s", path);
         return false;
     }
 
-    size_t n = f.write(stage, written);
+    size_t n = cairn_fs_write(f, stage, written);
 
     /*
      * Flush on a cadence rather than per frame. The format tolerates a torn
      * tail exactly — that is what the length prefix and per-frame CRC are for —
-     * so the trade is bounded data loss against a third of the write load.
+     * so the trade is bounded loss against roughly a third of the write load.
      */
     cap->frames_since_flush++;
-    uint32_t now = millis();
+    uint32_t now = cairn_millis();
     if (cap->frames_since_flush >= CAIRN_FLUSH_EVERY_FRAMES ||
         now - cap->last_flush_ms >= CAIRN_FLUSH_EVERY_MS) {
-        f.flush();
+        cairn_fs_flush(f);
         cap->frames_since_flush = 0;
         cap->last_flush_ms = now;
     }
-    f.close();
+    cairn_fs_close(f);
 
     if (n != written) {
         cap->write_errors++;
         CAIRN_LOGE(TAG, "short write to %s: %u of %u bytes", path, (unsigned)n,
                    (unsigned)written);
         /*
-         * The chain is not advanced. The partial bytes become a torn tail that
-         * the next boot's scan will find and truncate, which is strictly better
-         * than advancing past a record that was never fully stored.
+         * The chain is deliberately not advanced. The partial bytes become a
+         * torn tail that the next scan finds and truncates, which is strictly
+         * better than advancing past a record that was never fully stored.
          */
         return false;
     }
@@ -658,7 +636,7 @@ bool cairn_capture_append(cairn_capture_t *cap, cairn_chain_id_t chain_id,
     cap->record_counts[record_type]++;
     chain->next_seq++;
     chain->prev_crc32 = crc;
-    cap->capture_ended_monotonic_us = (uint64_t)esp_timer_get_time();
+    cap->capture_ended_monotonic_us = cairn_micros();
 
     CAIRN_LOGT(TAG, "frame %s seq %u, %u bytes, crc %08x",
                cairn_record_type_name(record_type),
@@ -676,52 +654,47 @@ void cairn_capture_set_utc_basis(cairn_capture_t *cap, uint64_t utc_ms,
 
 bool cairn_capture_flush(cairn_capture_t *cap)
 {
-    /* Each append opens, writes and closes, so closing is the flush. This exists
-     * for the durability points that must be explicit at the call site. */
+    /* Each append opens, writes and closes, so closing is the flush. This marker
+     * exists for the durability points that must be explicit at the call site. */
     cap->frames_since_flush = 0;
-    cap->last_flush_ms = millis();
+    cap->last_flush_ms = cairn_millis();
     return true;
 }
 
-void cairn_capture_tick(cairn_capture_t *cap)
-{
-    (void)cap;
-}
+void cairn_capture_tick(cairn_capture_t *cap) { (void)cap; }
 
 /* ── seal ─────────────────────────────────────────────────────────────────── */
 
-/* Collect the members of a capture directory, sorted canonically. */
 static size_t collect_members(const char *dir, cairn_member_t *members,
                               size_t max_members)
 {
-    File d = SD.open(dir);
-    if (!d) return 0;
+    cairn_dir_t *d = cairn_fs_opendir(dir);
+    if (d == NULL) return 0;
 
-    size_t count = 0;
-    for (;;) {
-        File entry = d.openNextFile();
-        if (!entry) break;
+    size_t   count = 0;
+    char     name[64];
+    bool     is_dir = false;
+    uint64_t size = 0;
 
-        if (!entry.isDirectory()) {
-            const char *name = entry.name();
-            const char *base = strrchr(name, '/');
-            base = (base != nullptr) ? base + 1 : name;
+    while (cairn_fs_readdir(d, name, sizeof(name), &is_dir, &size)) {
+        if (is_dir) continue;
 
-            /* Only .seg files are members. A manifest written by an interrupted
-             * seal must not become a member of the bundle it describes. */
-            size_t nlen = strlen(base);
-            bool is_seg = nlen > 4 && strcmp(base + nlen - 4, ".seg") == 0;
+        /*
+         * Only .seg files are members. A manifest written by an interrupted
+         * seal must not become a member of the bundle it describes, which would
+         * make the content root depend on its own signature.
+         */
+        size_t nlen = strlen(name);
+        bool   is_seg = nlen > 4 && strcmp(name + nlen - 4, ".seg") == 0;
 
-            if (is_seg && count < max_members && nlen + 1 <= CAIRN_MAX_MEMBER_NAME) {
-                snprintf(members[count].name, CAIRN_MAX_MEMBER_NAME, "%s", base);
-                members[count].length = (uint64_t)entry.size();
-                memset(members[count].sha256, 0, 32);
-                count++;
-            }
+        if (is_seg && count < max_members && nlen + 1 <= CAIRN_MAX_MEMBER_NAME) {
+            snprintf(members[count].name, CAIRN_MAX_MEMBER_NAME, "%s", name);
+            members[count].length = size;
+            memset(members[count].sha256, 0, 32);
+            count++;
         }
-        entry.close();
     }
-    d.close();
+    cairn_fs_closedir(d);
 
     cairn_sort_members(members, count);
     return count;
@@ -736,21 +709,21 @@ static size_t collect_members(const char *dir, cairn_member_t *members,
  * stream. Two separate passes could disagree if a file changed in between.
  */
 static bool digest_members_and_chunks(const char *dir, cairn_member_t *members,
-                                      size_t member_count,
-                                      cairn_chunk_t *chunks, size_t *chunk_count)
+                                      size_t member_count, cairn_chunk_t *chunks,
+                                      size_t *chunk_count)
 {
     cairn_sha256_t chunk_ctx;
-    uint32_t chunk_bytes = 0;
-    size_t   chunks_used = 0;
+    uint32_t       chunk_bytes = 0;
+    size_t         chunks_used = 0;
 
     cairn_sha256_init(&chunk_ctx);
 
     for (size_t i = 0; i < member_count; i++) {
-        char path[112];
+        char path[PATH_MAX_LEN];
         snprintf(path, sizeof(path), "%s/%s", dir, members[i].name);
 
-        File f = SD.open(path, FILE_READ);
-        if (!f) {
+        cairn_file_t *f = cairn_fs_open(path, CAIRN_FS_READ);
+        if (f == NULL) {
             CAIRN_LOGE(TAG, "cannot read member %s", members[i].name);
             return false;
         }
@@ -762,18 +735,18 @@ static bool digest_members_and_chunks(const char *dir, cairn_member_t *members,
         uint64_t total = 0;
 
         for (;;) {
-            int got = f.read(block, sizeof(block));
-            if (got <= 0) break;
+            size_t got = cairn_fs_read(f, block, sizeof(block));
+            if (got == 0) break;
 
-            cairn_sha256_update(&member_ctx, block, (size_t)got);
+            cairn_sha256_update(&member_ctx, block, got);
             total += (uint64_t)got;
 
-            /* Feed the same bytes into the chunk rolling hash, closing a chunk
-             * whenever it fills. A chunk may span members. */
+            /* The same bytes feed the chunk rolling hash; a chunk may span
+             * members, so the chunk state persists across this loop. */
             size_t consumed = 0;
-            while (consumed < (size_t)got) {
+            while (consumed < got) {
                 size_t room = CHUNK_BYTES - chunk_bytes;
-                size_t take = (size_t)got - consumed;
+                size_t take = got - consumed;
                 if (take > room) take = room;
 
                 cairn_sha256_update(&chunk_ctx, block + consumed, take);
@@ -782,8 +755,9 @@ static bool digest_members_and_chunks(const char *dir, cairn_member_t *members,
 
                 if (chunk_bytes == CHUNK_BYTES) {
                     if (chunks_used >= CAIRN_MAX_CHUNKS) {
-                        CAIRN_LOGE(TAG, "bundle exceeds %d chunks", CAIRN_MAX_CHUNKS);
-                        f.close();
+                        CAIRN_LOGE(TAG, "bundle exceeds %d chunks",
+                                   CAIRN_MAX_CHUNKS);
+                        cairn_fs_close(f);
                         return false;
                     }
                     chunks[chunks_used].index       = (uint32_t)chunks_used;
@@ -796,7 +770,7 @@ static bool digest_members_and_chunks(const char *dir, cairn_member_t *members,
                 }
             }
         }
-        f.close();
+        cairn_fs_close(f);
 
         cairn_sha256_final(&member_ctx, members[i].sha256);
 
@@ -805,7 +779,6 @@ static bool digest_members_and_chunks(const char *dir, cairn_member_t *members,
         members[i].length = total;
     }
 
-    /* Close the final partial chunk. */
     if (chunk_bytes > 0) {
         if (chunks_used >= CAIRN_MAX_CHUNKS) {
             CAIRN_LOGE(TAG, "bundle exceeds %d chunks", CAIRN_MAX_CHUNKS);
@@ -823,39 +796,36 @@ static bool digest_members_and_chunks(const char *dir, cairn_member_t *members,
 
 static bool write_exact(const char *path, const uint8_t *data, size_t len)
 {
-    SD.remove(path);
+    cairn_fs_remove(path);
 
-    File f = SD.open(path, FILE_WRITE);
-    if (!f) return false;
+    cairn_file_t *f = cairn_fs_open(path, CAIRN_FS_WRITE);
+    if (f == NULL) return false;
 
-    size_t n = f.write(data, len);
-    f.flush();
-    f.close();
+    size_t n = cairn_fs_write(f, data, len);
+    cairn_fs_flush(f);
+    cairn_fs_close(f);
 
     return n == len;
 }
 
 /*
- * Build, sign and write the manifest for a capture directory, then move it to
- * CAIRN_DIR_BUNDLES.
- *
- * Split from cairn_capture_seal so that a seal interrupted after the manifest
- * was written can be finished at the next boot without re-signing.
+ * Move a capture directory that already holds a valid manifest into the sealed
+ * tree. Split out so a seal interrupted after the manifest was written can be
+ * completed at the next boot without re-signing anything.
  */
 static bool finish_seal(const char *dir, const char *id_text)
 {
-    char from[112], to[112];
-    snprintf(from, sizeof(from), "%s", dir);
+    char to[PATH_MAX_LEN];
     snprintf(to, sizeof(to), "%s/%s", CAIRN_DIR_BUNDLES, id_text);
 
-    if (SD.exists(to)) {
-        CAIRN_LOGE(TAG, "%s already exists; refusing to overwrite a sealed "
-                        "bundle", to);
+    if (cairn_fs_exists(to)) {
+        CAIRN_LOGE(TAG, "%s already exists; refusing to overwrite a sealed bundle",
+                   to);
         return false;
     }
 
-    if (!SD.rename(from, to)) {
-        CAIRN_LOGE(TAG, "rename %s -> %s failed", from, to);
+    if (!cairn_fs_rename(dir, to)) {
+        CAIRN_LOGE(TAG, "rename %s -> %s failed", dir, to);
         return false;
     }
 
@@ -870,7 +840,7 @@ bool cairn_capture_seal(cairn_capture_t *cap, const uint8_t seed[32],
     if (!cap->active) return false;
 
     cairn_capture_flush(cap);
-    cap->capture_ended_monotonic_us = (uint64_t)esp_timer_get_time();
+    cap->capture_ended_monotonic_us = cairn_micros();
 
     static cairn_manifest_t m;
     memset(&m, 0, sizeof(m));
@@ -892,9 +862,9 @@ bool cairn_capture_seal(cairn_capture_t *cap, const uint8_t seed[32],
 
     memcpy(m.record_counts, cap->record_counts, sizeof(m.record_counts));
 
-    m.policy_version        = policy_version;
-    m.recovery_state        = cap->recovery_state;
-    m.discarded_tail_bytes  = cap->discarded_tail_bytes;
+    m.policy_version       = policy_version;
+    m.recovery_state       = cap->recovery_state;
+    m.discarded_tail_bytes = cap->discarded_tail_bytes;
     snprintf(m.signature_algorithm, sizeof(m.signature_algorithm), "%s",
              CAIRN_SIGALG_ED25519);
 
@@ -904,8 +874,8 @@ bool cairn_capture_seal(cairn_capture_t *cap, const uint8_t seed[32],
         return false;
     }
 
-    if (!digest_members_and_chunks(cap->dir, m.members, m.member_count,
-                                   m.chunks, &m.chunk_count)) {
+    if (!digest_members_and_chunks(cap->dir, m.members, m.member_count, m.chunks,
+                                   &m.chunk_count)) {
         return false;
     }
 
@@ -916,8 +886,8 @@ bool cairn_capture_seal(cairn_capture_t *cap, const uint8_t seed[32],
     }
 
     static uint8_t encoded[4096];
-    size_t  encoded_len = 0;
-    uint8_t sig[64];
+    size_t         encoded_len = 0;
+    uint8_t        sig[64];
 
     err = cairn_manifest_sign(&m, seed, pub, encoded, sizeof(encoded),
                               &encoded_len, sig);
@@ -928,19 +898,25 @@ bool cairn_capture_seal(cairn_capture_t *cap, const uint8_t seed[32],
 
     /*
      * Verify what was just produced before relying on it. A manifest that does
-     * not verify on the device will not verify on the server either, and
-     * discovering that here keeps a broken bundle out of the upload queue.
+     * not verify here will not verify on the server either, and finding out now
+     * keeps a broken bundle out of the upload queue.
      */
     if (cairn_manifest_verify(encoded, encoded_len, sig, pub) != CAIRN_OK) {
-        CAIRN_LOGE(TAG, "freshly signed manifest fails verification; refusing "
-                        "to seal");
+        CAIRN_LOGE(TAG, "freshly signed manifest fails verification; refusing to seal");
         return false;
     }
 
     char id_text[27];
-    ulid_encode(cap->bundle_id, id_text);
+    cairn_ulid_encode(cap->bundle_id, id_text);
 
-    char path[112];
+    /*
+     * The manifest is written into the capture directory *before* the move, so
+     * an interrupted seal leaves either a capture holding a valid manifest —
+     * completed by cairn_store_resume_interrupted_seals() — or a finished
+     * bundle. Neither state loses data and neither yields a bundle without a
+     * manifest.
+     */
+    char path[PATH_MAX_LEN];
     snprintf(path, sizeof(path), "%s/manifest.cbor", cap->dir);
     if (!write_exact(path, encoded, encoded_len)) {
         CAIRN_LOGE(TAG, "cannot write %s", path);
@@ -961,7 +937,7 @@ bool cairn_capture_seal(cairn_capture_t *cap, const uint8_t seed[32],
 
     if (!finish_seal(cap->dir, id_text)) return false;
 
-    if (out_bundle_id != nullptr) memcpy(out_bundle_id, cap->bundle_id, 16);
+    if (out_bundle_id != NULL) memcpy(out_bundle_id, cap->bundle_id, 16);
 
     cap->active = false;
     return true;
@@ -969,44 +945,39 @@ bool cairn_capture_seal(cairn_capture_t *cap, const uint8_t seed[32],
 
 int cairn_store_resume_interrupted_seals(void)
 {
-    File dir = SD.open(CAIRN_DIR_CAPTURE);
-    if (!dir) return 0;
+    cairn_dir_t *dir = cairn_fs_opendir(CAIRN_DIR_CAPTURE);
+    if (dir == NULL) return 0;
 
     /* Collect first, act second: moving a directory while iterating it would
      * invalidate the iterator. */
-    char     candidates[CAIRN_MAX_MEMBERS][27];
-    int      candidate_count = 0;
+    char candidates[CAIRN_MAX_MEMBERS][27];
+    int  candidate_count = 0;
 
-    for (;;) {
-        File entry = dir.openNextFile();
-        if (!entry) break;
+    char name[64];
+    bool is_dir = false;
 
-        if (entry.isDirectory() && candidate_count < CAIRN_MAX_MEMBERS) {
-            const char *name = entry.name();
-            const char *base = strrchr(name, '/');
-            base = (base != nullptr) ? base + 1 : name;
+    while (cairn_fs_readdir(dir, name, sizeof(name), &is_dir, NULL)) {
+        if (!is_dir || candidate_count >= CAIRN_MAX_MEMBERS) continue;
 
-            uint8_t probe[16];
-            if (ulid_decode(base, probe)) {
-                snprintf(candidates[candidate_count], 27, "%s", base);
-                candidate_count++;
-            }
+        uint8_t probe[16];
+        if (cairn_ulid_decode(name, probe)) {
+            snprintf(candidates[candidate_count], 27, "%s", name);
+            candidate_count++;
         }
-        entry.close();
     }
-    dir.close();
+    cairn_fs_closedir(dir);
 
     int finished = 0;
 
     for (int i = 0; i < candidate_count; i++) {
-        char cdir[112], mpath[128], spath[128];
+        char cdir[PATH_MAX_LEN], mpath[PATH_MAX_LEN], spath[PATH_MAX_LEN];
         snprintf(cdir, sizeof(cdir), "%s/%s", CAIRN_DIR_CAPTURE, candidates[i]);
         snprintf(mpath, sizeof(mpath), "%s/manifest.cbor", cdir);
         snprintf(spath, sizeof(spath), "%s/manifest.sig", cdir);
 
         /* No manifest means the seal had not started: this is a live capture to
          * resume, not an interrupted seal. */
-        if (!SD.exists(mpath) || !SD.exists(spath)) continue;
+        if (!cairn_fs_exists(mpath) || !cairn_fs_exists(spath)) continue;
 
         CAIRN_LOGW(TAG, "capture %s already holds a manifest; finishing the "
                         "interrupted seal", candidates[i]);
@@ -1020,42 +991,35 @@ int cairn_store_resume_interrupted_seals(void)
 
 bool cairn_store_pending_stats(uint32_t *bundle_count, uint64_t *total_bytes)
 {
-    File dir = SD.open(CAIRN_DIR_BUNDLES);
-    if (!dir) return false;
+    cairn_dir_t *dir = cairn_fs_opendir(CAIRN_DIR_BUNDLES);
+    if (dir == NULL) return false;
 
     uint32_t count = 0;
     uint64_t bytes = 0;
 
-    for (;;) {
-        File entry = dir.openNextFile();
-        if (!entry) break;
+    char name[64];
+    bool is_dir = false;
 
-        if (entry.isDirectory()) {
-            count++;
+    while (cairn_fs_readdir(dir, name, sizeof(name), &is_dir, NULL)) {
+        if (!is_dir) continue;
+        count++;
 
-            /* name() may be absolute depending on the core version, so take the
-             * basename before rebuilding the path. */
-            const char *nm = entry.name();
-            const char *base = strrchr(nm, '/');
-            base = (base != nullptr) ? base + 1 : nm;
+        char sub[PATH_MAX_LEN];
+        snprintf(sub, sizeof(sub), "%s/%s", CAIRN_DIR_BUNDLES, name);
 
-            char sub[112];
-            snprintf(sub, sizeof(sub), "%s/%s", CAIRN_DIR_BUNDLES, base);
+        cairn_dir_t *b = cairn_fs_opendir(sub);
+        if (b == NULL) continue;
 
-            File b = SD.open(sub);
-            if (b) {
-                for (;;) {
-                    File f = b.openNextFile();
-                    if (!f) break;
-                    if (!f.isDirectory()) bytes += (uint64_t)f.size();
-                    f.close();
-                }
-                b.close();
-            }
+        char     fname[64];
+        bool     fdir = false;
+        uint64_t fsize = 0;
+
+        while (cairn_fs_readdir(b, fname, sizeof(fname), &fdir, &fsize)) {
+            if (!fdir) bytes += fsize;
         }
-        entry.close();
+        cairn_fs_closedir(b);
     }
-    dir.close();
+    cairn_fs_closedir(dir);
 
     *bundle_count = count;
     *total_bytes  = bytes;

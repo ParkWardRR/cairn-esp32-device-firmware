@@ -7,8 +7,11 @@
 
 #include "board_config.h"
 #include "cairn_log.h"
+#include "cairn_fs.h"
 #include "cairn_sync.h"
 #include "config.h"
+#include "preroll.h"
+#include "sensor_task.h"
 
 static const char *TAG = "LIFE";
 
@@ -64,6 +67,28 @@ static uint16_t frame_flags(const Lifecycle *lc)
     if (!lc->have_utc_basis) flags |= CAIRN_FLAG_ESTIMATED_UTC;
 
     return flags;
+}
+
+/*
+ * Every capture record goes through here, so no sampler can accidentally drop
+ * data while the trip is unconfirmed. Before a trip is declared the record is
+ * held in the pre-roll ring; once declared it is written straight through.
+ */
+static void emit_capture_record(Lifecycle *lc, uint8_t record_type,
+                                uint8_t schema_version, const uint8_t *payload,
+                                size_t payload_len)
+{
+    uint16_t flags = frame_flags(lc);
+    uint32_t now = millis();
+
+    if (lc->capture == CaptureState::Idle || lc->capture == CaptureState::Pretrip) {
+        cairn_preroll_push(&lc->preroll, record_type, schema_version, flags, now,
+                           payload, payload_len);
+        return;
+    }
+
+    cairn_capture_append(&lc->cap, CAIRN_CHAIN_CAPTURE, record_type,
+                         schema_version, flags, now, payload, payload_len);
 }
 
 /* ── transitions ──────────────────────────────────────────────────────────── */
@@ -164,11 +189,19 @@ bool lifecycle_begin(Lifecycle *lc)
         return false;
     }
 
+    cairn_preroll_reset(&lc->preroll);
+
+    /*
+     * Sensing starts only after the capture is open. A fact arriving before
+     * there is somewhere to put it would have to be dropped, and dropping the
+     * first seconds of a boot is exactly what the pre-roll exists to prevent.
+     */
+    if (!sensor_task_start(&lc->sensors)) {
+        CAIRN_LOGE(TAG, "sensing task failed to start; no data will be captured");
+        return false;
+    }
+
     uint32_t now = millis();
-    lc->next_gnss_ms   = now;
-    lc->next_imu_ms    = now + CAIRN_IMU_WINDOW_MS;
-    lc->next_obd_ms    = now;
-    lc->next_health_ms = now;
     lc->still_since_ms = now;
     lc->idle_since_ms  = now;
 
@@ -192,13 +225,21 @@ bool lifecycle_begin(Lifecycle *lc)
  * hundredths so they can be recorded in the transition payload exactly as they
  * were computed.
  */
-static void update_motion_scores(Lifecycle *lc, const cairn_gnss_sample_t *gnss,
-                                 bool have_gnss, const cairn_obd_snapshot_t *obd,
-                                 bool have_obd)
+static void update_motion_scores(Lifecycle *lc)
 {
+    const cairn_gnss_sample_t *gnss = &lc->last_gnss;
+    const cairn_obd_snapshot_t *obd = &lc->last_obd;
+    bool have_gnss = lc->have_recent_gnss;
+    bool have_obd  = lc->have_recent_obd;
+
     uint32_t score = 0;
 
-    uint16_t rms = sensors_recent_accel_rms_mg();
+    /*
+     * The accelerometer figure comes from the last FACT_MOTION rather than from
+     * the driver: the controller must not read sensor state the sensing task
+     * owns, and the fact carries the value as measured.
+     */
+    uint16_t rms = lc->last_accel_rms_mg;
     if (rms >= CAIRN_MOTION_ACCEL_RMS_MG) {
         score += 100u * rms / CAIRN_MOTION_ACCEL_RMS_MG;
     }
@@ -239,7 +280,7 @@ static void update_motion_scores(Lifecycle *lc, const cairn_gnss_sample_t *gnss,
 
 /* ── sampling ─────────────────────────────────────────────────────────────── */
 
-static void record_gnss_gap(Lifecycle *lc, uint8_t cause)
+static void close_gnss_gap(Lifecycle *lc, uint8_t cause)
 {
     if (!lc->in_gnss_gap) return;
 
@@ -263,90 +304,116 @@ static void record_gnss_gap(Lifecycle *lc, uint8_t cause)
     lc->gnss_expected_in_gap = 0;
 }
 
-static void sample_gnss(Lifecycle *lc)
+/*
+ * Facts are consumed here and nowhere else. The controller owns all state, so
+ * these functions are the only place a sensor observation turns into a
+ * transition or a frame on the card.
+ */
+
+static void on_gnss_sample(Lifecycle *lc, const fact_t *f)
 {
-    cairn_gnss_sample_t s;
-    uint32_t fix_age = 0;
-    bool got = sensors_read_gnss(&s, &fix_age);
+    close_gnss_gap(lc, lc->sensors.gnss ? CAIRN_GAP_NO_FIX
+                                        : CAIRN_GAP_POWERED_DOWN);
 
-    if (!got) {
-        /*
-         * A missing fix is recorded as a gap, not skipped. Silence in the data
-         * would be indistinguishable from the device being switched off.
-         */
-        if (!lc->in_gnss_gap) {
-            lc->in_gnss_gap = true;
-            lc->gnss_gap_started_ms = millis();
-            lc->gnss_expected_in_gap = 0;
-            CAIRN_LOGD(TAG, "GNSS gap opened");
-        }
-        lc->gnss_expected_in_gap++;
-        return;
-    }
-
-    record_gnss_gap(lc, lc->sensors.gnss ? CAIRN_GAP_NO_FIX : CAIRN_GAP_POWERED_DOWN);
-
-    /* Establish the UTC basis once, from the first fix that carries a date. */
-    if (!lc->have_utc_basis) {
-        uint64_t utc_ms = 0;
-        uint32_t acc_ms = 0;
-        if (sensors_gnss_utc(&utc_ms, &acc_ms)) {
-            cairn_capture_set_utc_basis(&lc->cap, utc_ms, acc_ms);
-            lc->have_utc_basis = true;
-            CAIRN_LOGI(TAG, "UTC basis established: %llu ms (+/- %u ms)",
-                       (unsigned long long)utc_ms, (unsigned)acc_ms);
-        }
-    }
-
-    if (lc->capture == CaptureState::Idle) return; /* scoring only */
+    lc->last_gnss = f->data.gnss;
+    lc->have_recent_gnss = true;
 
     uint8_t payload[32];
-    cairn_encode_gnss_sample(&s, payload);
-    cairn_capture_append(&lc->cap, CAIRN_CHAIN_CAPTURE, CAIRN_REC_GNSS_SAMPLE, 1,
-                         frame_flags(lc), millis(), payload, sizeof(payload));
+    cairn_encode_gnss_sample(&f->data.gnss, payload);
+    emit_capture_record(lc, CAIRN_REC_GNSS_SAMPLE, 1, payload, sizeof(payload));
 }
 
-static void sample_imu(Lifecycle *lc)
+static void on_gnss_no_fix(Lifecycle *lc, const fact_t *f)
 {
-    cairn_imu_summary_t s;
-    if (!sensors_imu_summarize(CAIRN_IMU_WINDOW_MS, &s)) return;
-    if (lc->capture == CaptureState::Idle) return;
+    if (!lc->in_gnss_gap) {
+        lc->in_gnss_gap = true;
+        lc->gnss_gap_started_ms = f->monotonic_ms;
+        lc->gnss_expected_in_gap = 0;
+        CAIRN_LOGD(TAG, "GNSS gap opened");
+    }
+    lc->gnss_expected_in_gap++;
 
+    /* A stale fix must not keep scoring motion forever. */
+    lc->have_recent_gnss = false;
+}
+
+static void on_utc_basis(Lifecycle *lc, const fact_t *f)
+{
+    if (lc->have_utc_basis) return;
+
+    cairn_capture_set_utc_basis(&lc->cap, f->data.utc.utc_ms, f->data.utc.acc_ms);
+    lc->have_utc_basis = true;
+    CAIRN_LOGI(TAG, "UTC basis established: %llu ms (+/- %u ms)",
+               (unsigned long long)f->data.utc.utc_ms,
+               (unsigned)f->data.utc.acc_ms);
+}
+
+static void on_imu_summary(Lifecycle *lc, const fact_t *f)
+{
     uint8_t payload[20];
-    cairn_encode_imu_summary(&s, payload);
-    cairn_capture_append(&lc->cap, CAIRN_CHAIN_CAPTURE, CAIRN_REC_IMU_SUMMARY, 1,
-                         frame_flags(lc), millis(), payload, sizeof(payload));
+    cairn_encode_imu_summary(&f->data.imu, payload);
+    emit_capture_record(lc, CAIRN_REC_IMU_SUMMARY, 1, payload, sizeof(payload));
 }
 
-static void sample_obd(Lifecycle *lc, cairn_obd_snapshot_t *out, bool *have)
+static void on_obd_snapshot(Lifecycle *lc, const fact_t *f)
 {
-    *have = sensors_read_obd(out);
-    if (!*have || lc->capture == CaptureState::Idle) return;
+    lc->last_obd = f->data.obd;
+    lc->have_recent_obd = true;
 
     uint8_t payload[24];
-    cairn_encode_obd_snapshot(out, payload);
-    cairn_capture_append(&lc->cap, CAIRN_CHAIN_CAPTURE, CAIRN_REC_OBD_SNAPSHOT, 1,
-                         frame_flags(lc), millis(), payload, sizeof(payload));
+    cairn_encode_obd_snapshot(&f->data.obd, payload);
+    emit_capture_record(lc, CAIRN_REC_OBD_SNAPSHOT, 1, payload, sizeof(payload));
 }
 
-static void sample_health(Lifecycle *lc)
+static void on_obd_silent(Lifecycle *lc)
 {
-    cairn_device_health_t h;
-    sensors_fill_health(&h, (uint8_t)lc->health, (uint8_t)lc->boot_count,
-                        cairn_sync_rssi());
+    /* No snapshot is written: a reading where nothing answered is a gap, not an
+     * observation of zero. Scoring must stop trusting the last one. */
+    lc->have_recent_obd = false;
+}
 
-    uint64_t total = SD.totalBytes();
-    uint64_t used  = SD.usedBytes();
-    uint64_t free_mib = (total > used) ? (total - used) / (1024 * 1024) : 0;
-    h.sd_free_mib = (uint16_t)((free_mib > 0xFFFE) ? 0xFFFE : free_mib);
+static void on_health(Lifecycle *lc, const fact_t *f)
+{
+    cairn_device_health_t h = f->data.health;
+
+    /* The sensing task cannot know these; the controller owns them. */
+    h.health_state = (uint8_t)lc->health;
+    h.reboot_count = (uint8_t)lc->boot_count;
+
+    int rssi = cairn_sync_rssi();
+    h.rssi_dbm = (rssi != 0) ? (int8_t)rssi : CAIRN_I8_UNKNOWN;
+
+    uint64_t total = 0, used = 0;
+    uint64_t free_mib = 0;
+    if (cairn_fs_space(&total, &used)) {
+        free_mib = (total > used) ? (total - used) / (1024 * 1024) : 0;
+        h.sd_free_mib = (uint16_t)((free_mib > 0xFFFE) ? 0xFFFE : free_mib);
+    }
+
+    /*
+     * Dropped facts are reported in the data, not just the log. A queue that
+     * overflowed means the record stream has holes, and a gap the data does not
+     * admit to is worse than one it does.
+     */
+    uint32_t dropped = sensor_task_dropped();
+    if (dropped != lc->reported_drops) {
+        CAIRN_LOGW(TAG, "%u sensor facts dropped since boot (%u new); the "
+                        "controller is not keeping up",
+                   (unsigned)dropped, (unsigned)(dropped - lc->reported_drops));
+        lc->reported_drops = dropped;
+    }
+    if (h.ext_sensor_1 == CAIRN_U16_UNKNOWN) {
+        h.ext_sensor_1 = (uint16_t)((dropped > 0xFFFE) ? 0xFFFE : dropped);
+    }
 
     uint8_t payload[16];
     cairn_encode_device_health(&h, payload);
 
-    /* Health goes on the journal chain: it is true of the device, not of the
-     * drive, and it must be recordable while no trip is in progress. */
+    /* Health belongs to the journal chain: it is true of the device, not of the
+     * drive, and must be recordable while no trip is in progress. */
     cairn_capture_append(&lc->cap, CAIRN_CHAIN_JOURNAL, CAIRN_REC_DEVICE_HEALTH,
-                         1, frame_flags(lc), millis(), payload, sizeof(payload));
+                         1, frame_flags(lc), f->monotonic_ms, payload,
+                         sizeof(payload));
 
     /* Degradation is derived from what is actually missing or failing. */
     HealthState want = HealthState::Ok;
@@ -355,7 +422,7 @@ static void sample_health(Lifecycle *lc)
     if (h.battery_mv != CAIRN_U16_UNKNOWN && h.battery_mv < 11500) {
         want = HealthState::Critical;
         reason = 1;
-    } else if (free_mib < CAIRN_LOG_FREE_SPACE_FLOOR_MIB) {
+    } else if (free_mib > 0 && free_mib < CAIRN_LOG_FREE_SPACE_FLOOR_MIB) {
         want = HealthState::Degraded;
         reason = 2;
     } else if (!lc->sensors.gnss || !lc->sensors.imu) {
@@ -364,13 +431,18 @@ static void sample_health(Lifecycle *lc)
     } else if (lc->cap.write_errors > 0) {
         want = HealthState::Degraded;
         reason = 4;
+    } else if (dropped > 0) {
+        want = HealthState::Degraded;
+        reason = 5;
     }
 
     set_health_state(lc, want, reason);
 
-    CAIRN_LOGD(TAG, "health: %u mV, %u MiB free, %u write errors, state %s",
-               (unsigned)h.battery_mv, (unsigned)free_mib,
-               (unsigned)lc->cap.write_errors, health_state_name(lc->health));
+    CAIRN_LOGD(TAG, "health: %u mV, %llu MiB free, %u write errors, %u dropped "
+                    "facts, state %s",
+               (unsigned)h.battery_mv, (unsigned long long)free_mib,
+               (unsigned)lc->cap.write_errors, (unsigned)dropped,
+               health_state_name(lc->health));
 }
 
 /* ── sealing and sync ─────────────────────────────────────────────────────── */
@@ -459,39 +531,30 @@ void lifecycle_tick(Lifecycle *lc)
 {
     uint32_t now = millis();
 
-    /* The IMU is read continuously; peaks over a window are meaningless if the
-     * sensor is sampled only once per window. */
-    sensors_imu_accumulate();
+    /*
+     * Drain everything waiting. The controller is the only consumer, so the
+     * queue depth is the only buffer between a slow card write and a dropped
+     * observation — emptying it fully each pass is what keeps that buffer
+     * available.
+     */
+    fact_t f;
+    while (sensor_task_poll(&f)) {
+        switch (f.kind) {
+        case FACT_GNSS_SAMPLE:   on_gnss_sample(lc, &f); break;
+        case FACT_GNSS_NO_FIX:   on_gnss_no_fix(lc, &f); break;
+        case FACT_GNSS_UTC_BASIS: on_utc_basis(lc, &f); break;
+        case FACT_IMU_SUMMARY:   on_imu_summary(lc, &f); break;
+        case FACT_OBD_SNAPSHOT:  on_obd_snapshot(lc, &f); break;
+        case FACT_OBD_SILENT:    on_obd_silent(lc); break;
+        case FACT_HEALTH:        on_health(lc, &f); break;
 
-    cairn_obd_snapshot_t obd;
-    bool have_obd = false;
-
-    if ((int32_t)(now - lc->next_obd_ms) >= 0) {
-        lc->next_obd_ms = now + CAIRN_OBD_PERIOD_MS;
-        sample_obd(lc, &obd, &have_obd);
+        case FACT_MOTION:
+            lc->last_accel_rms_mg = f.data.motion.accel_rms_mg;
+            break;
+        }
     }
 
-    cairn_gnss_sample_t gnss;
-    bool have_gnss = false;
-
-    if ((int32_t)(now - lc->next_gnss_ms) >= 0) {
-        lc->next_gnss_ms = now + CAIRN_GNSS_PERIOD_MS;
-        sample_gnss(lc);
-        /* Re-read for scoring without recording a second frame. */
-        have_gnss = sensors_read_gnss(&gnss, nullptr);
-    }
-
-    if ((int32_t)(now - lc->next_imu_ms) >= 0) {
-        lc->next_imu_ms = now + CAIRN_IMU_WINDOW_MS;
-        sample_imu(lc);
-    }
-
-    if ((int32_t)(now - lc->next_health_ms) >= 0) {
-        lc->next_health_ms = now + CAIRN_HEALTH_PERIOD_MS;
-        sample_health(lc);
-    }
-
-    update_motion_scores(lc, &gnss, have_gnss, &obd, have_obd);
+    update_motion_scores(lc);
 
     /* ── capture region ───────────────────────────────────────────────────── */
 
@@ -504,12 +567,21 @@ void lifecycle_tick(Lifecycle *lc)
 
     case CaptureState::Pretrip:
         if (lc->motion_since_ms == 0) {
-            /* The motion did not persist. Nothing was lost: pre-trip samples
-             * were written with the PRETRIP flag and remain in the bundle. */
+            /*
+             * The motion did not persist, so nothing is written. The ring keeps
+             * filling and evicting while idle, which is what lets a real drive
+             * recover its first seconds without a parked car producing bundles.
+             */
             set_capture_state(lc, CaptureState::Idle, 2, 0);
             lc->idle_since_ms = now;
         } else if (now - lc->motion_since_ms >= CAIRN_START_DWELL_MS) {
+            /*
+             * Confirmed. The state is set first so the flushed frames are
+             * written through rather than pushed straight back into the ring,
+             * and so their PRETRIP flag is the only thing marking them apart.
+             */
             set_capture_state(lc, CaptureState::Active, 1, 0);
+            cairn_preroll_flush(&lc->preroll, &lc->cap);
         }
         break;
 
@@ -532,7 +604,7 @@ void lifecycle_tick(Lifecycle *lc)
 
             /* Close any open gap before sealing, so the bundle's last word
              * about GNSS is accurate. */
-            record_gnss_gap(lc, CAIRN_GAP_NO_FIX);
+            close_gnss_gap(lc, CAIRN_GAP_NO_FIX);
             seal_and_reopen(lc, 0);
         }
         break;
@@ -545,13 +617,15 @@ void lifecycle_tick(Lifecycle *lc)
         seal_and_reopen(lc, 1);
     }
 
-    /* ── periodic sensor recovery ─────────────────────────────────────────── */
-
+    /*
+     * Re-initialising a driver touches state the sensing task owns, so the
+     * controller asks rather than doing it here.
+     */
     static uint32_t next_retry_ms = 0;
     if ((int32_t)(now - next_retry_ms) >= 0) {
         next_retry_ms = now + 60000;
         if (!lc->sensors.gnss || !lc->sensors.obd || !lc->sensors.imu) {
-            sensors_retry_failed(&lc->sensors);
+            sensor_task_request_retry();
         }
     }
 

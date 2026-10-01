@@ -1,52 +1,84 @@
-# Host build of the firmware's format code, checked against the committed
-# conformance vectors.
+# Host builds of the firmware's portable code.
 #
-# The point of this target is that it compiles exactly the sources the device
-# runs — lib/cairn_format/*.c, with no ESP-IDF dependency and no substitutions.
-# Passing here is not a proxy for firmware correctness; it is the firmware's
-# format implementation agreeing with the Go and Rust ones on real bytes.
+# Two suites, and the distinction matters:
 #
-#   make          build and run
-#   make asan     the same, under AddressSanitizer and UBSan
+#   conformance  compiles lib/cairn_format against the committed vectors, so
+#                this implementation is shown to agree byte-for-byte with the
+#                Go and Rust ones.
+#   faults       compiles lib/cairn_store and lib/cairn_prune over a POSIX
+#                filesystem, then tears files and forges receipts. These are
+#                properties about crash and adversarial behaviour; compiling
+#                for ESP32 does not test them and neither does a good drive.
+#
+# Both compile exactly the sources the device runs — no substitutions — reached
+# through cairn_fs rather than reimplemented.
+#
+#   make           build and run both
+#   make asan      the same, under AddressSanitizer and UBSan
 #   make clean
 
-CC      ?= cc
+CC       ?= cc
 FIXTURES ?= ../../../../fixtures/format-v2
 
 FORMAT_DIR := ../../lib/cairn_format
-SOURCES    := $(wildcard $(FORMAT_DIR)/*.c) minijson.c conformance.c
+STORE_DIR  := ../../lib/cairn_store
+FS_DIR     := ../../lib/cairn_fs
+INCLUDE_DIR := ../../include
+LOG_DIR     := ../../lib/cairn_log
 
-# -Wconversion is deliberately on: this code does a great deal of width
-# narrowing between the wire format and C types, and a silent truncation there
-# would corrupt a bundle rather than crash.
+FORMAT_SRC := $(wildcard $(FORMAT_DIR)/*.c)
+STORE_SRC  := $(wildcard $(STORE_DIR)/*.c)
+FS_SRC     := $(wildcard $(FS_DIR)/*.c)
+
+# Only the portable application sources; the rest of src/ is Arduino C++.
+SRC_DIR    := ../../src
+APP_SRC    := $(SRC_DIR)/preroll.c
+
+CONFORMANCE_SRC := $(FORMAT_SRC) minijson.c conformance.c
+FAULTS_SRC      := $(FORMAT_SRC) $(STORE_SRC) $(FS_SRC) $(APP_SRC) \
+                   log_host.c platform_host.c faults.c
+
+# -Wconversion is deliberately absent but the rest is strict: this code does a
+# great deal of width narrowing between the wire format and C types, and a
+# silent truncation there corrupts a bundle rather than crashing.
 CFLAGS  ?= -std=c11 -O1 -g \
            -Wall -Wextra -Werror \
            -Wshadow -Wpointer-arith -Wcast-qual -Wstrict-prototypes \
            -Wmissing-prototypes -Wno-unused-parameter \
-           -I$(FORMAT_DIR) -I.
+           -I$(FORMAT_DIR) -I$(STORE_DIR) -I$(FS_DIR) -I$(LOG_DIR) -I$(INCLUDE_DIR) -I$(SRC_DIR) -I.
+
+SAN := -fsanitize=address,undefined -fno-omit-frame-pointer
 
 BUILD := build
-BIN   := $(BUILD)/conformance
 
-.PHONY: all run asan clean
+.PHONY: all run asan clean conformance faults
 
 all: run
-
-$(BIN): $(SOURCES) $(FORMAT_DIR)/cairn_format.h minijson.h | $(BUILD)
-	$(CC) $(CFLAGS) $(SOURCES) -o $@
 
 $(BUILD):
 	mkdir -p $(BUILD)
 
-run: $(BIN)
-	$(BIN) $(FIXTURES)
+$(BUILD)/conformance: $(CONFORMANCE_SRC) $(FORMAT_DIR)/cairn_format.h minijson.h | $(BUILD)
+	$(CC) $(CFLAGS) $(CONFORMANCE_SRC) -o $@
+
+$(BUILD)/faults: $(FAULTS_SRC) $(STORE_DIR)/cairn_store.h $(STORE_DIR)/cairn_prune.h $(SRC_DIR)/preroll.h | $(BUILD)
+	$(CC) $(CFLAGS) $(FAULTS_SRC) -o $@
+
+conformance: $(BUILD)/conformance
+	$(BUILD)/conformance $(FIXTURES)
+
+faults: $(BUILD)/faults
+	$(BUILD)/faults
+
+run: conformance faults
 
 # Undefined behaviour in the scan path would be a parser reading past a torn
-# segment, which is exactly the case the format exists to handle safely.
-asan: $(SOURCES) | $(BUILD)
-	$(CC) $(CFLAGS) -fsanitize=address,undefined -fno-omit-frame-pointer \
-	    $(SOURCES) -o $(BUILD)/conformance-asan
+# segment — exactly the case the format exists to handle safely.
+asan: | $(BUILD)
+	$(CC) $(CFLAGS) $(SAN) $(CONFORMANCE_SRC) -o $(BUILD)/conformance-asan
 	$(BUILD)/conformance-asan $(FIXTURES)
+	$(CC) $(CFLAGS) $(SAN) $(FAULTS_SRC) -o $(BUILD)/faults-asan
+	$(BUILD)/faults-asan
 
 clean:
 	rm -rf $(BUILD)

@@ -24,7 +24,9 @@
 
 #include "board_config.h"
 #include "cairn_format.h"
+#include "cairn_fs.h"
 #include "cairn_log.h"
+#include "cairn_prune.h"
 #include "cairn_store.h"
 #include "cairn_sync.h"
 #include "config.h"
@@ -258,6 +260,10 @@ void setup()
                SD.totalBytes() / (1024ULL * 1024ULL),
                SD.usedBytes() / (1024ULL * 1024ULL));
 
+    /* The card is already mounted; this only binds the storage abstraction to
+     * it, so the same cairn_store.c runs here and under the host fault tests. */
+    cairn_fs_begin(nullptr);
+
     if (!cairn_store_init()) {
         CAIRN_LOGE(TAG, "cannot create the directory tree on the card");
         return;
@@ -310,9 +316,9 @@ void loop()
     lifecycle_tick(&g_lifecycle);
 
     /*
-     * A short yield rather than a tight spin. The IMU is read every pass, so
-     * 20 ms gives roughly a 50 Hz sample rate — ample for RMS and peak over a
-     * one-second window, and it leaves the radio and card tasks room to run.
+     * Sampling no longer happens here — the sensing task on core 0 owns it — so
+     * this delay only sets how promptly facts are drained. 20 ms keeps the
+     * queue shallow while leaving the radio and card tasks room to run.
      */
     delay(20);
 }

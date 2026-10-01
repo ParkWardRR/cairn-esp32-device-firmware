@@ -42,19 +42,44 @@ and still upload — it just will never delete anything. That is the intended
 failure direction: a full card loses nothing, a wrongly authorized prune loses a
 trip permanently.
 
-### 2. Verify the format on the host first
+### 2. Run the host suites first
 
-This takes two seconds and is the cheapest check available:
+A few seconds, and the cheapest check available:
 
 ```bash
 make -C firmware/cairn-v2/test/host
 ```
 
-Expect `format v2 conformance (C): 20/20 passed`. If this fails, do not flash —
-the device would write bundles the server cannot read.
+Expect both:
 
-`make -C firmware/cairn-v2/test/host asan` runs the same vectors under
-AddressSanitizer and UBSan.
+```
+format v2 conformance (C): 20/20 passed
+firmware storage matrix: 20/20 passed
+```
+
+If the first fails, do not flash — the device would write bundles the server
+cannot read. If the second fails, the crash and deletion behaviour is wrong,
+which is worse: it fails quietly and loses data.
+
+The two suites test different things. **Conformance** checks that the firmware's
+format code agrees byte-for-byte with the Go reference on the committed vectors.
+**The storage matrix** compiles `lib/cairn_store`, `lib/cairn_prune` and the
+pre-roll over a POSIX filesystem and then attacks them: tearing segments
+mid-frame and mid-header, flipping payload bytes, forging receipts, signing
+receipts for the wrong bundle, and interrupting seals and prunes. These are
+properties about crash and adversarial behaviour — compiling for ESP32 does not
+test them, and neither does a drive that goes well.
+
+Add `CAIRN_TEST_VERBOSE=1` to see the firmware's own log lines during the matrix
+(it is quiet by default, because the rows deliberately provoke errors and a
+passing run should not look like a disaster).
+
+`make -C firmware/cairn-v2/test/host asan` runs both under AddressSanitizer and
+UBSan.
+
+The matrix is mutation-checked rather than merely green: deleting the receipt
+signature check fails two prune rows, and skipping the torn-tail truncation
+fails three recovery rows. A matrix that cannot fail is not a matrix.
 
 ## Flashing
 
@@ -152,8 +177,15 @@ Line format is `<monotonic_ms> <boot_id_prefix> [TAG] LEVEL message`:
 ```
      14823 a3f21c04 [LIFE] INFO  capture IDLE -> PRETRIP (start 2.40, stop 0.50)
      17851 a3f21c04 [LIFE] INFO  capture PRETRIP -> ACTIVE (start 3.10, stop 0.00)
+     17852 a3f21c04 [PREROLL] INFO  flushed 44 of 44 pre-trip frames spanning 17600 ms
      18002 a3f21c04 [STORE] TRACE frame GNSS_SAMPLE seq 41, 60 bytes, crc 9e2a1f03
 ```
+
+That `PREROLL` line is worth checking on the first drive. It is the 45 s
+pre-roll being written on trip confirmation: those frames were captured *before*
+the device decided a trip was underway, and they carry `CAIRN_FLAG_PRETRIP` to
+say so. If the span is near zero, motion was confirmed immediately and there was
+nothing to recover; if it is near 45000 ms the ring was full.
 
 Timestamps are **monotonic milliseconds, not UTC**. UTC can be absent or can
 jump; a log whose timestamps run backwards is worse than one with no timestamps.
@@ -170,8 +202,15 @@ grep -E '\[LIFE\]' boot-*.log
 grep -E 'torn|discard|resum|recover' boot-*.log
 
 # Everything about receipts and pruning
-grep -E '\[SYNC\]' boot-*.log
+grep -E '\[SYNC\]|\[PRUNE\]' boot-*.log
+
+# The pre-roll, and whether the fact queue is keeping up
+grep -E '\[PREROLL\]|dropped' boot-*.log
 ```
+
+A `sensor facts dropped` warning means the controller could not drain the queue
+fast enough and observations were lost. The count is also reported in
+`DEVICE_HEALTH`, so the gap appears in the data rather than only in the log.
 
 Logging yields to data. Below 64 MiB free the SD sink shuts itself off and
 logging continues over UART only, and the whole log tree is capped at 16 MiB
@@ -229,9 +268,16 @@ holds a manifest; finishing the interrupted seal`. The manifest is written
 before the directory is moved, so an interrupted seal is always completable
 without re-signing.
 
+All four of these have corresponding rows in the storage matrix, so a failure on
+the bench that the matrix does not reproduce points at the hardware or the
+drivers rather than at the storage logic — which is the main reason the matrix
+exists.
+
 ## Known gaps
 
-- Never run on hardware. First boot is the first real test.
+- Never run on hardware. First boot is the first real test. The storage and
+  format logic is covered by 40 host rows; the drivers, timing and the fact
+  queue under real load are not.
 - OTA slots exist and the image marks itself valid after storage checks out, but
   nothing fetches an update yet.
 - Flash encryption is deliberately off. Enabling it in release mode is

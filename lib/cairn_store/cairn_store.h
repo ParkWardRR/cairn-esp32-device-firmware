@@ -120,6 +120,15 @@ typedef struct {
 bool cairn_store_init(void);
 
 /*
+ * A bundle id as 26 Crockford base32 characters — the directory name on the
+ * card. This is the operational handle, not the bundle's identity: identity is
+ * content_root, so a ULID collision would be an inconvenience rather than a
+ * correctness failure.
+ */
+void cairn_ulid_encode(const uint8_t id[16], char out[27]);
+bool cairn_ulid_decode(const char *s, uint8_t out[16]);
+
+/*
  * Identity, persisted in NVS so it survives reboots and firmware updates.
  * device_id is derived from the efuse MAC on first boot; the signing seed is
  * generated once from the hardware RNG.

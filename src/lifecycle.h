@@ -22,6 +22,7 @@
 #include <stdint.h>
 
 #include "cairn_store.h"
+#include "preroll.h"
 #include "sensors.h"
 
 /* Region 1: capture. What the device believes the vehicle is doing. */
@@ -63,23 +64,41 @@ struct Lifecycle {
     cairn_capture_t cap;
     SensorStatus    sensors;
 
+    /*
+     * Records captured before a trip is confirmed. Flushed with
+     * CAIRN_FLAG_PRETRIP on confirmation, dropped if the motion does not
+     * persist — so a parked car accumulates nothing while the first seconds of
+     * a real drive are still recorded.
+     */
+    cairn_preroll_t preroll;
+
     uint8_t device_id[16];
     uint8_t boot_id[16];
     uint8_t key_seed[32];
     uint8_t key_public[32];
     uint32_t boot_count;
 
+    /*
+     * Last-known sensor values, as reported by facts. The controller keeps its
+     * own copies rather than reading driver state the sensing task owns, and
+     * the have_* flags matter: a stale fix or a silent ECU must stop
+     * contributing to the motion score rather than vouching for it forever.
+     */
+    cairn_gnss_sample_t  last_gnss = {};
+    cairn_obd_snapshot_t last_obd = {};
+    bool     have_recent_gnss = false;
+    bool     have_recent_obd = false;
+    uint16_t last_accel_rms_mg = 0;
+
+    /* Dropped facts already mentioned in the log, so the warning is not
+     * repeated every health interval. */
+    uint32_t reported_drops = 0;
+
     /* Motion scoring. Hundredths, matching the STATE_TRANSITION payload. */
     uint16_t start_score_e2 = 0;
     uint16_t stop_score_e2  = 0;
     uint32_t motion_since_ms = 0;
     uint32_t still_since_ms  = 0;
-
-    /* Sampling schedule. */
-    uint32_t next_gnss_ms   = 0;
-    uint32_t next_imu_ms    = 0;
-    uint32_t next_obd_ms    = 0;
-    uint32_t next_health_ms = 0;
 
     /* GNSS gap accounting, so a gap is recorded as a gap. */
     uint32_t gnss_gap_started_ms = 0;

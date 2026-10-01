@@ -78,8 +78,19 @@
  * written with CAIRN_FLAG_PRETRIP, so the beginning of a drive is not lost to
  * the dwell requirement. The flag matters — these samples are real data, but
  * they were recorded before the device had decided a trip was underway.
+ *
+ * Sized for 45 s of pre-roll. The ring holds every record type the capture
+ * chain carries, so the budget is the sum of their rates rather than GNSS
+ * alone: GNSS at 1 Hz, IMU summaries at 1 Hz and OBD at 0.5 Hz comes to 2.5
+ * records per second, so 45 s needs about 113 slots. 128 gives headroom for a
+ * faster cadence without re-deriving this.
+ *
+ * At 40 bytes per entry that is ~5 KB of RAM held permanently. Worth it: the
+ * first seconds of a drive are the hardest part to reconstruct afterwards, and
+ * 5 KB of a 320 KB budget is cheap insurance.
  */
-#define CAIRN_PRETRIP_RING_SAMPLES 16
+#define CAIRN_PREROLL_WINDOW_MS     45000
+#define CAIRN_PREROLL_RING_SAMPLES  128
 
 /* ── sync policy ──────────────────────────────────────────────────────────── */
 

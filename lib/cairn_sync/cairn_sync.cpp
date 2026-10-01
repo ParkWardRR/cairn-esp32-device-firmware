@@ -10,7 +10,9 @@
 
 #include "board_config.h"
 #include "cairn_format.h"
+#include "cairn_fs.h"
 #include "cairn_log.h"
+#include "cairn_prune.h"
 #include "config.h"
 
 static const char *TAG = "SYNC";
@@ -144,20 +146,20 @@ static void base_url(char *out, size_t cap)
 
 static uint8_t *read_whole_file(const char *path, size_t *len)
 {
-    File f = SD.open(path, FILE_READ);
-    if (!f) return nullptr;
+    cairn_file_t *f = cairn_fs_open(path, CAIRN_FS_READ);
+    if (f == nullptr) return nullptr;
 
-    size_t size = (size_t)f.size();
+    size_t size = (size_t)cairn_fs_size(f);
     uint8_t *buf = (uint8_t *)malloc(size > 0 ? size : 1);
     if (buf == nullptr) {
-        f.close();
+        cairn_fs_close(f);
         return nullptr;
     }
 
-    int got = f.read(buf, size);
-    f.close();
+    size_t got = cairn_fs_read(f, buf, size);
+    cairn_fs_close(f);
 
-    if (got != (int)size) {
+    if (got != size) {
         free(buf);
         return nullptr;
     }
@@ -257,7 +259,7 @@ public:
 
     ~BundleChunkStream() override
     {
-        if (file_) file_.close();
+        if (file_ != nullptr) cairn_fs_close(file_);
     }
 
     bool ok() const { return ok_; }
@@ -280,7 +282,7 @@ public:
         size_t done = 0;
 
         while (done < len && remaining_ > 0 && ok_) {
-            if (!file_) {
+            if (file_ == nullptr) {
                 ok_ = false;
                 break;
             }
@@ -296,13 +298,13 @@ public:
             if (want > left_in_member) want = (size_t)left_in_member;
             if (want > remaining_) want = (size_t)remaining_;
 
-            int got = file_.read(buf + done, want);
-            if (got <= 0) {
+            size_t got = cairn_fs_read(file_, buf + done, want);
+            if (got == 0) {
                 ok_ = false;
                 break;
             }
 
-            done        += (size_t)got;
+            done        += got;
             member_pos_ += (uint64_t)got;
             remaining_  -= (uint64_t)got;
         }
@@ -332,189 +334,41 @@ private:
         snprintf(path, sizeof(path), "%s/%s", ctx_->dir,
                  ctx_->members[member_].name);
 
-        file_ = SD.open(path, FILE_READ);
-        if (!file_ || !file_.seek((uint32_t)member_pos_)) ok_ = false;
+        file_ = cairn_fs_open(path, CAIRN_FS_READ);
+        if (file_ == nullptr || !cairn_fs_seek(file_, member_pos_)) ok_ = false;
     }
 
     void advanceMember()
     {
-        if (file_) file_.close();
+        if (file_ != nullptr) cairn_fs_close(file_);
+        file_ = nullptr;
         member_++;
         member_pos_ = 0;
         openCurrent();
     }
 
     const stream_ctx_t *ctx_;
-    File     file_;
+    cairn_file_t *file_ = nullptr;
     uint64_t remaining_;
     size_t   member_;
     uint64_t member_pos_;
     bool     ok_;
 };
 
-/* ── the prune journal ───────────────────────────────────────────────────── */
+/* ── pruning ──────────────────────────────────────────────────────────────── */
 
 /*
- * Pruning is transactional. The intent record names the bundle and the content
- * root the receipt acknowledged; it is written and flushed before the first
- * delete. An interrupted prune therefore leaves an intent with no completion,
- * which the next boot can recognize and finish — rather than a partially
- * deleted directory that still looks like a sealed bundle awaiting upload.
+ * Pruning lives in cairn_prune.c, as portable C away from this file's HTTP
+ * code. It is the invariant with the worst failure mode in the system — a
+ * wrongly authorized prune deletes data permanently and reports success — so it
+ * is kept where a host test can drive it with a forged receipt, a receipt for a
+ * different bundle, and a receipt signed by the wrong key.
  */
-static void prune_journal_path(const char *id_text, char *out, size_t cap)
-{
-    snprintf(out, cap, "%s/prune-%s.json", CAIRN_DIR_STATE, id_text);
-}
-
-static bool prune_intent_write(const char *id_text, const uint8_t root[32])
-{
-    char path[160], root_hex[65];
-    prune_journal_path(id_text, path, sizeof(path));
-    tohex(root, 32, root_hex);
-
-    File f = SD.open(path, FILE_WRITE);
-    if (!f) return false;
-
-    f.printf("{\"bundle\":\"%s\",\"content_root\":\"%s\",\"state\":\"intent\"}\n",
-             id_text, root_hex);
-    f.flush();
-    f.close();
-    return true;
-}
-
-static void prune_intent_complete(const char *id_text)
-{
-    char path[160];
-    prune_journal_path(id_text, path, sizeof(path));
-    SD.remove(path);
-}
-
-static bool delete_bundle_dir(const char *id_text)
-{
-    char dir[160];
-    snprintf(dir, sizeof(dir), "%s/%s", CAIRN_DIR_BUNDLES, id_text);
-
-    File d = SD.open(dir);
-    if (!d) return false;
-
-    /* Collect names first: removing while iterating invalidates the iterator. */
-    char   names[CAIRN_MAX_MEMBERS + 4][40];
-    size_t count = 0;
-
-    for (;;) {
-        File entry = d.openNextFile();
-        if (!entry) break;
-
-        if (!entry.isDirectory() && count < (sizeof(names) / sizeof(names[0]))) {
-            const char *nm = entry.name();
-            const char *base = strrchr(nm, '/');
-            base = (base != nullptr) ? base + 1 : nm;
-            snprintf(names[count], sizeof(names[0]), "%s", base);
-            count++;
-        }
-        entry.close();
-    }
-    d.close();
-
-    for (size_t i = 0; i < count; i++) {
-        char path[220];
-        snprintf(path, sizeof(path), "%s/%s", dir, names[i]);
-        if (!SD.remove(path)) {
-            CAIRN_LOGE(TAG, "cannot remove %s", path);
-            return false;
-        }
-    }
-
-    return SD.rmdir(dir);
-}
-
-/*
- * Prune one bundle, but only against a receipt that has already been verified
- * against the pinned key and shown to acknowledge this exact content root.
- */
-static bool prune_receipted_bundle(const char *id_text, const uint8_t root[32])
-{
-    if (!prune_intent_write(id_text, root)) {
-        CAIRN_LOGE(TAG, "cannot write the prune intent for %s; refusing to "
-                        "delete anything", id_text);
-        return false;
-    }
-
-    if (!delete_bundle_dir(id_text)) {
-        CAIRN_LOGE(TAG, "prune of %s failed part-way; the intent record remains "
-                        "so the next boot can finish it", id_text);
-        return false;
-    }
-
-    prune_intent_complete(id_text);
-    CAIRN_LOGI(TAG, "pruned %s (receipt verified)", id_text);
-    return true;
-}
-
 int cairn_sync_resume_interrupted_prunes(void)
 {
-    File d = SD.open(CAIRN_DIR_STATE);
-    if (!d) return 0;
-
-    char   pending[8][40];
-    size_t count = 0;
-
-    for (;;) {
-        File entry = d.openNextFile();
-        if (!entry) break;
-
-        if (!entry.isDirectory()) {
-            const char *nm = entry.name();
-            const char *base = strrchr(nm, '/');
-            base = (base != nullptr) ? base + 1 : nm;
-
-            if (strncmp(base, "prune-", 6) == 0 &&
-                count < sizeof(pending) / sizeof(pending[0])) {
-                snprintf(pending[count], sizeof(pending[0]), "%s", base);
-                count++;
-            }
-        }
-        entry.close();
-    }
-    d.close();
-
-    int finished = 0;
-
-    for (size_t i = 0; i < count; i++) {
-        /* "prune-<id>.json" → <id> */
-        char id_text[40];
-        snprintf(id_text, sizeof(id_text), "%s", pending[i] + 6);
-        char *dot = strstr(id_text, ".json");
-        if (dot != nullptr) *dot = '\0';
-
-        /*
-         * The intent is only ever written after a receipt was verified, so
-         * finishing the delete is authorized. The receipt on the card is the
-         * durable evidence; the bundle bytes are not.
-         */
-        char receipt[160];
-        snprintf(receipt, sizeof(receipt), "%s/%s.cbor", CAIRN_DIR_RECEIPTS, id_text);
-
-        if (!SD.exists(receipt)) {
-            CAIRN_LOGE(TAG, "prune intent for %s has no stored receipt; leaving "
-                            "the bundle in place and clearing the intent",
-                       id_text);
-            char path[160];
-            prune_journal_path(id_text, path, sizeof(path));
-            SD.remove(path);
-            continue;
-        }
-
-        CAIRN_LOGW(TAG, "finishing interrupted prune of %s", id_text);
-        if (delete_bundle_dir(id_text)) {
-            prune_intent_complete(id_text);
-            finished++;
-        }
-    }
-
-    if (finished > 0) CAIRN_LOGI(TAG, "completed %d interrupted prune(s)", finished);
-    return finished;
+    return cairn_prune_resume_interrupted();
 }
+
 
 /* ── upload one bundle ────────────────────────────────────────────────────── */
 
@@ -718,67 +572,58 @@ static cairn_sync_result_t upload_bundle(const char *id_text,
         return CAIRN_SYNC_COMMIT_FAILED;
     }
 
-    /* ── VERIFY ───────────────────────────────────────────────────────────── */
-
-    static cairn_receipt_t r;
-    static uint8_t rscratch[1024];
-    cairn_err_t rerr =
-        cairn_receipt_decode(receipt_buf, (size_t)got, &r, rscratch, sizeof(rscratch));
-    if (rerr != CAIRN_OK) {
-        stats->receipts_rejected++;
-        CAIRN_LOGE(TAG, "receipt for %s does not decode: %s", id_text,
-                   cairn_strerror(rerr));
-        return CAIRN_SYNC_RECEIPT_INVALID;
-    }
+    /* ── VERIFY AND PRUNE ─────────────────────────────────────────────────── */
 
     /*
-     * Store the receipt before acting on it. A receipt is the only evidence that
-     * data is safe elsewhere; losing it to a reboot would mean re-uploading a
-     * bundle that was already durable, and in the pruning path it is the record
-     * that authorizes deletion.
+     * Store the receipt before acting on it. A receipt is the only evidence
+     * that the data is safe elsewhere; losing it to a reboot would mean
+     * re-uploading a bundle that was already durable, and in the pruning path
+     * it is the record that authorizes deletion.
      */
-    char rpath[160];
-    snprintf(rpath, sizeof(rpath), "%s/%s.cbor", CAIRN_DIR_RECEIPTS, id_text);
-
-    File rf = SD.open(rpath, FILE_WRITE);
-    if (rf) {
-        rf.write(receipt_buf, (size_t)got);
-        rf.flush();
-        rf.close();
-    } else {
+    if (!cairn_receipt_store(id_text, receipt_buf, (size_t)got)) {
         CAIRN_LOGW(TAG, "cannot store the receipt for %s; it will be re-fetched",
                    id_text);
     }
 
-    if (!have_server_key) {
+    /*
+     * The gate itself is in cairn_prune.c. Both conditions are checked there,
+     * every time: the signature must verify against the pinned key, and the
+     * receipt must acknowledge the content root actually uploaded.
+     */
+    cairn_prune_result_t pr =
+        cairn_prune_if_receipted(id_text, receipt_buf, (size_t)got,
+                                 have_server_key ? server_key : nullptr,
+                                 m.content_root);
+
+    switch (pr) {
+    case CAIRN_PRUNE_OK:
+        stats->bundles_receipted++;
+        stats->bundles_pruned++;
+        return CAIRN_SYNC_OK;
+
+    case CAIRN_PRUNE_NO_PINNED_KEY:
+        /* Uploaded and receipted, but nothing may be reclaimed. Not a failure:
+         * the data is safe, the card just keeps filling. */
         CAIRN_LOGW(TAG, "%s is uploaded but no server key is pinned, so nothing "
                         "will be pruned. Set CAIRN_SERVER_RECEIPT_KEY_HEX in "
                         "secrets.h to enable reclaiming space.", id_text);
         stats->bundles_receipted++;
         return CAIRN_SYNC_OK;
-    }
 
-    /*
-     * Both conditions, every time: the signature must verify against the pinned
-     * key, and the receipt must acknowledge the content root actually uploaded.
-     * A valid signature over a different bundle is not an acknowledgement of
-     * this one.
-     */
-    cairn_err_t verr =
-        cairn_receipt_verify_acknowledges(&r, server_key, m.content_root);
-    if (verr != CAIRN_OK) {
+    case CAIRN_PRUNE_STORE_FAILED:
+        /* The receipt was good; only the deletion faltered. The bundle is still
+         * durable on the server, so this is not a receipt problem. */
+        stats->bundles_receipted++;
+        CAIRN_LOGW(TAG, "%s is receipted but could not be pruned; the next boot "
+                        "will retry", id_text);
+        return CAIRN_SYNC_OK;
+
+    default:
         stats->receipts_rejected++;
         CAIRN_LOGE(TAG, "receipt for %s rejected (%s); the bundle stays on the "
-                        "card", id_text, cairn_strerror(verr));
+                        "card", id_text, cairn_prune_result_name(pr));
         return CAIRN_SYNC_RECEIPT_INVALID;
     }
-
-    stats->bundles_receipted++;
-    CAIRN_LOGI(TAG, "receipt verified for %s", id_text);
-
-    if (prune_receipted_bundle(id_text, m.content_root)) stats->bundles_pruned++;
-
-    return CAIRN_SYNC_OK;
 }
 
 /* ── driver ───────────────────────────────────────────────────────────────── */
@@ -796,27 +641,22 @@ cairn_sync_result_t cairn_sync_run(cairn_sync_stats_t *stats)
                         "but none will be pruned");
     }
 
-    /* Enumerate first: uploading mutates the directory. */
-    File d = SD.open(CAIRN_DIR_BUNDLES);
-    if (!d) return CAIRN_SYNC_LOCAL_ERROR;
+    /* Enumerate first: uploading prunes directories out from under an open
+     * iterator. */
+    cairn_dir_t *d = cairn_fs_opendir(CAIRN_DIR_BUNDLES);
+    if (d == nullptr) return CAIRN_SYNC_LOCAL_ERROR;
 
     char   ids[16][40];
     size_t count = 0;
+    char   name[64];
+    bool   is_dir = false;
 
-    for (;;) {
-        File entry = d.openNextFile();
-        if (!entry) break;
-
-        if (entry.isDirectory() && count < sizeof(ids) / sizeof(ids[0])) {
-            const char *nm = entry.name();
-            const char *base = strrchr(nm, '/');
-            base = (base != nullptr) ? base + 1 : nm;
-            snprintf(ids[count], sizeof(ids[0]), "%s", base);
-            count++;
-        }
-        entry.close();
+    while (cairn_fs_readdir(d, name, sizeof(name), &is_dir, nullptr)) {
+        if (!is_dir || count >= sizeof(ids) / sizeof(ids[0])) continue;
+        snprintf(ids[count], sizeof(ids[0]), "%s", name);
+        count++;
     }
-    d.close();
+    cairn_fs_closedir(d);
 
     if (count == 0) return CAIRN_SYNC_NOTHING_TO_DO;
 
