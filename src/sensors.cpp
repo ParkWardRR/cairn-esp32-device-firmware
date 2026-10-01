@@ -34,6 +34,29 @@ static struct {
 static uint32_t s_last_gps_ts = 0;
 static uint32_t s_last_gps_update_ms = 0;
 
+/* ── narrowing ────────────────────────────────────────────────────────────── */
+
+/*
+ * Saturate into the specification's i8 fields instead of letting C wrap.
+ *
+ * This matters most for coolant temperature. The driver returns
+ * `hex2uint8(data) - 40`, so the range is -40..+215 C, while the field is i8
+ * with 0x80 reserved for "unavailable". A bare cast turns 128 C into -128,
+ * which *is* the unavailable sentinel, and 130 C into -126 C — so an
+ * overheating engine would be recorded either as a missing sensor or as a
+ * plausible cold reading. Both are worse than useless: they are indistinguishable
+ * from real observations.
+ *
+ * Saturating at +127 is still obviously extreme and cannot be mistaken for
+ * normal, and -128 stays reserved for genuinely absent data.
+ */
+static int8_t sat_i8(int v)
+{
+    if (v > 127) return 127;
+    if (v < -127) return -127; /* -128 is the unavailable sentinel */
+    return (int8_t)v;
+}
+
 /* ── init ─────────────────────────────────────────────────────────────────── */
 
 static void calibrate_imu(void)
@@ -72,6 +95,23 @@ static void calibrate_imu(void)
 
 static void init_obd(SensorStatus *status)
 {
+    /*
+     * begin() defaults to begin(useCoProc = true, useCellular = true), and the
+     * defaults are kept deliberately even though no cellular module is fitted.
+     *
+     * Passing useCellular = false looks like the obvious tidy-up and is a trap:
+     * in FreematicsPlus.cpp that branch is the only thing that sets
+     * FLAG_GNSS_SOFT_SERIAL, which selects which GNSS transport gpsBeginExt()
+     * uses. The hardware profile in docs/flashing-and-testing.md was measured
+     * with the defaults and recorded GNSS as 38400 soft serial, so changing
+     * them would quietly move the firmware off the configuration this board was
+     * validated under.
+     *
+     * The cost of the default is a UART1 init on pins 35/2 and GPIO27 driven
+     * low, for a modem that is not there. Nothing here ever calls the cellular
+     * API, so that is wasted setup rather than a conflict — the coprocessor
+     * link is UART2 and the GNSS in use reaches the receiver over that link.
+     */
     if (s_sys.begin()) {
         status->coprocessor = true;
         status->device_type = s_sys.devType;
@@ -396,7 +436,7 @@ bool sensors_read_obd(cairn_obd_snapshot_t *out)
 
     requested++;
     if (pid_value(PID_COOLANT_TEMP, &v)) {
-        out->coolant_temp_c = (int8_t)v;
+        out->coolant_temp_c = sat_i8(v);
         answered++;
     } else {
         out->coolant_temp_c = CAIRN_I8_UNKNOWN;
@@ -405,7 +445,7 @@ bool sensors_read_obd(cairn_obd_snapshot_t *out)
 
     requested++;
     if (pid_value(PID_INTAKE_TEMP, &v)) {
-        out->intake_temp_c = (int8_t)v;
+        out->intake_temp_c = sat_i8(v);
         answered++;
     } else {
         out->intake_temp_c = CAIRN_I8_UNKNOWN;
@@ -414,7 +454,7 @@ bool sensors_read_obd(cairn_obd_snapshot_t *out)
 
     requested++;
     if (pid_value(PID_TIMING_ADVANCE, &v)) {
-        out->timing_advance_deg = (int8_t)v;
+        out->timing_advance_deg = sat_i8(v);
         answered++;
     } else {
         out->timing_advance_deg = CAIRN_I8_UNKNOWN;
@@ -464,12 +504,12 @@ void sensors_fill_health(cairn_device_health_t *out, uint8_t health_state,
 
     float temp = 0;
     if (s_mems != nullptr && s_mems->read(nullptr, nullptr, nullptr, &temp)) {
-        out->device_temp_c = (int8_t)lroundf(temp);
+        out->device_temp_c = sat_i8((int)lroundf(temp));
     } else {
         out->device_temp_c = CAIRN_I8_UNKNOWN;
     }
 
-    out->rssi_dbm = (rssi_dbm != 0) ? (int8_t)rssi_dbm : CAIRN_I8_UNKNOWN;
+    out->rssi_dbm = (rssi_dbm != 0) ? sat_i8(rssi_dbm) : CAIRN_I8_UNKNOWN;
 
     out->ext_sensor_1 = CAIRN_U16_UNKNOWN;
     out->ext_sensor_2 = CAIRN_U16_UNKNOWN;

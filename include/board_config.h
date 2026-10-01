@@ -14,16 +14,33 @@
 
 /* ── pins ─────────────────────────────────────────────────────────────────── */
 
-#define CAIRN_PIN_SD_CS          5   /* microSD over SPI */
-#define CAIRN_PIN_LED            4
-#define CAIRN_PIN_BUZZER         25
+/*
+ * Only the pins this firmware drives itself belong here.
+ *
+ * Everything reached through the vendored FreematicsPlus library — the OBD
+ * coprocessor link, both GNSS paths, the molex socket — is configured by that
+ * library's own defines in FreematicsPlus.h. Repeating them here would be a
+ * trap: the copies look authoritative, nothing reads them, and "fixing" a pin
+ * in this file would change nothing while appearing to.
+ *
+ * For reference, with the values the library actually uses:
+ *
+ *   OBD coprocessor   UART2, RX 13 / TX 14 at 115200 (or SPI, CS 2 / READY 13)
+ *   GNSS, external    UART1, RX 34 / TX 26, power 12 — these are the *same*
+ *                     pins as the 4-pin molex socket (the official guide
+ *                     documents it as GND / GPIO26 / VCC / GPIO34), so the
+ *                     external GNSS and the external I/O header are one
+ *                     connector
+ *   GNSS, internal    reached over the coprocessor link via ATGPSON, soft
+ *                     serial at 38400
+ *
+ * On this unit (device type 15) gpsBeginExt() fails and gpsBegin() succeeds, so
+ * the internal receiver is the one in use. Both paths verify that NMEA actually
+ * arrives before reporting success, which is why trying them in order is safe.
+ */
 
-#define CAIRN_PIN_LINK_UART_RX   13  /* OBD coprocessor */
-#define CAIRN_PIN_LINK_UART_TX   14
-
-#define CAIRN_PIN_GPS_POWER      12
-#define CAIRN_PIN_GPS_UART_RXD   34
-#define CAIRN_PIN_GPS_UART_TXD   26
+#define CAIRN_PIN_SD_CS  5   /* microSD over SPI; the only bus this code owns */
+#define CAIRN_PIN_LED    4   /* lit while faulted, cleared once capturing */
 
 /* ── filesystem layout ────────────────────────────────────────────────────── */
 
