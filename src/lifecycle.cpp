@@ -1204,9 +1204,24 @@ void lifecycle_tick(Lifecycle *lc)
              * The motion did not persist, so nothing is written. The ring keeps
              * filling and evicting while idle, which is what lets a real drive
              * recover its first seconds without a parked car producing bundles.
+             *
+             * idle_since_ms is deliberately NOT rebased here. This branch is
+             * the pre-roll *rejecting* a candidate — it has just decided the
+             * movement was not a drive — so the vehicle has been idle all
+             * along and the standby dwell should keep running. Rebasing it
+             * treated a rejected candidate as activity, and since the dwell is
+             * five minutes while a rejection takes well under a second, any
+             * stray bump reset the clock to zero.
+             *
+             * Measured on the bench: a single 638 ms transient
+             * (IDLE -> PRETRIP -> IDLE, start score 2.58 then 0.00) was enough,
+             * and the device never reached standby. In a car parked on a street
+             * — passing lorries, doors, someone leaning on a wing — it would
+             * never have slept at all. Only a genuine trip ending, the
+             * Active -> Idle transition below after the stop dwell, marks the
+             * moment the vehicle actually became idle.
              */
             set_capture_state(lc, CaptureState::Idle, 2, 0);
-            lc->idle_since_ms = now;
         } else if (now - lc->motion_since_ms >= CAIRN_START_DWELL_MS) {
             /*
              * Confirmed. The state is set first so the flushed frames are
