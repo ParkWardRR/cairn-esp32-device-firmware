@@ -190,6 +190,16 @@
  */
 #define CAIRN_STANDBY_HEARTBEAT_MS 21600000  /* 6 hours */
 
+/*
+ * How long to stay awake after a heartbeat wake before standing by again.
+ *
+ * The co-processor needs roughly fifteen seconds after leaving low-power mode
+ * before it will report a supply voltage — measured from the card, where the
+ * health record written straight after a resume says "battery unknown". Since
+ * recording that voltage is the heartbeat's only purpose, it has to wait for it.
+ */
+#define CAIRN_HEARTBEAT_SETTLE_MS 20000
+
 /* Clock to drop to while standing by. 80 MHz is the lowest frequency that
  * keeps the Wi-Fi and I2C peripherals usable without re-initialisation. */
 #define CAIRN_STANDBY_CPU_MHZ 80

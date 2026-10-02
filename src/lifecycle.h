@@ -120,6 +120,11 @@ struct Lifecycle {
      * cannot reset the standby dwell. */
     uint32_t next_sync_ms = 0;
 
+    /* Set on a periodic-health wake: hold off standby until this passes, so the
+     * co-processor has time to answer and the heartbeat records a real supply
+     * voltage instead of the unavailable sentinel. */
+    uint32_t heartbeat_settle_until_ms = 0;
+
     uint16_t last_battery_mv = CAIRN_U16_UNKNOWN;
     uint32_t next_battery_read_ms = 0;
 

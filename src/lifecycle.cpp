@@ -850,8 +850,50 @@ static void maybe_update(Lifecycle *lc)
  * days is recoverable, but it would sit undeliverable the whole time and the
  * receipt-gated prune could never reclaim the space.
  */
+/* Distinct pointer so the change-only log filter can tell this reason apart. */
+static const char *const k_settling = "letting the link settle after a heartbeat";
+
 static void maybe_standby(Lifecycle *lc)
 {
+    /*
+     * After a health heartbeat, stay up long enough to actually read the
+     * supply.
+     *
+     * Measured on the card: the co-processor returns nothing for about fifteen
+     * seconds after leaveLowPowerMode(), so the health record emitted straight
+     * after a resume carries "battery unknown" and the first valid reading
+     * arrives on the following sample. The retry inside sensors_battery_mv
+     * covers 60 ms, which is two orders of magnitude short.
+     *
+     * That interacts badly with this function's own heartbeat handling, which
+     * deliberately stopped rebasing idle_since_ms so the device returns to
+     * standby immediately instead of burning five minutes polling. Correct for
+     * the vehicle bus, but it meant the six-hour heartbeat went back to sleep
+     * before the link could answer — recording an unknown voltage every time,
+     * from the one sample whose entire purpose is recording voltage on a parked
+     * device. The parked-drain series would have had a hole exactly where it
+     * matters.
+     *
+     * Twenty seconds every six hours is 0.09% duty, which buys back the only
+     * measurement the firmware can make about its own power cost.
+     */
+    if (lc->heartbeat_settle_until_ms != 0) {
+        if ((int32_t)(millis() - lc->heartbeat_settle_until_ms) < 0) {
+            if (lc->last_standby_blocker != k_settling) {
+                CAIRN_LOGI(TAG, "holding off standby: letting the link settle so "
+                                "the heartbeat can record a supply voltage");
+                lc->last_standby_blocker = k_settling;
+            }
+            return;
+        }
+
+        CAIRN_LOGI(TAG, "heartbeat settled with supply %s; standing by",
+                   (lc->last_battery_mv == CAIRN_U16_UNKNOWN)
+                       ? "still unreadable"
+                       : "recorded");
+        lc->heartbeat_settle_until_ms = 0;
+    }
+
     cairn_power_evidence_t e;
     memset(&e, 0, sizeof(e));
 
@@ -971,6 +1013,7 @@ static void maybe_standby(Lifecycle *lc)
     if (r.wake_reason == CAIRN_WAKE_PERIODIC_HEALTH) {
         CAIRN_LOGI(TAG, "health heartbeat: staying bus-silent and returning to "
                         "standby without polling the vehicle");
+        lc->heartbeat_settle_until_ms = now + CAIRN_HEARTBEAT_SETTLE_MS;
     } else {
         lc->idle_since_ms = now;
         sensor_task_request_retry();
