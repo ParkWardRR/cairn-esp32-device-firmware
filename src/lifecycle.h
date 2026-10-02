@@ -87,6 +87,13 @@ struct Lifecycle {
     uint32_t boot_count;
 
     /*
+     * The standby blocker reported last tick, so a reason is logged when it
+     * changes rather than on every pass. Holds a string literal returned by
+     * cairn_power_standby_blocker, or nullptr when nothing is blocking.
+     */
+    const char *last_standby_blocker = nullptr;
+
+    /*
      * Last-known sensor values, as reported by facts. The controller keeps its
      * own copies rather than reading driver state the sensing task owns, and
      * the have_* flags matter: a stale fix or a silent ECU must stop

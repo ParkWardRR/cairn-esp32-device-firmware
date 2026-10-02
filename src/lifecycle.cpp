@@ -702,10 +702,26 @@ static void maybe_standby(Lifecycle *lc)
     }
 
     if (!cairn_power_should_standby(&e)) {
+        /*
+         * Log the blocker only when it changes. maybe_standby() runs on every
+         * tick, so an unconditional line here is one write per 20 ms — on the
+         * bench that was the overwhelming majority of the card log, and the
+         * point of the log is that a real event is findable in it. The reason a
+         * device stayed awake is worth recording; repeating it fifty times a
+         * second is not.
+         *
+         * Compared by pointer, not strcmp: cairn_power_standby_blocker returns
+         * string literals, so identity is both sufficient and exact.
+         */
         const char *why = cairn_power_standby_blocker(&e);
-        if (why != nullptr) CAIRN_LOGT(TAG, "not standing by: %s", why);
+        if (why != nullptr && why != lc->last_standby_blocker) {
+            CAIRN_LOGI(TAG, "not standing by: %s", why);
+            lc->last_standby_blocker = why;
+        }
         return;
     }
+
+    lc->last_standby_blocker = nullptr;
 
     emit_transition(lc, CAIRN_REGION_HEALTH, 0, 0, 4, 0);
     cairn_log_flush();
