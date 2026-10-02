@@ -320,15 +320,52 @@ void setup()
     pinMode(CAIRN_PIN_LED, OUTPUT);
     digitalWrite(CAIRN_PIN_LED, HIGH);
 
-    if (!SD.begin(CAIRN_PIN_SD_CS)) {
+    /*
+     * Retry the mount rather than giving up on the first failure.
+     *
+     * SD-over-SPI is unreliable immediately after power-up: the card needs a
+     * settling period and its initialisation sequence can fail with a token
+     * error that succeeds on a second attempt. This unit does it often — mounts
+     * observed failing with "token error [0] 0x20" and "GO_IDLE_STATE failed"
+     * and then succeeding on the next reset, repeatedly, with a card that
+     * passes a full filesystem check on a workstation.
+     *
+     * One attempt was a genuine field defect, not just an inconvenience on the
+     * bench. A device in a car mounts the card on every ignition, and setup()
+     * returned on failure — so a single transient cost the whole drive, with no
+     * recovery until someone power-cycled it. Recording nothing is the one
+     * outcome this firmware exists to avoid.
+     */
+    bool mounted = false;
+    for (int attempt = 1; attempt <= CAIRN_SD_MOUNT_ATTEMPTS; attempt++) {
+        if (SD.begin(CAIRN_PIN_SD_CS)) {
+            mounted = true;
+            if (attempt > 1) {
+                CAIRN_LOGW(TAG, "SD mounted on attempt %d of %d; the card needed "
+                                "a settling period",
+                           attempt, CAIRN_SD_MOUNT_ATTEMPTS);
+            }
+            break;
+        }
+
+        if (attempt < CAIRN_SD_MOUNT_ATTEMPTS) {
+            CAIRN_LOGW(TAG, "SD mount attempt %d of %d failed; retrying in %d ms",
+                       attempt, CAIRN_SD_MOUNT_ATTEMPTS, CAIRN_SD_MOUNT_RETRY_MS);
+            SD.end();
+            delay(CAIRN_SD_MOUNT_RETRY_MS);
+        }
+    }
+
+    if (!mounted) {
         /*
          * Without the card there is nowhere to put data, and capturing into RAM
          * would only produce a trip that vanishes at the next reboot. Say so
          * plainly and keep logging over UART.
          */
-        CAIRN_LOGE(TAG, "SD mount failed on CS=%d. Nothing can be captured "
-                        "without a card; check that it is seated and formatted "
-                        "FAT32.", CAIRN_PIN_SD_CS);
+        CAIRN_LOGE(TAG, "SD mount failed on CS=%d after %d attempts. Nothing can "
+                        "be captured without a card; check that it is seated and "
+                        "formatted FAT32.",
+                   CAIRN_PIN_SD_CS, CAIRN_SD_MOUNT_ATTEMPTS);
         return;
     }
 

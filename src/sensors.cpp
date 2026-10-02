@@ -340,6 +340,26 @@ uint16_t sensors_recent_accel_rms_mg(void)
     return s_imu.last_rms_mg;
 }
 
+uint16_t sensors_accel_magnitude_mg(void)
+{
+    if (s_mems == nullptr) return 0;
+
+    float a[3], g[3];
+    if (!s_mems->read(a, g)) return 0;
+
+    /* Bias-corrected, so the 1 g the board is sitting in does not read as
+     * motion. The bias was measured at boot while the vehicle was presumed
+     * still. */
+    float dx = a[0] - s_acc_bias[0];
+    float dy = a[1] - s_acc_bias[1];
+    float dz = a[2] - s_acc_bias[2];
+    float mag = sqrtf(dx * dx + dy * dy + dz * dz) * 1000.0f;
+
+    if (mag < 0.0f) return 0;
+    if (mag > 65534.0f) return 65534;
+    return (uint16_t)lroundf(mag);
+}
+
 bool sensors_imu_summarize(uint32_t window_ms, cairn_imu_summary_t *out)
 {
     if (s_mems == nullptr || s_imu.count == 0) return false;

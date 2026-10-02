@@ -39,6 +39,14 @@
  * arrives before reporting success, which is why trying them in order is safe.
  */
 
+/*
+ * SD mount retries. SPI card initialisation can fail transiently right after
+ * power-up and succeed moments later; a single attempt meant one bad boot cost
+ * the entire drive.
+ */
+#define CAIRN_SD_MOUNT_ATTEMPTS 5
+#define CAIRN_SD_MOUNT_RETRY_MS 250
+
 #define CAIRN_PIN_SD_CS  5   /* microSD over SPI; the only bus this code owns */
 #define CAIRN_PIN_LED    4   /* lit while faulted, cleared once capturing */
 

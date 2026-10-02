@@ -55,6 +55,23 @@ bool sensors_imu_summarize(uint32_t window_ms, cairn_imu_summary_t *out);
 /* The most recent accelerometer RMS, in milli-g, for motion scoring. */
 uint16_t sensors_recent_accel_rms_mg(void);
 
+/*
+ * One instantaneous bias-corrected accelerometer magnitude, in milli-g.
+ *
+ * For the standby loop, which runs on the controller's task while the sensing
+ * task is paused. It reads the sensor once and touches none of the windowed
+ * accumulator state, which is the point: calling sensors_imu_accumulate() from
+ * two tasks raced on that shared window, and a torn count/sum_sq pair makes
+ * sqrt(sum_sq/count) explode. The symptom was a device on a desk waking from
+ * standby every fifteen seconds reporting MOTION, so standby achieved about
+ * five per cent duty instead of near-continuous sleep.
+ *
+ * A single sample is noisier than an RMS window, which does not matter at a
+ * 120 mg threshold when a stationary board reads two or three. The vendor
+ * firmware polls the sensor directly here for the same reason.
+ */
+uint16_t sensors_accel_magnitude_mg(void);
+
 bool sensors_read_obd(cairn_obd_snapshot_t *out);
 
 /* Battery voltage in millivolts, read through the coprocessor. */

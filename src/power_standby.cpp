@@ -23,6 +23,7 @@
 #include "cairn_log.h"
 #include "config.h"
 #include "sensors.h"
+#include "sensor_task.h"
 
 static const char *TAG = "PWR";
 
@@ -57,6 +58,10 @@ void cairn_power_standby(cairn_power_result_t *out)
      */
     sensors_link_low_power(true);
 
+    /* Nothing drains the fact queue while the controller sleeps, so sampling
+     * into it would only overflow and be counted as dropped facts. */
+    sensor_task_set_paused(true);
+
     /* Clocked down only after the peripherals that care are quiet. */
     uint32_t original_mhz = getCpuFrequencyMhz();
     if (!setCpuFrequencyMhz(CAIRN_STANDBY_CPU_MHZ)) {
@@ -81,9 +86,14 @@ void cairn_power_standby(cairn_power_result_t *out)
         /*
          * The accelerometer is the only thing sampled on most iterations. It is
          * on I2C and survives light sleep, so this needs no re-initialisation.
+         *
+         * Read directly rather than through the windowed accumulator: the
+         * sensing task owns that window, and calling into it from here raced
+         * on the shared count and sum_sq, producing RMS values large enough to
+         * look like motion. The sensing task is paused for the duration
+         * anyway.
          */
-        sensors_imu_accumulate();
-        uint16_t rms = sensors_recent_accel_rms_mg();
+        uint16_t rms = sensors_accel_magnitude_mg();
 
         /*
          * Voltage goes through the coprocessor, which is in low-power mode, so
@@ -106,6 +116,7 @@ void cairn_power_standby(cairn_power_result_t *out)
 
     /* Restore in reverse. */
     setCpuFrequencyMhz(original_mhz);
+    sensor_task_set_paused(false);
     sensors_link_low_power(false);
 
     out->standby_ms = millis() - entered;

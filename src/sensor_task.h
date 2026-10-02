@@ -71,4 +71,21 @@ void sensor_task_set_bus_silent(bool silent);
 /* Whether the bus is currently being held silent. */
 bool sensor_task_bus_silent(void);
 
+/*
+ * Pause or resume sampling.
+ *
+ * Paused during standby. Without this the task keeps sampling at its 20 ms
+ * period while the controller sleeps, and since nothing is draining the queue
+ * it fills in about four seconds and then discards a fact per tick. Those
+ * discards were counted as drops and reported as "the controller is not
+ * keeping up" — 162 of them in half an hour on a device that was behaving
+ * exactly as designed — which put a fault into DEVICE_HEALTH and the health
+ * bitmap. It also spent power sampling into a queue with no reader.
+ *
+ * A cooperative flag rather than vTaskSuspend: the task must not be stopped
+ * mid-I2C-transaction, so it checks this at the top of its loop and parks
+ * there instead.
+ */
+void sensor_task_set_paused(bool paused);
+
 #endif /* CAIRN_SENSOR_TASK_H */

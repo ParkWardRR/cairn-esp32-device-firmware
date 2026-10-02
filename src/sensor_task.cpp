@@ -24,6 +24,7 @@ static volatile uint16_t s_obd_period_ms  = CAIRN_OBD_PERIOD_MS;
  * is quiet, and the controller opens the bus once a drive is confirmed.
  */
 static volatile bool s_bus_silent = true;
+static volatile bool s_paused = false;
 
 /*
  * 20 ms, giving a 50 Hz accelerometer rate. Ample for RMS and peak over a
@@ -69,6 +70,14 @@ static void sensor_task(void *arg)
     bool have_utc_basis = false;
 
     for (;;) {
+        /* Parked while the controller is in standby. Nothing is draining the
+         * queue, so sampling would only fill it and count the overflow as
+         * dropped facts. */
+        if (s_paused) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+
         uint32_t now = millis();
 
         /* Highest rate first, and unconditionally: this is the sample stream
@@ -253,3 +262,5 @@ void sensor_task_set_rates(const cairn_rates_t *r)
 void sensor_task_set_bus_silent(bool silent) { s_bus_silent = silent; }
 
 bool sensor_task_bus_silent(void) { return s_bus_silent; }
+
+void sensor_task_set_paused(bool paused) { s_paused = paused; }
