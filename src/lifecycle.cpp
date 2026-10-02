@@ -562,6 +562,59 @@ static void on_health(Lifecycle *lc, const fact_t *f)
                     "facts, state %s",
                (unsigned)h.battery_mv, (unsigned long long)free_mib,
                (unsigned)lc->cap.write_errors, (unsigned)dropped, names);
+
+    /*
+     * What the sensors are actually reporting, next to the health line and at
+     * the same cadence.
+     *
+     * This exists because the log was silent about it. While a car is parked no
+     * GNSS or IMU record reaches the card at all — they sit in the pre-roll ring
+     * and are discarded unless a trip confirms — which is correct, and also
+     * means an unusable GNSS antenna and a perfectly good one produce byte-for-
+     * byte identical logs until someone drives somewhere and decodes the bundle
+     * afterwards. Fix state is the single most useful thing to be able to read
+     * at a glance before trusting a drive to the device, so it is INFO and goes
+     * to the card.
+     *
+     * Fix type follows the NMEA convention the GNSS record uses: 0 none,
+     * 2 two-dimensional, 3 three-dimensional.
+     */
+    if (lc->have_recent_gnss) {
+        const cairn_gnss_sample_t *g = &lc->last_gnss;
+
+        char speed[16];
+        if (g->speed_cmps == CAIRN_U16_UNKNOWN) {
+            snprintf(speed, sizeof(speed), "unknown");
+        } else {
+            snprintf(speed, sizeof(speed), "%u.%u km/h",
+                     (unsigned)(g->speed_cmps * 36u / 1000u),
+                     (unsigned)((g->speed_cmps * 36u / 100u) % 10u));
+        }
+
+        if (g->fix_type >= 2) {
+            CAIRN_LOGI(TAG, "sensors: gnss fix=%u sats=%u hdop=%u.%02u %s, "
+                            "lat=%ld lon=%ld | accel rms=%u mg | start=%u "
+                            "stop=%u | obd=%s",
+                       (unsigned)g->fix_type, (unsigned)g->sats_used,
+                       (unsigned)(g->hdop_e2 / 100u), (unsigned)(g->hdop_e2 % 100u),
+                       speed, (long)g->lat_e7, (long)g->lon_e7,
+                       (unsigned)lc->last_accel_rms_mg,
+                       (unsigned)lc->start_score_e2, (unsigned)lc->stop_score_e2,
+                       lc->have_recent_obd ? "live" : "absent");
+        } else {
+            CAIRN_LOGI(TAG, "sensors: gnss NO FIX (sats=%u, needs sky view) | "
+                            "accel rms=%u mg | start=%u stop=%u | obd=%s",
+                       (unsigned)g->sats_used, (unsigned)lc->last_accel_rms_mg,
+                       (unsigned)lc->start_score_e2, (unsigned)lc->stop_score_e2,
+                       lc->have_recent_obd ? "live" : "absent");
+        }
+    } else {
+        CAIRN_LOGW(TAG, "sensors: no GNSS sample yet | accel rms=%u mg | "
+                        "start=%u stop=%u | obd=%s",
+                   (unsigned)lc->last_accel_rms_mg,
+                   (unsigned)lc->start_score_e2, (unsigned)lc->stop_score_e2,
+                   lc->have_recent_obd ? "live" : "absent");
+    }
 }
 
 /* ── sealing and sync ─────────────────────────────────────────────────────── */
