@@ -649,6 +649,27 @@ typedef struct {
 #define CAIRN_REGION_CONNECTIVITY 3
 #define CAIRN_REGION_HEALTH       4
 
+/*
+ * States for the health region's power dimension (§4.7.1).
+ *
+ * Standby entry and exit are journalled as a matched pair so a reader can
+ * recover the exact windows during which the device was asleep. Both frames
+ * carry monotonic_ms, so the duration is exit − enter and needs no field of its
+ * own; on this platform standby is light sleep and the millisecond clock runs
+ * straight through it.
+ *
+ * That pair is what makes parked power consumption measurable at all. A voltage
+ * series alone cannot distinguish a device that slept for six hours from one
+ * that sat awake, and those differ by an order of magnitude in draw. With the
+ * windows recorded, the supply voltage in DEVICE_HEALTH can be attributed to
+ * whichever state the device was actually in.
+ */
+#define CAIRN_POWER_STATE_AWAKE   0
+#define CAIRN_POWER_STATE_STANDBY 1
+
+/* trigger_event for a health-region power transition. */
+#define CAIRN_TRIGGER_POWER 4
+
 void cairn_encode_state_transition(const cairn_state_transition_t *s, uint8_t out[20]);
 
 /* ── TRIP_EVENT (§4.6) ────────────────────────────────────────────────────── */

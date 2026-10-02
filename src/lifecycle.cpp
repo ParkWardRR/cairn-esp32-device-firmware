@@ -813,7 +813,8 @@ static void maybe_standby(Lifecycle *lc)
 
     lc->last_standby_blocker = nullptr;
 
-    emit_transition(lc, CAIRN_REGION_HEALTH, 0, 0, 4, 0);
+    emit_transition(lc, CAIRN_REGION_HEALTH, CAIRN_POWER_STATE_AWAKE,
+                    CAIRN_POWER_STATE_STANDBY, CAIRN_TRIGGER_POWER, 0);
     cairn_log_flush();
 
     cairn_power_result_t r;
@@ -821,6 +822,23 @@ static void maybe_standby(Lifecycle *lc)
 
     lc->total_standby_ms += r.standby_ms;
     lc->standby_count++;
+
+    /*
+     * Close the pair. Without an exit record the journal shows a device going to
+     * sleep and never confirming it came back, so every standby window is
+     * open-ended and parked draw cannot be attributed: a voltage series cannot
+     * tell six hours asleep from six hours awake, and those differ by an order
+     * of magnitude.
+     *
+     * The wake reason travels in reason_code so the server can separate a
+     * heartbeat — the uninteresting case, and the one that should dominate a
+     * parked car — from motion or an engine start. Duration is exit − enter from
+     * the two frames' monotonic_ms; light sleep leaves that clock running, which
+     * is the property that makes the subtraction valid.
+     */
+    emit_transition(lc, CAIRN_REGION_HEALTH, CAIRN_POWER_STATE_STANDBY,
+                    CAIRN_POWER_STATE_AWAKE, CAIRN_TRIGGER_POWER,
+                    (uint8_t)r.wake_reason);
 
     /*
      * Waking is a fresh start for the sensors but not for the bundle: the
