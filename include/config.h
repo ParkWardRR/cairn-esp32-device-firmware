@@ -138,6 +138,35 @@
 #define CAIRN_PREROLL_WINDOW_MS     45000
 #define CAIRN_PREROLL_RING_SAMPLES  128
 
+/* ── power management ─────────────────────────────────────────────────────── */
+
+/*
+ * How long the vehicle must be at rest before the device stands by. Longer than
+ * the trip-stop dwell on purpose: sealing a trip and immediately sleeping would
+ * miss a driver who stopped to post a letter.
+ */
+#define CAIRN_STANDBY_IDLE_MS 300000  /* 5 minutes */
+
+/*
+ * Voltage that means the engine is running, from the v1 firmware's measured
+ * value. A resting battery sits near 12.4 V and an alternator pushes well above
+ * 13 V, so this is a wide margin rather than a fine one.
+ */
+#define CAIRN_ENGINE_ON_MV 13200
+
+/* Poll interval while standing by. The core light-sleeps in between. */
+#define CAIRN_STANDBY_POLL_MS 1000
+
+/*
+ * A standby this long emits a health record anyway, so a parked device stays
+ * distinguishable from a dead one.
+ */
+#define CAIRN_STANDBY_HEARTBEAT_MS 21600000  /* 6 hours */
+
+/* Clock to drop to while standing by. 80 MHz is the lowest frequency that
+ * keeps the Wi-Fi and I2C peripherals usable without re-initialisation. */
+#define CAIRN_STANDBY_CPU_MHZ 80
+
 /* ── sync policy ──────────────────────────────────────────────────────────── */
 
 #define CAIRN_SYNC_CONNECT_TIMEOUT_MS 20000

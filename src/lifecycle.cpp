@@ -9,6 +9,7 @@
 #include "cairn_log.h"
 #include "cairn_fs.h"
 #include "cairn_ota.h"
+#include "cairn_power.h"
 #include "cairn_sync.h"
 #include "config.h"
 #include "policy.h"
@@ -648,6 +649,93 @@ static void maybe_update(Lifecycle *lc)
 }
 
 /*
+ * Stand by when there is demonstrably nothing to do.
+ *
+ * Ordering matters more than the saving. Standby stops the radio, so it stops
+ * the only process that can turn unreceipted bundles into safe ones — which is
+ * why it runs *after* a sync attempt and why pending bundles with a live link
+ * block it outright. And it seals the open capture first: leaving one open for
+ * days is recoverable, but it would sit undeliverable the whole time and the
+ * receipt-gated prune could never reclaim the space.
+ */
+static void maybe_standby(Lifecycle *lc)
+{
+    cairn_power_evidence_t e;
+    memset(&e, 0, sizeof(e));
+
+    e.trip_active = (lc->capture != CaptureState::Idle);
+    e.capture_open = lc->cap.active && lc->cap.have_any_frame;
+    e.idle_ms = millis() - lc->idle_since_ms;
+    e.battery_mv = lc->have_recent_obd ? sensors_battery_mv() : CAIRN_U16_UNKNOWN;
+    e.pending_bundles = lc->pending_bundles;
+    e.link_online = (lc->link != LinkState::Offline);
+
+    /*
+     * An open capture holding data is a reason to seal, not a reason to stay
+     * awake forever — so seal it and re-evaluate on the next pass rather than
+     * sleeping with it open.
+     */
+    if (!e.trip_active && e.capture_open &&
+        e.idle_ms >= CAIRN_STANDBY_IDLE_MS) {
+        CAIRN_LOGI(TAG, "sealing before standby");
+        seal_and_reopen(lc, 3);
+        return;
+    }
+
+    if (!cairn_power_should_standby(&e)) {
+        const char *why = cairn_power_standby_blocker(&e);
+        if (why != nullptr) CAIRN_LOGT(TAG, "not standing by: %s", why);
+        return;
+    }
+
+    emit_transition(lc, CAIRN_REGION_HEALTH, 0, 0, 4, 0);
+    cairn_log_flush();
+
+    cairn_power_result_t r;
+    cairn_power_standby(&r);
+
+    lc->total_standby_ms += r.standby_ms;
+    lc->standby_count++;
+
+    /*
+     * Waking is a fresh start for the sensors but not for the bundle: the
+     * capture, the chain and the identity all survived in RAM, because this is
+     * light sleep rather than a reset.
+     */
+    cairn_log_attach_sd(lc->boot_count);
+    CAIRN_LOGW(TAG, "resumed after %u ms standby (%s); %u standby period(s) "
+                    "totalling %u ms this boot",
+               (unsigned)r.standby_ms, cairn_wake_reason_name(r.wake_reason),
+               (unsigned)lc->standby_count, (unsigned)lc->total_standby_ms);
+
+    /*
+     * The timers all reference millis(), which kept running through light
+     * sleep, so every schedule is now far in the past. Rebase them rather than
+     * letting the first pass after waking fire everything at once.
+     */
+    uint32_t now = millis();
+    lc->idle_since_ms = now;
+    lc->next_ota_check_ms = now + CAIRN_OTA_CHECK_INTERVAL_MS;
+    lc->still_since_ms = now;
+    lc->motion_since_ms = 0;
+
+    /* The receiver was powered down, so position is unknown until it reacquires
+     * — and the degraded bitmap should say so rather than carry a stale fix. */
+    lc->have_recent_gnss = false;
+    lc->have_recent_obd = false;
+    sensor_task_request_retry();
+
+    /*
+     * Engine voltage is the early signal: it rises before the vehicle moves. A
+     * wake on it means a drive is probably starting, so the pre-roll should be
+     * filling rather than the device deciding it is still parked.
+     */
+    if (r.wake_reason == CAIRN_WAKE_ENGINE_VOLTAGE) {
+        emit_trip_event(lc, CAIRN_EVENT_HARSH_MOTION, "engine start detected");
+    }
+}
+
+/*
  * Sync only while idle. Uploading during a drive competes with capture for both
  * the CPU and the SPI bus the card is on, and nothing about this data is
  * time-critical.
@@ -879,6 +967,13 @@ void lifecycle_tick(Lifecycle *lc)
     }
 
     maybe_sync(lc);
+
+    /*
+     * Last, so a sync has already had its chance this pass. Standing by before
+     * syncing would strand unreceipted bundles for the length of the standby.
+     */
+    maybe_standby(lc);
+
     cairn_log_tick();
     cairn_capture_tick(&lc->cap);
 }

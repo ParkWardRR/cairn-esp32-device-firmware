@@ -34,6 +34,7 @@
 #include "cairn_prune.h"
 #include "cairn_store.h"
 #include "cairn_ota.h"
+#include "cairn_power.h"
 #include "policy.h"
 #include "preroll.h"
 
@@ -1973,6 +1974,133 @@ static bool row_trip_event_round_trip(void)
     return true;
 }
 
+
+/* ── power management ─────────────────────────────────────────────────────── */
+
+/*
+ * Standby must never strand data.
+ *
+ * It stops the radio, which stops the only process that can turn an
+ * unreceipted bundle into a safe one. So every condition that represents
+ * unfinished work has to block it, and each is checked on its own — a blocker
+ * that only works in combination with another is a blocker that will be removed
+ * by accident.
+ */
+static bool row_standby_never_strands_data(void)
+{
+    cairn_power_evidence_t e;
+
+    /* The baseline: idle long enough, nothing pending, engine off. */
+    memset(&e, 0, sizeof(e));
+    e.idle_ms = CAIRN_STANDBY_IDLE_MS;
+    e.battery_mv = 12400;
+    CHECK(cairn_power_should_standby(&e),
+          "the baseline case was refused: %s", cairn_power_standby_blocker(&e));
+
+    /* A trip in progress. */
+    cairn_power_evidence_t t = e;
+    t.trip_active = true;
+    CHECK(!cairn_power_should_standby(&t), "stood by mid-trip");
+    CHECK(strstr(cairn_power_standby_blocker(&t), "trip") != NULL,
+          "the trip was not named as the blocker");
+
+    /* An unsealed capture. Standing by would leave it undeliverable for the
+     * whole standby, and the prune could never reclaim it. */
+    cairn_power_evidence_t c = e;
+    c.capture_open = true;
+    CHECK(!cairn_power_should_standby(&c), "stood by with an unsealed capture");
+
+    /* Unreceipted bundles with a live link: the one chance to make them safe. */
+    cairn_power_evidence_t p = e;
+    p.pending_bundles = 2;
+    p.link_online = true;
+    CHECK(!cairn_power_should_standby(&p),
+          "stood by with bundles awaiting a receipt and the link up");
+
+    /*
+     * But pending bundles with no link must NOT block forever — otherwise a
+     * device that can never reach its server would never sleep, and would flatten
+     * the battery precisely because it was offline.
+     */
+    cairn_power_evidence_t o = e;
+    o.pending_bundles = 2;
+    o.link_online = false;
+    CHECK(cairn_power_should_standby(&o),
+          "refused to stand by with pending bundles and no link — an offline "
+          "device would never sleep: %s", cairn_power_standby_blocker(&o));
+
+    /* Not idle long enough. */
+    cairn_power_evidence_t i = e;
+    i.idle_ms = CAIRN_STANDBY_IDLE_MS - 1;
+    CHECK(!cairn_power_should_standby(&i), "stood by before the idle dwell");
+
+    /* Engine voltage means the engine is probably running, whatever the
+     * accelerometer thinks. */
+    cairn_power_evidence_t v = e;
+    v.battery_mv = CAIRN_ENGINE_ON_MV;
+    CHECK(!cairn_power_should_standby(&v), "stood by with the engine running");
+
+    /* An unknown voltage must not block: the coprocessor is often silent with
+     * the ignition off, which is exactly when standby is wanted. */
+    cairn_power_evidence_t u = e;
+    u.battery_mv = CAIRN_U16_UNKNOWN;
+    CHECK(cairn_power_should_standby(&u),
+          "an unreadable voltage blocked standby, which would keep a parked "
+          "device awake whenever the ECU is asleep: %s",
+          cairn_power_standby_blocker(&u));
+
+    return true;
+}
+
+/*
+ * Waking favours the earliest reliable signal.
+ *
+ * Engine voltage rises before the vehicle moves, and catching it early is what
+ * lets the pre-roll cover the first seconds of a drive rather than joining
+ * part-way through.
+ */
+static bool row_wake_prefers_engine_voltage(void)
+{
+    const uint16_t thresh = CAIRN_MOTION_ACCEL_RMS_MG;
+
+    CHECK(cairn_power_should_wake(0, CAIRN_ENGINE_ON_MV, 0, thresh)
+              == CAIRN_WAKE_ENGINE_VOLTAGE,
+          "engine voltage alone did not wake the device");
+
+    CHECK(cairn_power_should_wake(thresh, 12400, 0, thresh) == CAIRN_WAKE_MOTION,
+          "motion alone did not wake the device");
+
+    /* Both: voltage wins, because it is the earlier evidence. */
+    CHECK(cairn_power_should_wake(thresh, CAIRN_ENGINE_ON_MV, 0, thresh)
+              == CAIRN_WAKE_ENGINE_VOLTAGE,
+          "with both signals present, motion was reported instead of the "
+          "earlier engine-voltage one");
+
+    /* Quiet and parked stays asleep. */
+    CHECK(cairn_power_should_wake(0, 12400, 0, thresh) == CAIRN_WAKE_NONE,
+          "woke with no reason");
+
+    /* An unknown voltage must not be read as an engine start. */
+    CHECK(cairn_power_should_wake(0, CAIRN_U16_UNKNOWN, 0, thresh)
+              == CAIRN_WAKE_NONE,
+          "an unreadable voltage was treated as an engine start");
+
+    /*
+     * A long standby reports in regardless, so weeks of correct silence and a
+     * dead device are distinguishable in the data.
+     */
+    CHECK(cairn_power_should_wake(0, 12400, CAIRN_STANDBY_HEARTBEAT_MS, thresh)
+              == CAIRN_WAKE_PERIODIC_HEALTH,
+          "a standby past the heartbeat interval did not report in");
+
+    /* Just under the interval must still sleep. */
+    CHECK(cairn_power_should_wake(0, 12400, CAIRN_STANDBY_HEARTBEAT_MS - 1,
+                                  thresh) == CAIRN_WAKE_NONE,
+          "woke one millisecond before the heartbeat was due");
+
+    return true;
+}
+
 /* ── driver ───────────────────────────────────────────────────────────────── */
 
 typedef struct {
@@ -2010,6 +2138,8 @@ static const row_t ROWS[] = {
     { "ota",      "version ordering refuses rather than guesses", row_ota_version_ordering },
     { "ota",      "descriptor decoding is strict",              row_ota_descriptor_strictness },
     { "events",   "trip events round-trip through the card",    row_trip_event_round_trip },
+    { "power",    "standby never strands unsent data",          row_standby_never_strands_data },
+    { "power",    "waking favours the earliest reliable signal", row_wake_prefers_engine_voltage },
 };
 
 int main(int argc, char **argv)

@@ -34,9 +34,12 @@ FS_SRC     := $(wildcard $(FS_DIR)/*.c)
 # behind CAIRN_OTA_AVAILABLE is Arduino and is not built here.
 OTA_DIR    := ../../lib/cairn_ota
 
+# Likewise the standby decisions; the execution half is in src/ and Arduino.
+POWER_DIR  := ../../lib/cairn_power
+
 # Only the portable application sources; the rest of src/ is Arduino C++.
 SRC_DIR    := ../../src
-APP_SRC    := $(SRC_DIR)/preroll.c $(SRC_DIR)/policy.c $(OTA_DIR)/cairn_ota.c
+APP_SRC    := $(SRC_DIR)/preroll.c $(SRC_DIR)/policy.c $(OTA_DIR)/cairn_ota.c $(POWER_DIR)/cairn_power.c
 
 # The conformance runner needs the policy codec, which lives in src/.
 CONFORMANCE_SRC := $(FORMAT_SRC) $(SRC_DIR)/policy.c minijson.c conformance.c
@@ -50,7 +53,7 @@ CFLAGS  ?= -std=c11 -O1 -g \
            -Wall -Wextra -Werror \
            -Wshadow -Wpointer-arith -Wcast-qual -Wstrict-prototypes \
            -Wmissing-prototypes -Wno-unused-parameter \
-           -I$(FORMAT_DIR) -I$(STORE_DIR) -I$(FS_DIR) -I$(LOG_DIR) -I$(INCLUDE_DIR) -I$(SRC_DIR) -I$(OTA_DIR) -I.
+           -I$(FORMAT_DIR) -I$(STORE_DIR) -I$(FS_DIR) -I$(LOG_DIR) -I$(INCLUDE_DIR) -I$(SRC_DIR) -I$(OTA_DIR) -I$(POWER_DIR) -I.
 
 SAN := -fsanitize=address,undefined -fno-omit-frame-pointer
 

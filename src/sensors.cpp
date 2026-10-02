@@ -487,6 +487,47 @@ uint16_t sensors_battery_mv(void)
     return (uint16_t)lroundf(v * 1000.0f);
 }
 
+void sensors_gnss_power_down(void)
+{
+    if (s_status == NULL || !s_status->gnss) return;
+
+    s_sys.gpsEnd(true);
+    s_status->gnss = false;
+    s_gps = NULL;
+
+    /* Marked unavailable rather than merely idle, so the degraded-state bitmap
+     * reports DEGRADED_GNSS honestly for as long as it is off. */
+    CAIRN_LOGI(TAG, "GNSS powered down for standby");
+}
+
+void sensors_link_low_power(bool enable)
+{
+    if (s_status == NULL || !s_status->coprocessor) return;
+
+    if (enable) {
+        s_obd.enterLowPowerMode();
+        s_status->obd = false;
+        CAIRN_LOGI(TAG, "coprocessor in low-power mode");
+        return;
+    }
+
+    /*
+     * Coming back needs a link reset, not just a mode change: the coprocessor
+     * does not resume a conversation it was not part of. This mirrors the
+     * vendor's resetLink() on wake.
+     */
+    s_sys.resetLink();
+    s_obd.leaveLowPowerMode();
+
+    if (s_obd.init()) {
+        s_status->obd = true;
+        CAIRN_LOGI(TAG, "coprocessor back, ECU responding");
+    } else {
+        CAIRN_LOGW(TAG, "coprocessor back but the ECU is not answering "
+                        "(ignition may still be off)");
+    }
+}
+
 void sensors_fill_health(cairn_device_health_t *out, uint8_t health_state,
                          uint8_t reboot_count, int rssi_dbm)
 {

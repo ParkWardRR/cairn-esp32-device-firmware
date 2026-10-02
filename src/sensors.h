@@ -63,4 +63,22 @@ uint16_t sensors_battery_mv(void);
 void sensors_fill_health(cairn_device_health_t *out, uint8_t health_state,
                          uint8_t reboot_count, int rssi_dbm);
 
+/* ── power ────────────────────────────────────────────────────────────────── */
+
+/*
+ * Power the GNSS receiver down. It draws continuously and has nothing to track
+ * while parked; reacquisition on wake costs seconds, which a stationary vehicle
+ * can afford.
+ */
+void sensors_gnss_power_down(void);
+
+/*
+ * Put the OBD coprocessor into its low-power mode, or bring it back.
+ *
+ * This is the vendor's ATLP path, and it covers more than OBD: the internal
+ * GNSS sits behind the same link. Leaving requires a link reset, which this
+ * handles — the coprocessor does not resume mid-conversation.
+ */
+void sensors_link_low_power(bool enable);
+
 #endif /* CAIRN_SENSORS_H */

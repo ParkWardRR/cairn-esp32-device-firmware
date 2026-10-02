@@ -22,6 +22,7 @@
 #include <stdint.h>
 
 #include "cairn_ota.h"
+#include "cairn_power.h"
 #include "cairn_store.h"
 #include "policy.h"
 #include "preroll.h"
@@ -132,6 +133,11 @@ struct Lifecycle {
 
     /* Next OTA check. Hourly while parked; see docs/ota.md. */
     uint32_t next_ota_check_ms = 0;
+
+    /* Cumulative standby, for the health record. A parked week should be
+     * visible in the data rather than inferred from a gap. */
+    uint32_t total_standby_ms = 0;
+    uint32_t standby_count = 0;
 
     cairn_dynamics_t dynamics = CAIRN_DYN_IDLE;
     uint16_t last_speed_cmps = CAIRN_U16_UNKNOWN;

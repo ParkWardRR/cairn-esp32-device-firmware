@@ -427,6 +427,55 @@ the bench that the matrix does not reproduce points at the hardware or the
 drivers rather than at the storage logic — which is the main reason the matrix
 exists.
 
+## Standby, and why it is not deep sleep
+
+While parked the device powers the radio and GNSS down, puts the coprocessor
+into its low-power mode, clocks the CPU to 80 MHz, and light-sleeps between
+one-second polls for motion or engine voltage.
+
+It is deliberately **not** ESP32 deep sleep, and that is a hardware constraint
+rather than a preference. Waking on motion needs the IMU's interrupt line on an
+RTC-capable GPIO, and on the ONE+ that line is not routed to the ESP32 — the
+vendored library defines no such pin, only the ICM-42627's internal registers.
+The official Freematics firmware reaches the same conclusion: its `standby()`
+powers peripherals down and then blocks polling for motion or voltage,
+configuring no wake source at all.
+
+Timer-wake deep sleep is the only remaining form and is worse here, because
+every wake is a full reset and this firmware's boot mounts the card and runs a
+recovery scan over every segment. At any interval short enough to catch the
+start of a drive, that costs more than polling saves.
+
+**The draw has not been measured.** This is the one place a multimeter is worth
+more than any amount of reasoning, and it is the measurement I would take first:
+
+```
+# Idle, parked, after the standby log line appears
+# Expect: radio off, GNSS off, coprocessor in ATLP, CPU at 80 MHz
+```
+
+What to check in the log:
+
+```
+ PWR  WARN  entering standby
+ SENS INFO  GNSS powered down for standby
+ SENS INFO  coprocessor in low-power mode
+ PWR  WARN  woke after 184000 ms and 184 polls: ENGINE_VOLTAGE
+ LIFE WARN  resumed after 184000 ms standby (ENGINE_VOLTAGE); 1 standby
+            period(s) totalling 184000 ms this boot
+```
+
+A wake reason of `ENGINE_VOLTAGE` is the good case — the rail rises before the
+vehicle moves, so the pre-roll is already filling when the drive starts. A wake
+on `MOTION` means the voltage signal was missed and the first second or two of
+the drive may be thinner.
+
+If you see standby never entered, the log says which condition blocked it. The
+gates are deliberately conservative: a trip in progress, an unsealed capture,
+or unreceipted bundles with a working link all keep the device awake, because
+standby stops the radio and therefore stops the only process that can make that
+data safe.
+
 ## Known gaps
 
 - Never run on hardware. First boot is the first real test. The storage and
@@ -438,7 +487,7 @@ exists.
   irreversible, which is a poor property for a device already in a vehicle. The
   signing seed in NVS is therefore readable from an extracted chip; it
   authorizes uploads, not deletions, and the server can revoke it.
-- No deep sleep yet, so parked current draw is higher than it needs to be.
+- Parked draw is managed but unmeasured. See the standby note below.
 - Transport is plain HTTP. The receipt signature, not the transport, is what
   authorizes deletion, so this affects who can read an upload rather than
   whether a prune is legitimate.
