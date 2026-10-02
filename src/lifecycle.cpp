@@ -558,9 +558,26 @@ static void on_health(Lifecycle *lc, const fact_t *f)
 
     char names[160];
     cairn_health_state_names(state, names, sizeof(names));
-    CAIRN_LOGD(TAG, "health: %u mV, %llu MiB free, %u write errors, %u dropped "
-                    "facts, state %s",
-               (unsigned)h.battery_mv, (unsigned long long)free_mib,
+
+    /*
+     * Render the unavailable sentinel as a word, not as 65535.
+     *
+     * battery_mv is CAIRN_U16_UNKNOWN whenever the ECU is not answering, since
+     * the voltage is read over OBD. The comparisons that matter already guard
+     * for it, but the log did not, so a parked device reported "health: 65535
+     * mV" — a number that invites being read as a measurement, in the one place
+     * someone looks to find out whether the supply is healthy.
+     */
+    char battery[16];
+    if (h.battery_mv == CAIRN_U16_UNKNOWN) {
+        snprintf(battery, sizeof(battery), "unknown");
+    } else {
+        snprintf(battery, sizeof(battery), "%u mV", (unsigned)h.battery_mv);
+    }
+
+    CAIRN_LOGD(TAG, "health: battery %s, %llu MiB free, %u write errors, "
+                    "%u dropped facts, state %s",
+               battery, (unsigned long long)free_mib,
                (unsigned)lc->cap.write_errors, (unsigned)dropped, names);
 
     /*
