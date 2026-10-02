@@ -1739,6 +1739,39 @@ static bool row_ota_preconditions_each_block(void)
           "OTA is compiled out but that was not the reported reason");
 #endif
 
+    /*
+     * The operating point the feature actually exists for: parked, ignition
+     * off, resting battery.
+     *
+     * The row above uses 13000 mV, which is an engine-running voltage, so on its
+     * own it leaves the suite proving only that OTA works in a state OTA is
+     * forbidden to run in. A healthy 12 V battery at rest sits around 12.4-12.6
+     * V, and if OTA_MIN_SUPPLY_MV ever rises above that the feature becomes
+     * unreachable in every state the device is ever in — blocked while driving
+     * by not_parked and blocked while parked by the supply — which looks exactly
+     * like "no update available" and reports nothing.
+     *
+     * That is not hypothetical: the firmware wiring did precisely this by
+     * discarding the voltage whenever no ECU was answering, and the defect
+     * survived because nothing asserted the resting case.
+     *
+     * Asserted on b.supply_unhealthy rather than on the aggregate return,
+     * deliberately. The host build pins no update key, so CAIRN_OTA_AVAILABLE is
+     * 0 and every aggregate OTA assertion in this file takes its #else branch
+     * and checks only no_update_key — which means the supply threshold had no
+     * coverage at all, in either direction. The field is populated regardless of
+     * whether a key is pinned, so checking it has teeth in both builds.
+     */
+    cairn_ota_preconditions(true, 12400, &b);
+    CHECK(!b.supply_unhealthy,
+          "a resting 12.4 V battery was judged unhealthy, so an update can "
+          "never install on a parked car");
+
+    /* A genuinely weak battery must still block: the point is discrimination
+     * between resting and flat, not permitting everything. */
+    cairn_ota_preconditions(true, 11800, &b);
+    CHECK(b.supply_unhealthy, "a flat 11.8 V battery was accepted for an update");
+
     /* The description must name the reason; "blocked" alone is unactionable. */
     cairn_ota_preconditions(false, 11000, &b);
     char why[256];

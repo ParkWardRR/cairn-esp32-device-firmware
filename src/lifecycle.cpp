@@ -708,8 +708,25 @@ static void maybe_update(Lifecycle *lc)
 
     bool parked = (lc->capture == CaptureState::Idle);
 
-    uint16_t battery = CAIRN_U16_UNKNOWN;
-    if (lc->have_recent_obd) battery = sensors_battery_mv();
+    /*
+     * Read the supply directly rather than gating on a live ECU.
+     *
+     * This gate made OTA unreachable. The preconditions block while driving via
+     * not_parked, and treat an unknown voltage as unhealthy — correctly, since
+     * updating on the strength of a reading the device could not take is the
+     * wrong direction. But a parked car has no ECU answering, so gating here
+     * forced battery_mv to UNKNOWN exactly when parked, and the two conditions
+     * between them rejected every state the device is ever in. The one surviving
+     * window was engine running and vehicle stationary, which is close to the
+     * opposite of the intent recorded in cairn_ota.c.
+     *
+     * sensors_battery_mv reads OBD-port voltage off the coprocessor and is
+     * documented to work with the ignition off; measured at 5440 mV on bench USB
+     * with no ECU present. A resting 12 V battery sits above OTA_MIN_SUPPLY_MV
+     * and a weak one does not, which is the discrimination the threshold was
+     * written for.
+     */
+    uint16_t battery = sensors_battery_mv();
 
     bool reboot = false;
     cairn_ota_result_t r = cairn_ota_check_and_install(parked, battery, &reboot);
@@ -755,7 +772,10 @@ static void maybe_standby(Lifecycle *lc)
     e.trip_active = (lc->capture != CaptureState::Idle);
     e.capture_open = lc->cap.active && lc->cap.have_any_frame;
     e.idle_ms = millis() - lc->idle_since_ms;
-    e.battery_mv = lc->have_recent_obd ? sensors_battery_mv() : CAIRN_U16_UNKNOWN;
+    /* Same reasoning as the OTA precondition: the voltage is readable with the
+     * ignition off, and gating it on a live ECU meant the engine-voltage standby
+     * gate could never fire, since it only matters while parked. */
+    e.battery_mv = sensors_battery_mv();
     e.pending_bundles = lc->pending_bundles;
     e.link_online = (lc->link != LinkState::Offline);
 

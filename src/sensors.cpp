@@ -479,12 +479,26 @@ uint16_t sensors_battery_mv(void)
 {
     if (s_status == nullptr || !s_status->coprocessor) return CAIRN_U16_UNKNOWN;
 
-    /* On COBD rather than the system object, and documented to work without an
+    /*
+     * On COBD rather than the system object, and documented to work without an
      * ECU — so this reads even with the ignition off, which is exactly when a
-     * low-battery decision matters. */
-    float v = s_obd.getVoltage();
-    if (v <= 0.0f) return CAIRN_U16_UNKNOWN;
-    return (uint16_t)lroundf(v * 1000.0f);
+     * low-battery decision matters.
+     *
+     * Retried, because the first read after the coprocessor leaves low-power
+     * mode comes back as zero: resetLink() returns the link but the coprocessor
+     * needs a moment before it will answer. Returning UNKNOWN there loses the
+     * single most valuable sample the firmware takes — the one from the standby
+     * heartbeat, whose entire purpose is recording supply voltage on a parked
+     * device. Three attempts, ~60 ms worst case, against a reading that governs
+     * whether an OTA write is safe.
+     */
+    for (int attempt = 0; attempt < 3; attempt++) {
+        float v = s_obd.getVoltage();
+        if (v > 0.0f) return (uint16_t)lroundf(v * 1000.0f);
+        if (attempt < 2) delay(20);
+    }
+
+    return CAIRN_U16_UNKNOWN;
 }
 
 void sensors_gnss_power_down(void)
