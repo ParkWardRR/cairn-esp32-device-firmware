@@ -49,4 +49,26 @@ void sensor_task_request_retry(void);
  */
 void sensor_task_set_rates(const cairn_rates_t *r);
 
+/*
+ * Hold the vehicle bus silent, or release it.
+ *
+ * While silent the task issues no OBD requests at all. This enforces the
+ * parked-silence invariant described in cairn_power.h: on a BMW F3x the OBD
+ * connector carries D-CAN only and the body domain controller gates it, so
+ * every PID request while parked wakes the gateway, and the car's energy
+ * management counts wake-ups it did not authorize.
+ *
+ * The controller owns this decision because only it knows whether a drive has
+ * been confirmed. The sensing task deliberately knows nothing about trip state
+ * — it samples what it is told, and now also stays quiet when it is told.
+ *
+ * Reading supply voltage is not affected and must not be: that is a local
+ * measurement of the connector's rail and puts nothing on the bus, which is
+ * precisely what makes a bus-silent parked mode possible.
+ */
+void sensor_task_set_bus_silent(bool silent);
+
+/* Whether the bus is currently being held silent. */
+bool sensor_task_bus_silent(void);
+
 #endif /* CAIRN_SENSOR_TASK_H */

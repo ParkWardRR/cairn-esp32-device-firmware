@@ -154,6 +154,33 @@
  */
 #define CAIRN_ENGINE_ON_MV 13200
 
+/*
+ * Dwell required before local evidence is accepted as a started drive.
+ *
+ * Both signals are bus-silent, which is the point: they let the device decide a
+ * drive has begun without transmitting anything the vehicle network can see.
+ * See the parked-silence invariant in cairn_power.h.
+ *
+ * The dwells reject the things that look momentarily like a drive — a door
+ * slam, a tow nudge, someone leaning on the car, a central-locking actuator
+ * twitching the supply rail. Either signal on its own has to persist; both
+ * together are accepted promptly, since a lifted rail and sustained movement at
+ * the same time is not something a parked car does.
+ */
+#define CAIRN_DRIVE_VOLTAGE_DWELL_MS 15000
+#define CAIRN_DRIVE_MOTION_DWELL_MS  10000
+#define CAIRN_DRIVE_BOTH_DWELL_MS    2000
+
+/*
+ * How often the controller samples the supply rail while awake.
+ *
+ * Not taken from DEVICE_HEALTH, which arrives every 30 s — too coarse to open
+ * the bus promptly after an engine start, which would leave the first half
+ * minute of OBD missing from every trip. Two seconds costs co-processor link
+ * traffic, internal to the dongle, and nothing on the vehicle bus.
+ */
+#define CAIRN_BATTERY_POLL_MS 2000
+
 /* Poll interval while standing by. The core light-sleeps in between. */
 #define CAIRN_STANDBY_POLL_MS 1000
 

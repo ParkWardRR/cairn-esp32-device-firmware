@@ -353,6 +353,92 @@ static void update_motion_scores(Lifecycle *lc)
     }
 }
 
+/*
+ * Enforce the parked-silence invariant, every tick.
+ *
+ * Two decisions, in order. First, has a drive started according to evidence the
+ * vehicle network cannot see — the supply rail and the accelerometer? Second,
+ * given that, may anything be transmitted onto the bus at all?
+ *
+ * Expressed as a predicate evaluated continuously rather than as a timeout,
+ * because the previous arrangement was safe only by accident: a five-minute
+ * idle threshold happened to fall inside BMW's eight-minute first sleep phase.
+ * Nothing recorded that dependency and any change to either number would have
+ * broken it silently. See cairn_power.h.
+ */
+static void enforce_bus_silence(Lifecycle *lc)
+{
+    uint32_t now = millis();
+
+    /*
+     * Sample the rail on its own short interval. getVoltage() reads the OBD
+     * connector's +12V at the dongle through the co-processor — a local
+     * measurement, no request onto the vehicle bus. This distinction is the
+     * whole reason a bus-silent parked mode is possible, so it is worth being
+     * explicit: this call is permitted while parked, readPID() is not.
+     */
+    if ((int32_t)(now - lc->next_battery_read_ms) >= 0) {
+        lc->next_battery_read_ms = now + CAIRN_BATTERY_POLL_MS;
+        lc->last_battery_mv = sensors_battery_mv();
+    }
+
+    /* Dwell tracking for the supply rail. Local measurement; no bus traffic. */
+    bool rail_up = (lc->last_battery_mv != CAIRN_U16_UNKNOWN &&
+                    lc->last_battery_mv >= CAIRN_ENGINE_ON_MV);
+    if (rail_up) {
+        if (lc->voltage_high_since_ms == 0) lc->voltage_high_since_ms = now;
+    } else {
+        lc->voltage_high_since_ms = 0;
+    }
+
+    cairn_drive_evidence_t de;
+    memset(&de, 0, sizeof(de));
+    de.battery_mv      = lc->last_battery_mv;
+    de.voltage_high_ms = rail_up ? (now - lc->voltage_high_since_ms) : 0;
+    de.accel_rms_mg    = lc->last_accel_rms_mg;
+    de.motion_ms       = (lc->motion_since_ms != 0) ? (now - lc->motion_since_ms) : 0;
+
+    /*
+     * Latched while a capture is open. A drive that is already being recorded
+     * stays confirmed even through a traffic light, where both the rail sags
+     * and the car stops moving; un-confirming there would close the bus
+     * mid-trip and lose OBD for the rest of the journey.
+     */
+    if (lc->capture != CaptureState::Idle) {
+        lc->drive_confirmed = true;
+    } else if (cairn_drive_confirmed(&de)) {
+        if (!lc->drive_confirmed) {
+            CAIRN_LOGI(TAG, "drive confirmed from local evidence (rail %u mV for "
+                            "%u ms, accel %u mg for %u ms); opening the bus",
+                       (unsigned)de.battery_mv, (unsigned)de.voltage_high_ms,
+                       (unsigned)de.accel_rms_mg, (unsigned)de.motion_ms);
+        }
+        lc->drive_confirmed = true;
+    } else {
+        lc->drive_confirmed = false;
+    }
+
+    cairn_bus_evidence_t be;
+    memset(&be, 0, sizeof(be));
+    be.trip_active     = (lc->capture != CaptureState::Idle);
+    be.drive_confirmed = lc->drive_confirmed;
+    be.in_standby      = false; /* this runs only while awake */
+    be.last_wake       = lc->last_wake;
+
+    const char *why = cairn_bus_silence_reason(&be);
+    sensor_task_set_bus_silent(why != nullptr);
+
+    /* Logged on change only; this runs at tick rate. */
+    if (why != lc->last_bus_silence_reason) {
+        if (why != nullptr) {
+            CAIRN_LOGI(TAG, "vehicle bus silent: %s", why);
+        } else {
+            CAIRN_LOGI(TAG, "vehicle bus open: a drive is confirmed");
+        }
+        lc->last_bus_silence_reason = why;
+    }
+}
+
 /* ── sampling ─────────────────────────────────────────────────────────────── */
 
 static void close_gnss_gap(Lifecycle *lc, uint8_t cause)
@@ -857,16 +943,38 @@ static void maybe_standby(Lifecycle *lc)
      * letting the first pass after waking fire everything at once.
      */
     uint32_t now = millis();
-    lc->idle_since_ms = now;
     lc->next_ota_check_ms = now + CAIRN_OTA_CHECK_INTERVAL_MS;
     lc->still_since_ms = now;
     lc->motion_since_ms = 0;
+    lc->last_wake = r.wake_reason;
 
     /* The receiver was powered down, so position is unknown until it reacquires
      * — and the degraded bitmap should say so rather than carry a stale fix. */
     lc->have_recent_gnss = false;
     lc->have_recent_obd = false;
-    sensor_task_request_retry();
+
+    /*
+     * A health heartbeat must cost the vehicle nothing.
+     *
+     * Its purpose is proving a parked device is alive, which needs the supply
+     * rail, the accelerometer, storage counters and an uptime — all local. The
+     * previous behaviour rebased the idle timer and requested an OBD retry, so
+     * every heartbeat spent five further minutes polling the bus: four
+     * unauthorized wake-ups a day on a car whose energy management counts
+     * exactly that. Leaving idle_since_ms alone means the device returns to
+     * standby on the next pass instead, and the retry is withheld so nothing
+     * reopens a diagnostic session.
+     *
+     * A motion or engine-voltage wake is different: something may actually be
+     * happening, so those rebase the timer and retry the subsystems as before.
+     */
+    if (r.wake_reason == CAIRN_WAKE_PERIODIC_HEALTH) {
+        CAIRN_LOGI(TAG, "health heartbeat: staying bus-silent and returning to "
+                        "standby without polling the vehicle");
+    } else {
+        lc->idle_since_ms = now;
+        sensor_task_request_retry();
+    }
 
     /*
      * Engine voltage is the early signal: it rises before the vehicle moves. A
@@ -956,6 +1064,7 @@ void lifecycle_tick(Lifecycle *lc)
     }
 
     update_motion_scores(lc);
+    enforce_bus_silence(lc);
 
     /*
      * Choose sampling rates from what the vehicle appears to be doing. The

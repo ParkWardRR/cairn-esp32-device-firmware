@@ -87,6 +87,83 @@ typedef enum {
 
 const char *cairn_wake_reason_name(cairn_wake_reason_t r);
 
+/* ── the parked-silence invariant ─────────────────────────────────────────── */
+
+/*
+ * No diagnostic request may be transmitted unless a drive is confirmed.
+ *
+ * This is a vehicle-network rule, not a power rule, and it is the single most
+ * important constraint in this firmware for a car that polices its own bus.
+ *
+ * On a BMW F3x the OBD-II connector carries D-CAN only, and access to it is
+ * gated by the body domain controller (FEM/BDC). A passive listener therefore
+ * sees nothing at all while the car is parked: D-CAN is silent without a
+ * tester. Any device that records OBD data while parked must be polling, and
+ * polling must bring the gateway up. BMW's energy management counts vehicle
+ * wake-ups it did not authorize and can shut the supply down via terminal 30F,
+ * storing a fault. Whether a given request reliably produces that record is
+ * unverified on an F32 and should not be assumed either way — which is exactly
+ * why the conservative rule is cheap insurance.
+ *
+ * It is expressed as a predicate rather than a timeout on purpose. The previous
+ * arrangement was safe only because a five-minute idle threshold happened to
+ * fall inside BMW's eight-minute first sleep phase: a coincidence, undocumented,
+ * and silently broken by any future change to either number. A named invariant
+ * with a test cannot be broken that quietly.
+ *
+ * Note that reading supply voltage is *not* covered by this rule.
+ * COBD::getVoltage() measures the connector's +12V rail at the dongle, which
+ * puts nothing on the vehicle bus; readPID() does. Conflating the two is what
+ * makes a bus-silent parked mode look impossible when it is not.
+ */
+typedef struct {
+    bool trip_active;     /* a capture is in progress */
+    bool drive_confirmed; /* the two-signal transition below has been satisfied */
+    bool in_standby;      /* currently inside the standby loop */
+
+    /* The reason for the most recent wake. A periodic-health wake must never
+     * open the bus: its whole purpose is proving the device is alive, which
+     * needs nothing from the vehicle. */
+    cairn_wake_reason_t last_wake;
+} cairn_bus_evidence_t;
+
+/* True when a diagnostic request is permitted. */
+bool cairn_bus_may_transmit(const cairn_bus_evidence_t *e);
+
+/* Why the bus is being kept silent, for the log. NULL when transmitting is
+ * allowed. */
+const char *cairn_bus_silence_reason(const cairn_bus_evidence_t *e);
+
+/* ── drive confirmation from local signals only ───────────────────────────── */
+
+/*
+ * Decide that a drive has started using evidence the vehicle network cannot
+ * see: the connector's supply rail and the accelerometer.
+ *
+ * Both are deliberately dwell-based. A single bump is a door slam, a tow truck
+ * nudge or someone leaning on the wing; a momentary voltage blip is a courtesy
+ * light or a central-locking actuator. Requiring either signal to persist, or
+ * both to be present at once, is what stops a parked car from opening an OBD
+ * session because of a passing lorry.
+ *
+ * Voltage alone is good for *detecting* a start — the rail lifts well before
+ * the car moves — but poor as a definition of an ongoing trip, because BMW's
+ * variable alternator strategy lowers system voltage while driving. So it
+ * confirms the transition and nothing more; the trip itself is held open by the
+ * existing motion scoring.
+ */
+typedef struct {
+    uint16_t battery_mv;        /* CAIRN_U16_UNKNOWN when unreadable */
+    uint32_t voltage_high_ms;   /* how long the rail has been above engine-on */
+    uint16_t accel_rms_mg;
+    uint32_t motion_ms;         /* how long motion has been sustained */
+} cairn_drive_evidence_t;
+
+bool cairn_drive_confirmed(const cairn_drive_evidence_t *e);
+
+/* What is still missing before a drive can be declared. NULL once confirmed. */
+const char *cairn_drive_blocker(const cairn_drive_evidence_t *e);
+
 /*
  * Decide whether the sampled conditions justify waking.
  *

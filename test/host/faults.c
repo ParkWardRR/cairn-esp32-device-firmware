@@ -2134,6 +2134,129 @@ static bool row_wake_prefers_engine_voltage(void)
     return true;
 }
 
+/*
+ * The parked-silence invariant: nothing may be transmitted onto the vehicle bus
+ * unless a drive is confirmed.
+ *
+ * This is a vehicle-network rule rather than a power one. On a BMW F3x the OBD
+ * connector carries D-CAN only and the body domain controller gates it, so any
+ * parked polling wakes the gateway — behaviour the car's energy management
+ * counts and can act on. The previous arrangement was safe only because a
+ * five-minute idle threshold happened to sit inside BMW's eight-minute first
+ * sleep phase, which is a coincidence rather than a mechanism. These rows exist
+ * so that changing either number cannot quietly reintroduce parked bus traffic.
+ */
+static bool row_parked_bus_silence(void)
+{
+    cairn_bus_evidence_t e;
+
+    /* Parked: no trip, nothing confirmed. The default state of a parked car. */
+    memset(&e, 0, sizeof(e));
+    CHECK(!cairn_bus_may_transmit(&e),
+          "a parked device with no confirmed drive was allowed to transmit");
+    CHECK(cairn_bus_silence_reason(&e) != NULL,
+          "the bus was kept silent without saying why");
+
+    /* Standing by must be silent even if something else looks permissive. */
+    memset(&e, 0, sizeof(e));
+    e.in_standby = true;
+    e.trip_active = true;
+    CHECK(!cairn_bus_may_transmit(&e), "transmitted from inside standby");
+
+    /*
+     * The costliest case, and the reason this invariant exists: a health
+     * heartbeat must not reopen a diagnostic session. Proving the device is
+     * alive needs the supply rail, the IMU and some counters — nothing from
+     * the vehicle.
+     */
+    memset(&e, 0, sizeof(e));
+    e.last_wake = CAIRN_WAKE_PERIODIC_HEALTH;
+    e.drive_confirmed = true; /* even so */
+    CHECK(!cairn_bus_may_transmit(&e),
+          "a periodic-health wake was allowed to transmit on the vehicle bus");
+
+    /* A confirmed drive is the one case that opens the bus. */
+    memset(&e, 0, sizeof(e));
+    e.drive_confirmed = true;
+    e.last_wake = CAIRN_WAKE_ENGINE_VOLTAGE;
+    CHECK(cairn_bus_may_transmit(&e),
+          "a confirmed drive was refused the bus, so no trip could be recorded");
+    CHECK(cairn_bus_silence_reason(&e) == NULL,
+          "a reason was given for silence while transmitting was permitted");
+
+    /* An active capture likewise: the trip is already under way. */
+    memset(&e, 0, sizeof(e));
+    e.trip_active = true;
+    e.last_wake = CAIRN_WAKE_MOTION;
+    CHECK(cairn_bus_may_transmit(&e), "an active trip was refused the bus");
+
+    return true;
+}
+
+/*
+ * Drive confirmation runs on signals the vehicle network cannot observe — the
+ * connector's supply rail and the accelerometer — so that deciding a drive has
+ * begun costs no bus traffic. Both are dwell-based, because the alternative is
+ * opening an OBD session every time somebody shuts a door.
+ */
+static bool row_drive_confirmed_from_local_signals(void)
+{
+    cairn_drive_evidence_t e;
+
+    /* A door slam: brief motion, no supply change. */
+    memset(&e, 0, sizeof(e));
+    e.battery_mv = 12400;
+    e.accel_rms_mg = CAIRN_MOTION_ACCEL_RMS_MG + 50;
+    e.motion_ms = 500;
+    CHECK(!cairn_drive_confirmed(&e),
+          "half a second of movement was accepted as a drive");
+
+    /* Sustained motion with no engine: being towed, or pushed. Still a trip
+     * worth recording, so this does confirm — after the dwell. */
+    e.motion_ms = CAIRN_DRIVE_MOTION_DWELL_MS;
+    CHECK(cairn_drive_confirmed(&e),
+          "sustained motion past the dwell was not accepted as a drive");
+
+    /* A momentary supply blip: central locking, a courtesy light. */
+    memset(&e, 0, sizeof(e));
+    e.battery_mv = CAIRN_ENGINE_ON_MV + 200;
+    e.voltage_high_ms = 1000;
+    CHECK(!cairn_drive_confirmed(&e),
+          "a one-second voltage blip was accepted as an engine start");
+
+    e.voltage_high_ms = CAIRN_DRIVE_VOLTAGE_DWELL_MS;
+    CHECK(cairn_drive_confirmed(&e),
+          "a sustained charging voltage was not accepted as an engine start");
+
+    /* Both signals together are unambiguous and get the short dwell. */
+    memset(&e, 0, sizeof(e));
+    e.battery_mv = CAIRN_ENGINE_ON_MV + 400;
+    e.voltage_high_ms = CAIRN_DRIVE_BOTH_DWELL_MS;
+    e.accel_rms_mg = CAIRN_MOTION_ACCEL_RMS_MG + 100;
+    e.motion_ms = CAIRN_DRIVE_BOTH_DWELL_MS;
+    CHECK(cairn_drive_confirmed(&e),
+          "voltage and motion agreeing past the short dwell was still refused");
+
+    /* And must still be refused before that dwell elapses. */
+    e.voltage_high_ms = 0;
+    e.motion_ms = 0;
+    CHECK(!cairn_drive_confirmed(&e),
+          "voltage and motion were accepted with no dwell at all");
+
+    /*
+     * An unreadable supply is a reason to stay quiet, not a reason to start
+     * talking. Treating UNKNOWN as permissive is how a sensor failure turns
+     * into parked bus traffic.
+     */
+    memset(&e, 0, sizeof(e));
+    e.battery_mv = CAIRN_U16_UNKNOWN;
+    e.voltage_high_ms = CAIRN_DRIVE_VOLTAGE_DWELL_MS * 10;
+    CHECK(!cairn_drive_confirmed(&e),
+          "an unreadable supply was treated as evidence of a drive");
+
+    return true;
+}
+
 /* ── driver ───────────────────────────────────────────────────────────────── */
 
 typedef struct {
@@ -2173,6 +2296,8 @@ static const row_t ROWS[] = {
     { "events",   "trip events round-trip through the card",    row_trip_event_round_trip },
     { "power",    "standby never strands unsent data",          row_standby_never_strands_data },
     { "power",    "waking favours the earliest reliable signal", row_wake_prefers_engine_voltage },
+    { "bus",      "parked means silent on the vehicle bus",      row_parked_bus_silence },
+    { "bus",      "a drive is confirmed from local signals only", row_drive_confirmed_from_local_signals },
 };
 
 int main(int argc, char **argv)

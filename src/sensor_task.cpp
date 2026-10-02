@@ -19,6 +19,13 @@ static volatile uint16_t s_imu_window_ms  = CAIRN_IMU_WINDOW_MS;
 static volatile uint16_t s_obd_period_ms  = CAIRN_OBD_PERIOD_MS;
 
 /*
+ * Default silent. A device that boots next to a parked car must not start
+ * polling before the controller has decided anything — the safe initial state
+ * is quiet, and the controller opens the bus once a drive is confirmed.
+ */
+static volatile bool s_bus_silent = true;
+
+/*
  * 20 ms, giving a 50 Hz accelerometer rate. Ample for RMS and peak over a
  * one-second window, and now independent of whatever the controller is doing.
  */
@@ -130,15 +137,33 @@ static void sensor_task(void *arg)
         if ((int32_t)(now - next_obd) >= 0) {
             next_obd = now + s_obd_period_ms;
 
-            fact_t f;
-            memset(&f, 0, sizeof(f));
-            f.monotonic_ms = now;
-
-            if (sensors_read_obd(&f.data.obd)) {
-                f.kind = FACT_OBD_SNAPSHOT;
-                post(&f);
-            } else {
+            /*
+             * The parked-silence invariant. While the controller holds the bus
+             * silent, no OBD request is issued — not even one, and not on a
+             * timer. A parked BMW's OBD connector is a D-CAN stub gated by the
+             * body controller, so a request here is a wake-up of the car, and
+             * the car keeps score.
+             *
+             * Reporting FACT_OBD_SILENT rather than simply skipping keeps the
+             * controller's freshness model honest: have_recent_obd ages out and
+             * the health bitmap says the ECU is not answering, which is true
+             * and is the same thing a parked car with a sleeping ECU looks
+             * like. Silently skipping would leave a stale snapshot looking
+             * current.
+             */
+            if (s_bus_silent) {
                 post_kind(FACT_OBD_SILENT, now);
+            } else {
+                fact_t f;
+                memset(&f, 0, sizeof(f));
+                f.monotonic_ms = now;
+
+                if (sensors_read_obd(&f.data.obd)) {
+                    f.kind = FACT_OBD_SNAPSHOT;
+                    post(&f);
+                } else {
+                    post_kind(FACT_OBD_SILENT, now);
+                }
             }
         }
 
@@ -224,3 +249,7 @@ void sensor_task_set_rates(const cairn_rates_t *r)
     s_imu_window_ms  = r->imu_window_ms;
     s_obd_period_ms  = r->obd_period_ms;
 }
+
+void sensor_task_set_bus_silent(bool silent) { s_bus_silent = silent; }
+
+bool sensor_task_bus_silent(void) { return s_bus_silent; }

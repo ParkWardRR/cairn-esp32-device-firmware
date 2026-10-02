@@ -97,3 +97,83 @@ cairn_wake_reason_t cairn_power_should_wake(uint16_t accel_rms_mg,
 
     return CAIRN_WAKE_NONE;
 }
+
+/* ── the parked-silence invariant ─────────────────────────────────────────── */
+
+const char *cairn_bus_silence_reason(const cairn_bus_evidence_t *e)
+{
+    /*
+     * Order matters only for the message. Any one of these is sufficient to
+     * keep the bus silent, and the first is the one worth naming.
+     */
+    if (e->in_standby) return "standing by";
+
+    /*
+     * A periodic-health wake exists to prove the device is alive. That needs
+     * the supply rail, the accelerometer, storage counters and an uptime —
+     * none of which involve the vehicle. Letting it reopen an OBD session was
+     * the single costliest behaviour in the parked state: four wake-ups a day,
+     * each followed by minutes of polling, on a car that counts exactly that.
+     */
+    if (e->last_wake == CAIRN_WAKE_PERIODIC_HEALTH) {
+        return "woken only for a health heartbeat";
+    }
+
+    if (!e->trip_active && !e->drive_confirmed) {
+        return "parked, and no drive confirmed from local evidence";
+    }
+
+    return NULL;
+}
+
+bool cairn_bus_may_transmit(const cairn_bus_evidence_t *e)
+{
+    return cairn_bus_silence_reason(e) == NULL;
+}
+
+/* ── drive confirmation from local signals only ───────────────────────────── */
+
+const char *cairn_drive_blocker(const cairn_drive_evidence_t *e)
+{
+    bool voltage_up = (e->battery_mv != CAIRN_U16_UNKNOWN &&
+                       e->battery_mv >= CAIRN_ENGINE_ON_MV);
+    bool moving     = (e->accel_rms_mg >= CAIRN_MOTION_ACCEL_RMS_MG);
+
+    /*
+     * Both at once is the unambiguous case and gets the shortest dwell. A
+     * parked car does not simultaneously lift its supply rail and shake.
+     */
+    if (voltage_up && moving) {
+        if (e->voltage_high_ms >= CAIRN_DRIVE_BOTH_DWELL_MS ||
+            e->motion_ms >= CAIRN_DRIVE_BOTH_DWELL_MS) {
+            return NULL;
+        }
+        return "voltage and motion agree but have not persisted yet";
+    }
+
+    if (voltage_up) {
+        if (e->voltage_high_ms >= CAIRN_DRIVE_VOLTAGE_DWELL_MS) return NULL;
+        return "supply is above engine-on but has not persisted yet";
+    }
+
+    if (moving) {
+        if (e->motion_ms >= CAIRN_DRIVE_MOTION_DWELL_MS) return NULL;
+        return "motion has not persisted long enough to be a drive";
+    }
+
+    /*
+     * Deliberately not treating an unknown voltage as evidence either way. It
+     * means the supply could not be read, which is a reason to keep quiet
+     * rather than a reason to start talking.
+     */
+    if (e->battery_mv == CAIRN_U16_UNKNOWN) {
+        return "no local evidence of a drive, and the supply is unreadable";
+    }
+
+    return "no local evidence of a drive";
+}
+
+bool cairn_drive_confirmed(const cairn_drive_evidence_t *e)
+{
+    return cairn_drive_blocker(e) == NULL;
+}

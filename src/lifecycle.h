@@ -94,6 +94,32 @@ struct Lifecycle {
     const char *last_standby_blocker = nullptr;
 
     /*
+     * Parked-silence state. See the invariant in cairn_power.h.
+     *
+     * `drive_confirmed` is latched by local evidence only — supply rail and
+     * accelerometer — and is what opens the vehicle bus. `voltage_high_since_ms`
+     * tracks the dwell for that evidence. `last_wake` is carried so a
+     * periodic-health wake can be refused the bus even though it is, briefly,
+     * an awake device.
+     */
+    bool     drive_confirmed = false;
+    uint32_t voltage_high_since_ms = 0;
+    cairn_wake_reason_t last_wake = CAIRN_WAKE_NONE;
+    const char *last_bus_silence_reason = nullptr;
+
+    /*
+     * Supply rail, sampled locally rather than taken from DEVICE_HEALTH.
+     *
+     * Health facts arrive every 30 s, which is too coarse to open the bus
+     * promptly after an engine start — the first half-minute of OBD would be
+     * missing from every trip. This is read directly on its own short interval
+     * instead. It costs co-processor link traffic, which is internal to the
+     * dongle, and puts nothing on the vehicle bus.
+     */
+    uint16_t last_battery_mv = CAIRN_U16_UNKNOWN;
+    uint32_t next_battery_read_ms = 0;
+
+    /*
      * Last-known sensor values, as reported by facts. The controller keeps its
      * own copies rather than reading driver state the sensing task owns, and
      * the have_* flags matter: a stale fix or a silent ECU must stop
