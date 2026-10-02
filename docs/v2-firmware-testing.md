@@ -215,6 +215,40 @@ pio run -e cairn-selftest -t upload --upload-port /dev/ttyUSB0
 pio device monitor -b 115200 --filter esp32_exception_decoder
 ```
 
+### Flashing from the Mac instead
+
+The Pi is convenience, not a requirement — the whole v2 bring-up was done over
+the Mac's USB. The board appears as `/dev/cu.usbserial-*` (a CH340, VID 0x1A86 /
+PID 0x7523), and the same PlatformIO commands work against it:
+
+```bash
+pio run -e cairn-selftest -t upload --upload-port /dev/cu.usbserial-10
+pio device monitor -b 115200 --filter esp32_exception_decoder
+```
+
+Use **460800** for `esptool` on this adapter. 921600 fails with "Unable to
+verify flash chip connection", which reads like a wiring fault but is only the
+baud rate.
+
+If you need to capture output from a script rather than a terminal, note two
+traps that together make a perfectly healthy board look like it hangs at
+`entry 0x400805e4`:
+
+- `stty` settings are discarded when the last file descriptor closes, so a bare
+  `cat` ends up reading at 9600 and sees nothing. Hold one fd open across the
+  whole capture.
+- `esptool --after hard-reset` swallows the application's output. You get the
+  304 bytes of ROM banner and nothing more. Listen *passively* instead — the
+  firmware is already running and keeps printing.
+
+```bash
+exec 3<> /dev/cu.usbserial-10
+stty -f /dev/cu.usbserial-10 115200 raw -echo -crtscts clocal -hupcl
+timeout 30 cat <&3 > /tmp/boot.log
+exec 3>&-
+LC_ALL=C tr -d '\r' < /tmp/boot.log   # plain tr dies on the reset transient
+```
+
 ## Reading the self-test
 
 The self-test image checks the things that silently make a drive worthless, then
