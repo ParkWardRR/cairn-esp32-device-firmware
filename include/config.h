@@ -227,4 +227,12 @@
  */
 #define CAIRN_SYNC_MIN_IDLE_MS 10000
 
+/*
+ * How long to wait before retrying a failed sync.
+ *
+ * Its own timer, not idle_since_ms. Sharing that one meant every upload reset
+ * the standby dwell and the device never slept.
+ */
+#define CAIRN_SYNC_RETRY_MS 60000
+
 #endif /* CAIRN_CONFIG_H */

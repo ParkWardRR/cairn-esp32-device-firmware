@@ -994,7 +994,26 @@ static void maybe_standby(Lifecycle *lc)
 static void maybe_sync(Lifecycle *lc)
 {
     if (lc->capture != CaptureState::Idle) return;
+
+    /*
+     * idle_since_ms is read here and never written.
+     *
+     * Writing it was a bug that disabled standby entirely. This function used
+     * to rebase idle_since_ms on both a completed sync and a failed connect,
+     * giving one timer two jobs with opposite requirements: "how long has the
+     * vehicle been idle", which maybe_standby needs to grow without
+     * interruption, and "when may sync be retried", which wants resetting.
+     *
+     * The result was a loop with no exit. Idle reached the standby threshold,
+     * maybe_standby sealed the open capture, the seal produced a pending
+     * bundle, sync uploaded it and reset the idle clock to zero — and a GNSS
+     * gap record landed in the fresh capture before the dwell could elapse
+     * again. Measured on the bench: five minutes between seals, and standby
+     * never entered once in seven minutes of a parked device that had nothing
+     * else to do. Retry pacing now has its own timer.
+     */
     if (millis() - lc->idle_since_ms < CAIRN_SYNC_MIN_IDLE_MS) return;
+    if ((int32_t)(millis() - lc->next_sync_ms) < 0) return;
 
     uint32_t pending = 0;
     uint64_t bytes = 0;
@@ -1010,7 +1029,10 @@ static void maybe_sync(Lifecycle *lc)
     if (!cairn_sync_connect(CAIRN_SYNC_CONNECT_TIMEOUT_MS)) {
         set_link_state(lc, LinkState::Offline, 1);
         /* Offline is normal, not a fault: the whole design is offline-first. */
-        lc->idle_since_ms = millis();
+        /* Back off this retry only. Touching idle_since_ms here would reset
+         * the standby dwell, and an unreachable server is the one case where
+         * sleeping matters most. */
+        lc->next_sync_ms = millis() + CAIRN_SYNC_RETRY_MS;
         return;
     }
 
@@ -1031,7 +1053,9 @@ static void maybe_sync(Lifecycle *lc)
      * immediately afterwards. */
     cairn_log_flush();
 
-    lc->idle_since_ms = millis();
+    /* Deliberately does not touch idle_since_ms. A completed sync with nothing
+     * left pending is precisely the moment standing by is safe. */
+    lc->next_sync_ms = millis();
 }
 
 /* ── tick ─────────────────────────────────────────────────────────────────── */

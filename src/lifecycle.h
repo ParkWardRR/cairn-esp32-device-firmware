@@ -116,6 +116,10 @@ struct Lifecycle {
      * instead. It costs co-processor link traffic, which is internal to the
      * dongle, and puts nothing on the vehicle bus.
      */
+    /* Sync retry pacing, kept separate from idle_since_ms so that uploading
+     * cannot reset the standby dwell. */
+    uint32_t next_sync_ms = 0;
+
     uint16_t last_battery_mv = CAIRN_U16_UNKNOWN;
     uint32_t next_battery_read_ms = 0;
 
