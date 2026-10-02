@@ -2165,15 +2165,36 @@ static bool row_parked_bus_silence(void)
 
     /*
      * The costliest case, and the reason this invariant exists: a health
-     * heartbeat must not reopen a diagnostic session. Proving the device is
-     * alive needs the supply rail, the IMU and some counters — nothing from
-     * the vehicle.
+     * heartbeat on its own must not reopen a diagnostic session. Proving the
+     * device is alive needs the supply rail, the IMU and some counters —
+     * nothing from the vehicle.
      */
     memset(&e, 0, sizeof(e));
     e.last_wake = CAIRN_WAKE_PERIODIC_HEALTH;
-    e.drive_confirmed = true; /* even so */
     CHECK(!cairn_bus_may_transmit(&e),
           "a periodic-health wake was allowed to transmit on the vehicle bus");
+
+    /*
+     * But a heartbeat must not *latch* the bus shut either.
+     *
+     * An earlier version of this row asserted the opposite — that a
+     * periodic-health wake blocked transmission even with a drive confirmed —
+     * and that assertion encoded a bug rather than a requirement. last_wake is
+     * overwritten only by the next wake, so an engine started during the short
+     * awake window after a heartbeat left OBD closed until a further standby
+     * cycle, quietly dropping the opening minutes of the trip.
+     *
+     * drive_confirmed comes from the supply rail and the accelerometer, which
+     * a heartbeat cannot fabricate. "Woken for a heartbeat" and "the car is
+     * running" are independent facts, and the second decides whether there is
+     * a trip to record.
+     */
+    memset(&e, 0, sizeof(e));
+    e.last_wake = CAIRN_WAKE_PERIODIC_HEALTH;
+    e.drive_confirmed = true;
+    CHECK(cairn_bus_may_transmit(&e),
+          "a drive confirmed after a heartbeat wake was still refused the bus, "
+          "so the start of that trip would record no OBD");
 
     /* A confirmed drive is the one case that opens the bus. */
     memset(&e, 0, sizeof(e));

@@ -102,28 +102,42 @@ cairn_wake_reason_t cairn_power_should_wake(uint16_t accel_rms_mg,
 
 const char *cairn_bus_silence_reason(const cairn_bus_evidence_t *e)
 {
-    /*
-     * Order matters only for the message. Any one of these is sufficient to
-     * keep the bus silent, and the first is the one worth naming.
-     */
+    /* Nothing is transmitted from inside the standby loop, whatever else holds:
+     * the peripherals are down and the co-processor is in low-power mode. */
     if (e->in_standby) return "standing by";
 
     /*
-     * A periodic-health wake exists to prove the device is alive. That needs
-     * the supply rail, the accelerometer, storage counters and an uptime —
-     * none of which involve the vehicle. Letting it reopen an OBD session was
-     * the single costliest behaviour in the parked state: four wake-ups a day,
-     * each followed by minutes of polling, on a car that counts exactly that.
+     * A confirmed drive opens the bus, however the device came to be awake.
+     *
+     * The ordering is the fix for a latch. This clause used to sit *below* the
+     * heartbeat check, so once a heartbeat had set last_wake the bus stayed
+     * shut even after local evidence confirmed a real drive — and last_wake is
+     * only overwritten by the next wake. If someone started the engine during
+     * the brief awake window following a heartbeat, OBD stayed closed until a
+     * further standby cycle re-latched it. Self-correcting, but it would have
+     * silently dropped the opening minutes of a trip.
+     *
+     * Letting a confirmed drive win is also the correct semantics rather than
+     * merely the convenient one. drive_confirmed is computed from the supply
+     * rail and the accelerometer, neither of which a heartbeat can fabricate,
+     * so "woken for a heartbeat" and "the car is running" are independent
+     * facts and the second is the one that decides whether a trip exists.
+     */
+    if (e->trip_active || e->drive_confirmed) return NULL;
+
+    /*
+     * Not driving, so stay quiet. Naming the heartbeat case separately is worth
+     * it because it is the one that used to be expensive: a periodic-health
+     * wake exists to prove the device is alive, which needs the supply rail,
+     * the accelerometer, storage counters and an uptime — none of which involve
+     * the vehicle. Letting it reopen an OBD session cost four wake-ups a day on
+     * a car that counts exactly that.
      */
     if (e->last_wake == CAIRN_WAKE_PERIODIC_HEALTH) {
         return "woken only for a health heartbeat";
     }
 
-    if (!e->trip_active && !e->drive_confirmed) {
-        return "parked, and no drive confirmed from local evidence";
-    }
-
-    return NULL;
+    return "parked, and no drive confirmed from local evidence";
 }
 
 bool cairn_bus_may_transmit(const cairn_bus_evidence_t *e)
