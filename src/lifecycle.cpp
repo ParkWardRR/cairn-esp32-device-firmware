@@ -577,6 +577,25 @@ static void seal_and_reopen(Lifecycle *lc, uint8_t reason)
                                  CAIRN_FIRMWARE_VERSION, CAIRN_POLICY_VERSION,
                                  sealed_id);
 
+    /*
+     * The seal is the deepest stack path this task takes — Merkle tree, CBOR
+     * manifest and an Ed25519 signature. Arduino's default 8 KB loop stack was
+     * not enough for it and tripped the canary on real hardware, so record the
+     * remaining headroom every time rather than rediscovering the limit by
+     * panicking in a parked car. See CAIRN_LOOP_STACK_BYTES.
+     */
+    {
+        size_t free_bytes = uxTaskGetStackHighWaterMark(nullptr) * sizeof(StackType_t);
+        if (free_bytes < CAIRN_STACK_WARN_BYTES) {
+            CAIRN_LOGW(TAG, "stack headroom after seal: %u bytes of %u — close "
+                            "to the canary; raise CAIRN_LOOP_STACK_BYTES",
+                       (unsigned)free_bytes, (unsigned)CAIRN_LOOP_STACK_BYTES);
+        } else {
+            CAIRN_LOGI(TAG, "stack headroom after seal: %u bytes of %u",
+                       (unsigned)free_bytes, (unsigned)CAIRN_LOOP_STACK_BYTES);
+        }
+    }
+
     if (!ok) {
         /*
          * A failed seal leaves the capture directory intact. Nothing is

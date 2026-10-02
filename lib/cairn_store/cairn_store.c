@@ -828,7 +828,14 @@ static bool digest_members_and_chunks(const char *dir, cairn_member_t *members,
 
 static bool write_exact(const char *path, const uint8_t *data, size_t len)
 {
-    cairn_fs_remove(path);
+    /*
+     * Only unlink a file that is actually there. Removing unconditionally works,
+     * but Arduino's VFS layer logs an ERROR line for a remove of a nonexistent
+     * path, so the common case — a first seal, with no manifest to replace —
+     * printed two spurious errors into the card log on every bundle. A log that
+     * cries wolf on the happy path is worse than no log.
+     */
+    if (cairn_fs_exists(path)) cairn_fs_remove(path);
 
     cairn_file_t *f = cairn_fs_open(path, CAIRN_FS_WRITE);
     if (f == NULL) return false;

@@ -167,6 +167,28 @@
  * keeps the Wi-Fi and I2C peripherals usable without re-initialisation. */
 #define CAIRN_STANDBY_CPU_MHZ 80
 
+/* ── task stacks ──────────────────────────────────────────────────────────── */
+
+/*
+ * The Arduino loop task runs the transition controller, and therefore runs the
+ * seal: Merkle tree over up to CAIRN_MAX_MEMBERS members, a deterministic CBOR
+ * manifest, and an Ed25519 signature. The deepest locals on that path are
+ * cairn_member_t sorted[16] and signing[512] in cf_manifest.c, on top of
+ * TweetNaCl's nested gf and i64[64] working arrays.
+ *
+ * Arduino's default is 8192, and that is not enough: the first seal attempted on
+ * real hardware tripped the stack canary in loopTask and panicked, which on a
+ * firmware that resumes its capture at boot turns into a reboot loop that
+ * re-appends frames every cycle. Measured headroom is logged at the end of the
+ * seal (see log_stack_headroom), so this number can be checked rather than
+ * trusted.
+ */
+#define CAIRN_LOOP_STACK_BYTES 16384
+
+/* Warn below this much free stack. Roughly a quarter of the total: enough slack
+ * that the warning arrives before the canary does. */
+#define CAIRN_STACK_WARN_BYTES 4096
+
 /* ── sync policy ──────────────────────────────────────────────────────────── */
 
 #define CAIRN_SYNC_CONNECT_TIMEOUT_MS 20000

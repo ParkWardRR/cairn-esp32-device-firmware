@@ -35,8 +35,34 @@
 
 static const char *TAG = "BOOT";
 
+/*
+ * Must be at file scope: this defines the weak hook arduino-esp32 calls when it
+ * creates loopTask, so it has to exist before setup() runs. See
+ * CAIRN_LOOP_STACK_BYTES in config.h for why the default is too small.
+ */
+SET_LOOP_TASK_STACK_SIZE(CAIRN_LOOP_STACK_BYTES);
+
 static Lifecycle g_lifecycle;
 static bool      g_running = false;
+
+/*
+ * Report how close the deepest path came to the canary. A seal that completes
+ * with 300 bytes to spare is a crash waiting for one more member in the bundle,
+ * and that is worth seeing in the log before it happens in a car.
+ */
+static void log_stack_headroom(const char *what)
+{
+    size_t free_bytes = uxTaskGetStackHighWaterMark(nullptr) * sizeof(StackType_t);
+
+    if (free_bytes < CAIRN_STACK_WARN_BYTES) {
+        CAIRN_LOGW(TAG, "stack headroom after %s: %u bytes free of %u — close to "
+                        "the canary; raise CAIRN_LOOP_STACK_BYTES",
+                   what, (unsigned)free_bytes, (unsigned)CAIRN_LOOP_STACK_BYTES);
+    } else {
+        CAIRN_LOGI(TAG, "stack headroom after %s: %u bytes free of %u", what,
+                   (unsigned)free_bytes, (unsigned)CAIRN_LOOP_STACK_BYTES);
+    }
+}
 
 /* ── boot banner ──────────────────────────────────────────────────────────── */
 
@@ -89,6 +115,55 @@ static void mark_image_valid_if_pending(void)
 }
 
 /* ── self-test ────────────────────────────────────────────────────────────── */
+
+/* ── known-answer gate ────────────────────────────────────────────────────── */
+
+/*
+ * Cross-implementation agreement is the whole premise of the format: a bundle is
+ * only worth keeping if the Go and Rust verifiers compute the same digests over
+ * it. Both primitives are configurable per platform — CRC-32 routes through
+ * ESP32 ROM under CAIRN_USE_ESP_ROM_CRC, SHA-256 through mbedTLS — so neither is
+ * guaranteed by the host conformance run, which compiles the portable fallback.
+ *
+ * This ran only in the self-test build until the ROM wrapper turned out to be
+ * wrong on real hardware. A device with a bad CRC wrapper is internally
+ * consistent — it writes frames and scans them back happily — so nothing on the
+ * device notices, and every trip it records is rejected later by the verifier.
+ * Checking two vectors costs microseconds at boot and converts that into a
+ * refusal to capture, which is the honest outcome.
+ */
+static bool format_known_answers_ok(void)
+{
+    const uint8_t probe[] = { '1', '2', '3', '4', '5', '6', '7', '8', '9' };
+    uint32_t      crc     = cairn_crc32(probe, sizeof(probe));
+
+    if (crc != 0xCBF43926u) {
+        CAIRN_LOGE(TAG, "CRC-32(\"123456789\") = %08x but the format requires "
+                        "cbf43926. Every frame written here would be rejected "
+                        "by the verifier, so capture is refused.",
+                   (unsigned)crc);
+        return false;
+    }
+
+    uint8_t digest[32];
+    cairn_sha256(nullptr, 0, digest);
+
+    static const uint8_t want_sha[32] = {
+        0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4,
+        0xc8, 0x99, 0x6f, 0xb9, 0x24, 0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b,
+        0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b, 0x78, 0x52, 0xb8, 0x55
+    };
+
+    if (memcmp(digest, want_sha, sizeof(want_sha)) != 0) {
+        CAIRN_LOGE(TAG, "SHA-256(\"\") does not match the published digest. "
+                        "Content roots computed here would not agree with the "
+                        "verifier, so capture is refused.");
+        return false;
+    }
+
+    CAIRN_LOGI(TAG, "format known-answer check passed (CRC-32, SHA-256)");
+    return true;
+}
 
 #if CAIRN_SELFTEST
 
@@ -198,6 +273,7 @@ static void run_selftest(void)
                                      CAIRN_POLICY_VERSION, sealed_id);
         CAIRN_LOGI(TAG, "[%s] sealed in %u ms", seal_ok ? "PASS" : "FAIL",
                    (unsigned)(millis() - t0));
+        log_stack_headroom("seal");
     }
 
     /*
@@ -295,6 +371,28 @@ void setup()
      * downgrades the transport and says so.
      */
     cairn_sync_load_credentials();
+
+    /*
+     * Before anything is written: confirm this build's primitives agree with the
+     * specification. A failure here is not recoverable by retrying, so the
+     * device stays up and keeps logging rather than capturing data that cannot
+     * be verified.
+     *
+     * The self-test build deliberately continues past a failure — it exists to
+     * report every result, and stopping at the first one would hide the rest.
+     */
+    bool primitives_ok = format_known_answers_ok();
+
+#if !CAIRN_SELFTEST
+    if (!primitives_ok) {
+        CAIRN_LOGE(TAG, "format self-check failed; not capturing. Reflash with a "
+                        "build whose CRC-32 and SHA-256 match the specification.");
+        cairn_log_flush();
+        return;
+    }
+#else
+    (void)primitives_ok;
+#endif
 
     /* The card is confirmed, so a pending image has earned its keep. */
     mark_image_valid_if_pending();

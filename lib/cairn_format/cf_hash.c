@@ -13,13 +13,34 @@
 #ifdef CAIRN_USE_ESP_ROM_CRC
 
 /*
- * The ROM routine uses an inverted convention: pass ~crc and invert the result.
- * This yields values identical to Go's crc32.ChecksumIEEE and Rust's crc32fast,
+ * Yields values identical to Go's crc32.ChecksumIEEE and Rust's crc32fast,
  * which is the whole point of the specification choosing CRC-32 over CRC32C.
+ *
+ * The call looks too simple, so here is the derivation. esp_rom_crc.h documents
+ * the ROM routines as carrying a `~` at both ends, and gives the pattern for a
+ * reflected algorithm with a non-zero xorout — CRC-16/X25 — as
+ *
+ *     crc = (~crc16_le((uint16_t)~0xffff, buf, len)) ^ 0xffff;
+ *
+ * CRC-32/ISO-HDLC has the same shape: init 0xffffffff, refin and refout true,
+ * xorout 0xffffffff. Substituting gives
+ *
+ *     (~esp_rom_crc32_le(~0xffffffff, buf, len)) ^ 0xffffffff
+ *
+ * and since ~0xffffffff is 0 and (~x) ^ 0xffffffff is x, the whole expression
+ * collapses to a plain call with an initial value of 0.
+ *
+ * This was previously written as ~esp_rom_crc32_le(~0u, ...), which applies the
+ * inversions but drops the final xorout, returning the raw shift-register value
+ * instead. It is internally consistent — frames written that way scan back
+ * cleanly on the same device — so only a cross-implementation check catches it.
+ * The boot self-test did, on the first run against real hardware:
+ * CRC-32("123456789") came back 2dfd2d88 where the specification requires
+ * cbf43926.
  */
 uint32_t cairn_crc32(const uint8_t *data, size_t len)
 {
-    return ~esp_rom_crc32_le(~0u, data, (uint32_t)len);
+    return esp_rom_crc32_le(0, data, (uint32_t)len);
 }
 
 #else
