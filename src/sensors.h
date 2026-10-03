@@ -110,6 +110,21 @@ bool sensors_read_obd(cairn_obd_snapshot_t *out);
  */
 bool sensors_read_obd_extended(cairn_obd_extended_t *out);
 
+#if CAIRN_PIDTEST
+/*
+ * Accessors for the PID validation build. Kept behind the flag so the
+ * production firmware has no way to reach raw link traffic.
+ */
+bool    sensors_obd_ready(void);
+bool    sensors_obd_pid_supported(uint8_t pid);
+uint8_t sensors_obd_pidmap_byte(uint8_t index);
+bool    sensors_obd_converted_pid(uint8_t pid, int *out);
+
+/* Raw Mode 01 reply as space-separated hex data bytes. Returns the byte count,
+ * or 0 when the ECU did not answer this PID. */
+int     sensors_obd_raw_pid(uint8_t pid, char *out, size_t cap);
+#endif
+
 /* Battery voltage in millivolts, read through the coprocessor. */
 uint16_t sensors_battery_mv(void);
 

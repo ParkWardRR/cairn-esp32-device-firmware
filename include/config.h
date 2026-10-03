@@ -103,6 +103,17 @@
 #define CAIRN_GNSS_PERIOD_MS      1000
 #define CAIRN_IMU_WINDOW_MS       1000
 #define CAIRN_OBD_PERIOD_MS       2000
+
+/*
+ * PID validation build. Prints the Mode 01 support bitmaps and, for every PID
+ * the firmware reads, the raw ECU reply beside the library's converted value —
+ * the only way to check a conversion rather than reason about it. Capture is
+ * unaffected, so one drive yields the diagnostic and a usable bundle.
+ */
+#ifndef CAIRN_PIDTEST
+#define CAIRN_PIDTEST 0
+#endif
+#define CAIRN_PIDTEST_PERIOD_MS 5000
 #define CAIRN_HEALTH_PERIOD_MS    30000
 
 /*

@@ -31,6 +31,7 @@
 #include "cairn_sync.h"
 #include "config.h"
 #include "lifecycle.h"
+#include "pidtest.h"
 #include "sensors.h"
 
 static const char *TAG = "BOOT";
@@ -501,6 +502,10 @@ void loop()
     }
 
     lifecycle_tick(&g_lifecycle);
+
+#if CAIRN_PIDTEST
+    pidtest_tick();
+#endif
 
     /*
      * Sampling no longer happens here — the sensing task on core 0 owns it — so

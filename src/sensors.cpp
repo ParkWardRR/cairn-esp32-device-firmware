@@ -641,8 +641,12 @@ bool sensors_read_obd_extended(cairn_obd_extended_t *out)
         out->baro_kpa = 0xFF;
     }
 
-    /* Mass air flow in centigrams per second, so a u16 spans a turbo's range
-     * without the fractional loss a whole-gram field would cause at idle. */
+    /*
+     * Centigrams per second. The field has the resolution; the library does
+     * not — normalizeData divides by 100 into whole grams, so the hundredths
+     * are always zero today. Scaled anyway so reading the PID raw later needs
+     * no format change.
+     */
     requested++;
     if (pid_value(PID_MAF_FLOW, &v)) {
         long cg = (long)v * 100L;
@@ -659,14 +663,37 @@ bool sensors_read_obd_extended(cairn_obd_extended_t *out)
      */
     requested++;
     if (pid_value(PID_AIR_FUEL_EQUIV_RATIO, &v)) {
-        out->lambda_e4 = (uint16_t)((v < 0) ? 0 : ((v > 65534) ? 65534 : v));
+        /*
+         * The library hands back a 0..200 scale, not the raw 16-bit ratio:
+         * normalizeData computes getLargeValue() * 200 / 65536, so lambda 0.88
+         * arrives as 88. Multiplying by 100 puts it in the ten-thousandths the
+         * record stores.
+         *
+         * This was storing the value verbatim, which recorded lambda 0.88 as
+         * 0.0088 — a hundredfold error that would have read as an impossibly
+         * rich mixture. Worth noting the resolution ceiling that follows: the
+         * library has already quantised to 0.01, so the extra two digits of the
+         * field are headroom for reading the PID raw later, not precision we
+         * have now.
+         */
+        long e4 = (long)v * 100L;
+        out->lambda_e4 = (uint16_t)((e4 < 0) ? 0 : ((e4 > 65534L) ? 65534L : e4));
         answered++;
     } else {
         out->lambda_e4 = CAIRN_U16_UNKNOWN;
     }
 
-    /* Absolute load exceeds 100% under boost, so it is scaled by ten rather
-     * than clamped into a percentage byte. */
+    /*
+     * Absolute load, scaled by ten. The scaling is right in principle —
+     * absolute load genuinely exceeds 100% under boost — but it cannot help
+     * yet: PID 0x43 is a two-byte value spanning 0..25700%, and the library
+     * reads a single byte through getPercentageValue, which computes
+     * A * 100 / 255 and therefore caps at 100.
+     *
+     * Recorded as the library reports it, with the ceiling documented rather
+     * than hidden. Whether to bypass normalizeData and read the pair raw is
+     * what the PID test build is for.
+     */
     requested++;
     if (pid_value(PID_ABSOLUTE_ENGINE_LOAD, &v)) {
         long e1 = (long)v * 10L;
@@ -716,4 +743,87 @@ bool sensors_read_obd_extended(cairn_obd_extended_t *out)
      * which is worth recording once rather than inferring from silence.
      */
     return true;
+}
+
+/* ── PID validation accessors ─────────────────────────────────────────────── */
+
+bool sensors_obd_ready(void)
+{
+    return s_status != nullptr && s_status->obd;
+}
+
+bool sensors_obd_pid_supported(uint8_t pid)
+{
+    return s_obd.isValidPID(pid);
+}
+
+uint8_t sensors_obd_pidmap_byte(uint8_t index)
+{
+    if (index >= sizeof(s_obd.pidmap)) return 0;
+    return s_obd.pidmap[index];
+}
+
+bool sensors_obd_converted_pid(uint8_t pid, int *out)
+{
+    int v = 0;
+    if (!s_obd.readPID(pid, v)) return false;
+    *out = v;
+    return true;
+}
+
+int sensors_obd_raw_pid(uint8_t pid, char *out, size_t cap)
+{
+    if (out == nullptr || cap == 0) return -1;
+    out[0] = '\0';
+
+    if (s_obd.link == nullptr) return -1;
+
+    /*
+     * Mode 01 request, issued straight down the link so normalizeData never
+     * sees it. The point of this function is to capture what the ECU actually
+     * sent, which is the only way to check the library's conversion rather
+     * than assume it.
+     */
+    char cmd[16];
+    snprintf(cmd, sizeof(cmd), "01%02X\r", pid);
+
+    char buf[128];
+    if (s_obd.link->sendCommand(cmd, buf, sizeof(buf), OBD_TIMEOUT_SHORT) == 0) {
+        return 0;
+    }
+
+    /*
+     * Keep only the data bytes after the "41 <pid>" echo. A reply that does not
+     * echo the mode and PID is not an answer to this question — NO DATA and
+     * searching messages both land here — so it is reported as zero bytes
+     * rather than parsed hopefully.
+     */
+    char want[8];
+    snprintf(want, sizeof(want), "41 %02X", pid);
+
+    const char *p = strstr(buf, want);
+    if (p == nullptr) {
+        snprintf(out, cap, "%s", buf[0] ? buf : "");
+        return 0;
+    }
+
+    p += strlen(want);
+
+    int bytes = 0;
+    size_t n = 0;
+    while (*p && n + 3 < cap) {
+        if (*p == ' ' && isxdigit((unsigned char)p[1]) &&
+            isxdigit((unsigned char)p[2])) {
+            out[n++] = p[1];
+            out[n++] = p[2];
+            out[n++] = ' ';
+            bytes++;
+            p += 3;
+            continue;
+        }
+        break;
+    }
+
+    out[n] = '\0';
+    return bytes;
 }
