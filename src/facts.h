@@ -70,10 +70,21 @@ typedef struct {
 
 /*
  * Depth sized for the longest the controller can be busy. A sync can occupy it
- * for tens of seconds, and at roughly 5 facts per second 192 slots covers
- * around 38 s. Syncing only happens while idle, when the facts being dropped
- * are the least valuable, and anything beyond that is counted.
+ * for tens of seconds, so the depth has to cover that window at the current
+ * fact rate.
+ *
+ * Raising the IMU window to 100 ms took that rate from roughly 5 facts per
+ * second to about 13 — ten IMU summaries, one new GNSS fix, two OBD records —
+ * which would have cut 192 slots from ~38 s of cover to ~15 s, short of a
+ * sync. 512 restores about 39 s.
+ *
+ * Sized against the measured rate rather than rounded up: fact_t is 48 bytes,
+ * so each 256 slots costs 12 KB of DRAM that the TLS handshake also wants.
+ * Syncing only happens while idle, when the facts being dropped are the least
+ * valuable, and anything beyond that is counted rather than hidden; the drive
+ * that set these rates dropped none at the old rate, so this is headroom
+ * rather than a fix.
  */
-#define CAIRN_FACT_QUEUE_DEPTH 192
+#define CAIRN_FACT_QUEUE_DEPTH 512
 
 #endif /* CAIRN_FACTS_H */

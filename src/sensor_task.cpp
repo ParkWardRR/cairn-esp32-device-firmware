@@ -69,6 +69,10 @@ static void sensor_task(void *arg)
 
     bool have_utc_basis = false;
 
+    /* Gap reporting state; see the GNSS branch below. */
+    uint32_t last_gap_report_ms = millis();
+    bool     have_reported_gap  = false;
+
     for (;;) {
         /* Parked while the controller is in standby. Nothing is draining the
          * queue, so sampling would only fill it and count the overflow as
@@ -120,6 +124,10 @@ static void sensor_task(void *arg)
                 f.kind = FACT_GNSS_SAMPLE;
                 post(&f);
 
+                /* A fresh fix ends any outage, so the next one reports at once
+                 * rather than waiting out the rate limit. */
+                have_reported_gap = false;
+
                 /*
                  * The basis is reported once, the first time the receiver has a
                  * date it considers valid. Re-reporting it would let a later,
@@ -137,9 +145,29 @@ static void sensor_task(void *arg)
                     }
                 }
             } else {
-                /* Reported, not skipped: silence in the data would be
-                 * indistinguishable from the device being switched off. */
-                post_kind(FACT_GNSS_NO_FIX, now);
+                /*
+                 * A read returning nothing means one of two unrelated things,
+                 * and reporting both as a gap was wrong.
+                 *
+                 * Either the receiver has no fix — a real gap, and silence here
+                 * would be indistinguishable from the device being switched off
+                 * — or it simply has not produced a new fix since the last
+                 * poll, which is not a gap at all. Polling at 200 ms against a
+                 * 1 Hz receiver, the second case is the common one.
+                 *
+                 * So the gap is reported only once the newest fix has aged past
+                 * CAIRN_GNSS_STALE_MS, and then no more than once per
+                 * CAIRN_GNSS_GAP_REPORT_MS for as long as the outage lasts. An
+                 * outage still appears in the record; a fast poll no longer
+                 * manufactures one.
+                 */
+                if (fix_age >= CAIRN_GNSS_STALE_MS &&
+                    (!have_reported_gap ||
+                     (int32_t)(now - last_gap_report_ms) >= CAIRN_GNSS_GAP_REPORT_MS)) {
+                    post_kind(FACT_GNSS_NO_FIX, now);
+                    last_gap_report_ms = now;
+                    have_reported_gap  = true;
+                }
             }
         }
 

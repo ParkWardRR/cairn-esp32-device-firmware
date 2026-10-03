@@ -99,10 +99,44 @@
  */
 #define CAIRN_ADAPTIVE_SAMPLING 1
 
-/* Nominal sampling cadences, milliseconds. */
-#define CAIRN_GNSS_PERIOD_MS      1000
-#define CAIRN_IMU_WINDOW_MS       1000
-#define CAIRN_OBD_PERIOD_MS       2000
+/*
+ * Nominal sampling cadences, milliseconds.
+ *
+ * These are not all limited by the same thing, and conflating them wastes
+ * effort. Measured on the 2026-10-03 drive:
+ *
+ *   IMU   — limited only by storage. The accelerometer is read locally over
+ *           I2C and summarised, so the cost of a faster window is bytes.
+ *   GNSS  — limited by the receiver's own update rate. Polling faster than it
+ *           produces fixes yields nothing new; sensors_read_gnss already
+ *           refuses to re-report an unchanged timestamp, so an over-fast poll
+ *           is merely wasted, never fabricated.
+ *   OBD   — limited by the vehicle bus, not by us. Every PID is a separate
+ *           request down the co-processor link and back from the ECU, and that
+ *           round trip measured 110..140 ms with no observed variance across
+ *           4263 requests. That is a hard ceiling of roughly eight PIDs per
+ *           second no matter how much card is free, which is why the PID set
+ *           below is tiered rather than simply polled harder.
+ */
+#define CAIRN_GNSS_PERIOD_MS      200
+#define CAIRN_IMU_WINDOW_MS       100
+#define CAIRN_OBD_PERIOD_MS       1200
+
+/*
+ * A GNSS poll that outruns the receiver is not a gap.
+ *
+ * The task used to report FACT_GNSS_NO_FIX whenever a read returned nothing,
+ * which conflated two unrelated states: the receiver having no fix, and the
+ * receiver simply not having produced a new one yet. At a 1000 ms poll against
+ * a 1 Hz module, timing jitter alone manufactured gaps — the 2026-10-03 drive
+ * recorded 211 of them against 393 samples — and at a 200 ms poll it would
+ * invent four per second.
+ *
+ * So a gap is now reported only once the newest fix is genuinely stale, and no
+ * more often than GAP_REPORT_MS while an outage persists.
+ */
+#define CAIRN_GNSS_STALE_MS       3000
+#define CAIRN_GNSS_GAP_REPORT_MS  2000
 
 /*
  * PID validation build. Prints the Mode 01 support bitmaps and, for every PID

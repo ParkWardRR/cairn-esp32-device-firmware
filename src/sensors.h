@@ -123,6 +123,11 @@ bool    sensors_obd_converted_pid(uint8_t pid, int *out);
 /* Raw Mode 01 reply as space-separated hex data bytes. Returns the byte count,
  * or 0 when the ECU did not answer this PID. */
 int     sensors_obd_raw_pid(uint8_t pid, char *out, size_t cap);
+
+/* Sends one Mode 01 request carrying up to six PIDs and returns the reply
+ * verbatim. Answers whether this ECU supports multi-PID requests, which is the
+ * only route to a materially faster OBD cadence. */
+int     sensors_obd_multi_probe(const uint8_t *pids, int n, char *out, size_t cap);
 #endif
 
 /* Battery voltage in millivolts, read through the coprocessor. */

@@ -448,6 +448,98 @@ static bool pid_raw_u16(uint8_t pid, uint16_t *out)
     return true;
 }
 
+#if CAIRN_PIDTEST
+/*
+ * Multi-PID request probe.
+ *
+ * SAE J1979 permits a single Mode 01 request to carry up to six PIDs, with all
+ * of their data returned in one response. If this ECU honours it, six channels
+ * cost one 120 ms round trip instead of six, and the bus ceiling that currently
+ * caps everything stops binding — it is the only change that would make OBD
+ * "much faster" rather than merely better prioritised.
+ *
+ * Whether a given DME answers a multi-PID request is not something to reason
+ * about. Plenty answer only the first PID, or reject the frame outright, and
+ * BMW's D-CAN stub is reached through a co-processor that may not pass the
+ * frame through unaltered either. So this sends one and prints exactly what
+ * came back, for the same reason the single-PID probe exists.
+ *
+ * Returns the raw reply text; interpretation is left to the reader.
+ */
+int sensors_obd_multi_probe(const uint8_t *pids, int n, char *out, size_t cap)
+{
+    if (out == nullptr || cap == 0) return -1;
+    out[0] = '\0';
+    if (s_obd.link == nullptr || pids == nullptr || n <= 0 || n > 6) return -1;
+
+    /* "01" followed by each PID, as the standard frames a multi-PID request. */
+    char cmd[24];
+    size_t k = (size_t)snprintf(cmd, sizeof(cmd), "01");
+    for (int i = 0; i < n && k + 3 < sizeof(cmd); i++) {
+        k += (size_t)snprintf(cmd + k, sizeof(cmd) - k, "%02X", (unsigned)pids[i]);
+    }
+    if (k + 2 >= sizeof(cmd)) return -1;
+    cmd[k++] = '\r';
+    cmd[k]   = '\0';
+
+    char buf[192];
+    if (s_obd.link->sendCommand(cmd, buf, sizeof(buf), OBD_TIMEOUT_SHORT) == 0) {
+        return 0;
+    }
+
+    /*
+     * Copied out verbatim, newlines flattened so one probe stays one log line.
+     * A reply echoing "41" once per requested PID means the request worked; a
+     * reply carrying only the first PID means it did not, and the difference is
+     * visible without any parsing on this side.
+     */
+    size_t w = 0;
+    for (size_t i = 0; buf[i] && w + 1 < cap; i++) {
+        char c = buf[i];
+        if (c == '\r' || c == '\n') {
+            if (w > 0 && out[w - 1] == ' ') continue;
+            c = ' ';
+        }
+        out[w++] = c;
+    }
+    out[w] = '\0';
+    return (int)w;
+}
+#endif /* CAIRN_PIDTEST */
+
+/*
+ * Cold-channel rotation.
+ *
+ * Every PID is an independent request down the link and back from the ECU, and
+ * that round trip measured 110..140 ms across 4263 requests on the 2026-10-03
+ * drive with no observed variance. Sixteen PIDs per cycle therefore cost about
+ * 1.9 s, which is why the OBD cadence sat at 2000 ms: the bus was saturated,
+ * not the card.
+ *
+ * Polling everything at the rate the fastest channel needs is what made that
+ * ceiling binding, and most of the set does not need it. Manifold pressure,
+ * lambda and RPM move inside a single gear change. Coolant, ambient air,
+ * barometric pressure and the long-term fuel trim move over minutes, and
+ * spending 120 ms on each of them every cycle to watch them not change is what
+ * was costing the channels that matter their resolution.
+ *
+ * So the hot set is read every cycle and the cold set rotates, one per cycle.
+ * A cold channel that is not its turn is written as its unavailable sentinel
+ * and is not counted as requested, because it was not: carrying the previous
+ * value forward would be fabricating a measurement at a timestamp where none
+ * was taken, which is the one thing this format exists to prevent. The decoder
+ * already treats sentinels as absent, so a slow channel simply appears in one
+ * record in seven instead of in all of them.
+ */
+#define CAIRN_OBD_COLD_SLOTS 7
+
+static uint8_t s_cold_phase;
+
+static inline bool cold_turn(uint8_t slot)
+{
+    return s_cold_phase == slot;
+}
+
 bool sensors_read_obd(cairn_obd_snapshot_t *out)
 {
     if (s_status == nullptr || !s_status->obd) return false;
@@ -477,14 +569,21 @@ bool sensors_read_obd(cairn_obd_snapshot_t *out)
         errors++;
     }
 
-    requested++;
-    if (pid_value(PID_FUEL_PRESSURE, &v)) {
-        out->fuel_pressure_kpa = (uint16_t)v;
-        answered++;
-    } else {
-        out->fuel_pressure_kpa = CAIRN_U16_UNKNOWN;
-        errors++;
-    }
+    /*
+     * Fuel pressure is not requested at all.
+     *
+     * The Mode 01 support bitmap on this vehicle reports PID 0x0A as
+     * unsupported — byte 2 of the 01-20 range read 0x3F, with the 0x0A bit
+     * clear — and all 203 probes of it returned NO DATA. Asking anyway cost a
+     * guaranteed 120 ms of bus time every cycle, which is a hot channel's whole
+     * budget spent on a question the ECU has already declined 203 times.
+     *
+     * Recorded as unavailable rather than dropped from the layout, which is
+     * what it is, and not counted as requested, which it no longer is. A
+     * vehicle that does answer 0x0A would need this restored; the support
+     * bitmap in the PIDTEST build is where that would show up.
+     */
+    out->fuel_pressure_kpa = CAIRN_U16_UNKNOWN;
 
     requested++;
     if (pid_value(PID_THROTTLE, &v)) {
@@ -495,31 +594,48 @@ bool sensors_read_obd(cairn_obd_snapshot_t *out)
         errors++;
     }
 
-    requested++;
-    if (pid_value(PID_ENGINE_LOAD, &v)) {
-        out->engine_load_pct = (uint8_t)v;
-        answered++;
-    } else {
-        out->engine_load_pct = CAIRN_U8_UNKNOWN;
-        errors++;
+    /*
+     * Cold slot 0. Calculated load duplicates what absolute load reports with
+     * more range, so it is the cheapest of the three to resolve coarsely.
+     */
+    out->engine_load_pct = CAIRN_U8_UNKNOWN;
+    if (cold_turn(0)) {
+        requested++;
+        if (pid_value(PID_ENGINE_LOAD, &v)) {
+            out->engine_load_pct = (uint8_t)v;
+            answered++;
+        } else {
+            errors++;
+        }
     }
 
-    requested++;
-    if (pid_value(PID_COOLANT_TEMP, &v)) {
-        out->coolant_temp_c = sat_i8(v);
-        answered++;
-    } else {
-        out->coolant_temp_c = CAIRN_I8_UNKNOWN;
-        errors++;
+    /* Cold slot 1. Coolant moves over minutes. */
+    out->coolant_temp_c = CAIRN_I8_UNKNOWN;
+    if (cold_turn(1)) {
+        requested++;
+        if (pid_value(PID_COOLANT_TEMP, &v)) {
+            out->coolant_temp_c = sat_i8(v);
+            answered++;
+        } else {
+            errors++;
+        }
     }
 
-    requested++;
-    if (pid_value(PID_INTAKE_TEMP, &v)) {
-        out->intake_temp_c = sat_i8(v);
-        answered++;
-    } else {
-        out->intake_temp_c = CAIRN_I8_UNKNOWN;
-        errors++;
+    /*
+     * Cold slot 2. Intake air temperature is the fastest of the cold channels —
+     * heat soak can move it several degrees through a single pull — so if the
+     * charge-temperature question ever matters more than boost resolution this
+     * is the one to promote.
+     */
+    out->intake_temp_c = CAIRN_I8_UNKNOWN;
+    if (cold_turn(2)) {
+        requested++;
+        if (pid_value(PID_INTAKE_TEMP, &v)) {
+            out->intake_temp_c = sat_i8(v);
+            answered++;
+        } else {
+            errors++;
+        }
     }
 
     requested++;
@@ -697,13 +813,19 @@ bool sensors_read_obd_extended(cairn_obd_extended_t *out)
      * are always zero today. Scaled anyway so reading the PID raw later needs
      * no format change.
      */
-    requested++;
-    if (pid_value(PID_MAF_FLOW, &v)) {
-        long cg = (long)v * 100L;
-        out->maf_cgps = (uint16_t)((cg > 65534L) ? 65534L : ((cg < 0) ? 0 : cg));
-        answered++;
-    } else {
-        out->maf_cgps = CAIRN_U16_UNKNOWN;
+    /*
+     * Cold slot 3. Mass air flow is largely redundant against manifold
+     * pressure for judging a pull, and costs the same 120 ms, so pressure wins
+     * the hot slot.
+     */
+    out->maf_cgps = CAIRN_U16_UNKNOWN;
+    if (cold_turn(3)) {
+        requested++;
+        if (pid_value(PID_MAF_FLOW, &v)) {
+            long cg = (long)v * 100L;
+            out->maf_cgps = (uint16_t)((cg > 65534L) ? 65534L : ((cg < 0) ? 0 : cg));
+            answered++;
+        }
     }
 
     /*
@@ -749,12 +871,14 @@ bool sensors_read_obd_extended(cairn_obd_extended_t *out)
         }
     }
 
-    requested++;
-    if (pid_value(PID_AMBIENT_TEMP, &v)) {
-        out->ambient_temp_c = sat_i8(v);
-        answered++;
-    } else {
-        out->ambient_temp_c = CAIRN_I8_UNKNOWN;
+    /* Cold slot 4. Outside air; constant over a drive by any useful measure. */
+    out->ambient_temp_c = CAIRN_I8_UNKNOWN;
+    if (cold_turn(4)) {
+        requested++;
+        if (pid_value(PID_AMBIENT_TEMP, &v)) {
+            out->ambient_temp_c = sat_i8(v);
+            answered++;
+        }
     }
 
     /*
@@ -762,25 +886,49 @@ bool sensors_read_obd_extended(cairn_obd_extended_t *out)
      * up anywhere else: large persistent trims mean the closed loop is fighting
      * the fuelling.
      */
-    requested++;
-    if (pid_value(PID_SHORT_TERM_FUEL_TRIM_1, &v)) {
-        out->fuel_trim_short_pct = sat_i8(v);
-        answered++;
-    } else {
-        out->fuel_trim_short_pct = CAIRN_I8_UNKNOWN;
+    /*
+     * Cold slots 5 and 6. Both trims are adaptations, not measurements: the
+     * short-term term settles over seconds and the long-term term over minutes
+     * to hours, so one sample every seven cycles resolves either of them.
+     *
+     * This is the pair that matters most on this car — it is running a blend
+     * the map was not written for, and long-term trim sat at +14..+23% for the
+     * whole of the 2026-10-03 drive without once returning to neutral — but
+     * what matters is the level and the trend, and neither needs 1 Hz.
+     */
+    out->fuel_trim_short_pct = CAIRN_I8_UNKNOWN;
+    if (cold_turn(5)) {
+        requested++;
+        if (pid_value(PID_SHORT_TERM_FUEL_TRIM_1, &v)) {
+            out->fuel_trim_short_pct = sat_i8(v);
+            answered++;
+        }
     }
 
-    requested++;
-    if (pid_value(PID_LONG_TERM_FUEL_TRIM_1, &v)) {
-        out->fuel_trim_long_pct = sat_i8(v);
-        answered++;
-    } else {
-        out->fuel_trim_long_pct = CAIRN_I8_UNKNOWN;
+    out->fuel_trim_long_pct = CAIRN_I8_UNKNOWN;
+    if (cold_turn(6)) {
+        requested++;
+        if (pid_value(PID_LONG_TERM_FUEL_TRIM_1, &v)) {
+            out->fuel_trim_long_pct = sat_i8(v);
+            answered++;
+        }
     }
 
     out->pids_requested = requested;
     out->pids_answered  = answered;
     out->poll_cadence_ms = CAIRN_OBD_PERIOD_MS;
+
+    /*
+     * Advance the rotation here, at the end of the second of the two reads, so
+     * both records in one cycle see the same phase.
+     *
+     * Reduced on increment rather than left to wrap at 255: 256 is not a
+     * multiple of CAIRN_OBD_COLD_SLOTS, so a bare uint8_t counter would jump
+     * from slot 3 straight to slot 0 every 256 cycles and starve slots 4, 5
+     * and 6 of one sample each time. Cheaper to make the sequence exact than to
+     * document the hole.
+     */
+    s_cold_phase = (uint8_t)((s_cold_phase + 1u) % CAIRN_OBD_COLD_SLOTS);
 
     /*
      * Returned even when nothing answered, unlike OBD_SNAPSHOT. Which of these

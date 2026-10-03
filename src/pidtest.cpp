@@ -27,6 +27,7 @@
 
 #include <Arduino.h>
 #include <FreematicsPlus.h>
+#include <string.h>
 
 #include "cairn_log.h"
 #include "pidtest.h"
@@ -182,6 +183,41 @@ void pidtest_tick(void)
                    got ? "" : "(none) ", conv,
                    p->std_formula);
     }
+
+    /*
+     * Multi-PID request. Printed last so it sits beside the single-PID timings
+     * above, which is the comparison that matters: every line in the probe
+     * block costs its own round trip, and the whole point of asking for six at
+     * once is to replace six of those with one.
+     *
+     * The six chosen are the hot set the capture path reads every cycle, so a
+     * working reply here translates directly into cadence. Both the elapsed
+     * time and the reply are logged, because a reply that arrives in 120 ms
+     * carrying six values is the result worth having and a reply that takes
+     * 720 ms has bought nothing even if it parses.
+     */
+    static const uint8_t k_multi[] = { 0x0C, 0x0D, 0x11, 0x0E, 0x0B, 0x44 };
+
+    char     multi[160];
+    uint32_t t0 = millis();
+    int      mn = sensors_obd_multi_probe(k_multi, (int)sizeof(k_multi), multi,
+                                          sizeof(multi));
+    uint32_t dt = millis() - t0;
+
+    /*
+     * One "41" echo per requested PID means the ECU answered all six in a
+     * single frame. Counting them is enough to tell success from an ECU that
+     * replied about only the first, without pretending to parse the payload.
+     */
+    int echoes = 0;
+    for (const char *q = multi; (q = strstr(q, "41 ")) != nullptr; q += 3) echoes++;
+
+    CAIRN_LOGI(TAG, "MULTI 6-PID (0C 0D 11 0E 0B 44) %d byte(s) in %u ms, "
+                    "%d x '41 ' echo: [%s]",
+               mn, (unsigned)dt, echoes, multi[0] ? multi : "no reply");
+    CAIRN_LOGI(TAG, "  read: 6 echoes means multi-PID works and the hot set "
+                    "costs one round trip; 1 echo means only the first PID "
+                    "answered; no reply means the request was rejected");
 
     cairn_log_flush();
 }
