@@ -2278,6 +2278,76 @@ static bool row_drive_confirmed_from_local_signals(void)
     return true;
 }
 
+/*
+ * Resuming a capture must restore the record counts for BOTH chains.
+ *
+ * The manifest describes the whole bundle, both chains, and it is signed. If a
+ * resume forgets what is already on the card, the sealed manifest undercounts
+ * its own segments permanently — the signature covers the wrong numbers, so
+ * nothing downstream can repair it.
+ *
+ * The journal was being recovered with fold_counts false while the capture
+ * segments used true, so every DEVICE_HEALTH and STATE_TRANSITION written
+ * before a reboot vanished from the counts. Found by cairn-verify on a real
+ * drive: the journal held 75 transitions and 12 health records where the
+ * manifest claimed 70 and 11.
+ */
+static bool row_resume_restores_record_counts(void)
+{
+    uint8_t device_id[16], seed[32], pub[32];
+    uint32_t boot = 0;
+    CHECK(cairn_identity_load(device_id, seed, pub, &boot), "identity load failed");
+
+    uint8_t boot_id[16];
+    cairn_new_boot_id(boot_id);
+
+    cairn_capture_t cap;
+    CHECK(cairn_capture_open_or_resume(&cap, device_id, boot_id), "open failed");
+
+    /* Both chains, so the test fails if either is forgotten. */
+    CHECK(append_samples(&cap, 5) == 5, "capture frames failed");
+
+    const int journal_frames = 4;
+    for (int i = 0; i < journal_frames; i++) {
+        cairn_state_transition_t t;
+        memset(&t, 0, sizeof(t));
+        t.region = CAIRN_REGION_HEALTH;
+        t.policy_version = 1;
+
+        uint8_t payload[20];
+        cairn_encode_state_transition(&t, payload);
+        cairn_host_advance(10);
+        CHECK(cairn_capture_append(&cap, CAIRN_CHAIN_JOURNAL,
+                                   CAIRN_REC_STATE_TRANSITION, 1, 0,
+                                   cairn_millis(), payload, sizeof(payload)),
+              "journal append %d failed", i);
+    }
+
+    uint32_t want_capture = cap.record_counts[CAIRN_REC_GNSS_SAMPLE];
+    uint32_t want_journal = cap.record_counts[CAIRN_REC_STATE_TRANSITION];
+    CHECK(want_capture == 5, "capture count is %u, want 5", want_capture);
+    CHECK(want_journal == (uint32_t)journal_frames,
+          "journal count is %u, want %d", want_journal, journal_frames);
+
+    /* Simulate the reboot: drop the in-RAM capture and resume from the card. */
+    cairn_capture_t resumed;
+    memset(&resumed, 0, sizeof(resumed));
+    CHECK(cairn_capture_open_or_resume(&resumed, device_id, boot_id),
+          "resume failed");
+
+    CHECK(resumed.record_counts[CAIRN_REC_GNSS_SAMPLE] == want_capture,
+          "after resume the capture count is %u, want %u",
+          resumed.record_counts[CAIRN_REC_GNSS_SAMPLE], want_capture);
+
+    CHECK(resumed.record_counts[CAIRN_REC_STATE_TRANSITION] == want_journal,
+          "after resume the journal count is %u, want %u — a sealed manifest "
+          "would undercount its own segments and be signed over the wrong "
+          "numbers",
+          resumed.record_counts[CAIRN_REC_STATE_TRANSITION], want_journal);
+
+    return true;
+}
+
 /* ── driver ───────────────────────────────────────────────────────────────── */
 
 typedef struct {
@@ -2293,6 +2363,7 @@ static const row_t ROWS[] = {
     { "recovery", "corrupt frame isolates to one record",     row_corrupt_frame_isolated },
     { "recovery", "one chain spans segment rotation",         row_chain_spans_rotation },
     { "recovery", "journal chain is independent",             row_journal_chain_independent },
+    { "recovery", "resuming restores counts for both chains",  row_resume_restores_record_counts },
     { "seal",     "interrupted seal completes idempotently",  row_interrupted_seal_completed },
     { "seal",     "a live capture is not mistaken for a seal", row_live_capture_not_sealed },
     { "seal",     "a sealed bundle is never overwritten",     row_seal_never_overwrites },

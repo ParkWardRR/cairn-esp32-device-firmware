@@ -496,7 +496,26 @@ bool cairn_capture_open_or_resume(cairn_capture_t *cap,
         journal_path(cap, path, sizeof(path));
         if (cairn_fs_exists(path)) {
             uint32_t jbytes = 0;
-            if (recover_segment(cap, path, &cap->journal_chain, false, &jbytes)) {
+            /*
+             * Fold the journal's counts too, exactly as the capture segments
+             * above do.
+             *
+             * This passed false, so a capture resumed after a reboot forgot
+             * every DEVICE_HEALTH and STATE_TRANSITION already on the card
+             * while the segments still held them. The manifest then recorded
+             * the undercount and was signed over it, producing a bundle whose
+             * own record_counts contradicted its own segments — permanently,
+             * because the signature covers the wrong numbers.
+             *
+             * Caught by cairn-verify on a real drive: the journal held 75
+             * transitions and 12 health records where the manifest claimed 70
+             * and 11, the difference being exactly what was written before the
+             * resume. The content root and signature were unaffected, so no
+             * data was lost and the server still accepts the bundle — it is the
+             * self-description that was wrong, which is worse than it sounds
+             * for a format whose whole purpose is being checkable later.
+             */
+            if (recover_segment(cap, path, &cap->journal_chain, true, &jbytes)) {
                 cap->journal_bytes = jbytes;
             } else {
                 chain_intact = false;
