@@ -58,7 +58,7 @@ static uint64_t get_u64(const uint8_t *p)
 
 bool cairn_record_type_known(uint8_t t)
 {
-    return t >= CAIRN_REC_GNSS_SAMPLE && t <= CAIRN_REC_POLICY_SNAPSHOT;
+    return t >= CAIRN_REC_GNSS_SAMPLE && t <= CAIRN_REC_OBD_EXTENDED;
 }
 
 const char *cairn_record_type_name(uint8_t t)

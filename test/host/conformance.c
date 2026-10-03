@@ -1008,6 +1008,171 @@ static bool check_health(const char *dir, const char *vector,
     return true;
 }
 
+/* ── OBD_EXTENDED ────────────────────────────────────────────────────────── */
+
+typedef struct {
+    uint16_t map_kpa;
+    uint16_t maf_cgps;
+    uint16_t lambda_e4;
+    uint16_t abs_load_raw;
+    uint8_t  baro_kpa;
+    int8_t   ambient_temp_c;
+    int8_t   fuel_trim_short_pct;
+    int8_t   fuel_trim_long_pct;
+    uint32_t pids_requested;
+    uint32_t pids_answered;
+    uint16_t poll_cadence_ms;
+} obd_ext_raw_t;
+
+#define MAX_OBD_EXT_RECORDS 16
+static size_t       g_obd_ext_count;
+static obd_ext_raw_t g_obd_ext[MAX_OBD_EXT_RECORDS];
+
+static uint16_t le_u16(const uint8_t *p) {
+    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+}
+
+static uint32_t le_u32(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static bool obd_ext_collect_cb(const cairn_frame_t *f, void *user)
+{
+    (void)user;
+
+    if (f->record_type == CAIRN_REC_OBD_EXTENDED && f->payload_len >= 24 &&
+        g_obd_ext_count < MAX_OBD_EXT_RECORDS) {
+        const uint8_t *p = f->payload;
+        obd_ext_raw_t *r = &g_obd_ext[g_obd_ext_count++];
+        r->map_kpa            = le_u16(p + 0);
+        r->maf_cgps           = le_u16(p + 2);
+        r->lambda_e4          = le_u16(p + 4);
+        r->abs_load_raw       = le_u16(p + 6);
+        r->baro_kpa           = p[8];
+        r->ambient_temp_c     = (int8_t)p[9];
+        r->fuel_trim_short_pct = (int8_t)p[10];
+        r->fuel_trim_long_pct = (int8_t)p[11];
+        r->pids_requested     = le_u32(p + 12);
+        r->pids_answered      = le_u32(p + 16);
+        r->poll_cadence_ms    = le_u16(p + 20);
+    }
+    return true;
+}
+
+static bool check_obd_ext(const char *dir, const char *vector,
+                           const mj_doc_t *doc, const mj_node_t *exp)
+{
+    char path[512];
+    snprintf(path, sizeof(path), "%s/segment.bin", dir);
+
+    size_t len;
+    uint8_t *bytes = read_file(path, &len);
+    if (bytes == NULL) {
+        record_failure(vector, "cannot read segment.bin");
+        return false;
+    }
+
+    g_obd_ext_count = 0;
+
+    cairn_scan_result_t res;
+    cairn_scan_state_t state = { 0, 0 };
+    cairn_err_t err = cairn_scan_segment(bytes, len, state, &res,
+                                         obd_ext_collect_cb, NULL);
+    free(bytes);
+
+    if (err != CAIRN_OK) {
+        record_failure(vector, "scan failed: %s", cairn_strerror(err));
+        return false;
+    }
+
+    const mj_node_t *list = mj_get(doc, exp, "records");
+    size_t want_count = mj_len(doc, list);
+
+    if (g_obd_ext_count != want_count) {
+        record_failure(vector, "found %zu OBD_EXTENDED records, want %zu",
+                       g_obd_ext_count, want_count);
+        return false;
+    }
+
+    for (size_t i = 0; i < want_count; i++) {
+        const mj_node_t *r = mj_at(doc, list, i);
+        const obd_ext_raw_t *got = &g_obd_ext[i];
+
+#define CHECK_U16(field, json_key) do { \
+    const mj_node_t *n = mj_get(doc, r, json_key); \
+    if (n != NULL && !mj_is_null(n)) { \
+        uint16_t want = (uint16_t)mj_num_or(n, -1); \
+        if (got->field != want) { \
+            record_failure(vector, "record %zu " json_key " = %u, want %u", \
+                           i, (unsigned)got->field, (unsigned)want); \
+            return false; \
+        } \
+    } \
+} while (0)
+
+#define CHECK_U32(field, json_key) do { \
+    uint32_t want = (uint32_t)mj_num_or(mj_get(doc, r, json_key), -1); \
+    if (got->field != want) { \
+        record_failure(vector, "record %zu " json_key " = %u, want %u", \
+                       i, (unsigned)got->field, (unsigned)want); \
+        return false; \
+    } \
+} while (0)
+
+#define CHECK_I8(field, json_key) do { \
+    const mj_node_t *n = mj_get(doc, r, json_key); \
+    if (n != NULL && !mj_is_null(n)) { \
+        int8_t want = (int8_t)(int)mj_num_or(n, -999); \
+        if (got->field != want) { \
+            record_failure(vector, "record %zu " json_key " = %d, want %d", \
+                           i, (int)got->field, (int)want); \
+            return false; \
+        } \
+    } \
+} while (0)
+
+#define CHECK_U8(field, json_key) do { \
+    const mj_node_t *n = mj_get(doc, r, json_key); \
+    if (n != NULL && !mj_is_null(n)) { \
+        uint8_t want = (uint8_t)mj_num_or(n, -1); \
+        if (got->field != want) { \
+            record_failure(vector, "record %zu " json_key " = %u, want %u", \
+                           i, (unsigned)got->field, (unsigned)want); \
+            return false; \
+        } \
+    } \
+} while (0)
+
+        CHECK_U16(map_kpa,            "map_kpa");
+        CHECK_U16(maf_cgps,           "maf_cgps");
+        CHECK_U16(lambda_e4,          "lambda_e4");
+        CHECK_U16(abs_load_raw,       "abs_load_raw");
+        CHECK_U8(baro_kpa,            "baro_kpa");
+        CHECK_I8(ambient_temp_c,      "ambient_temp_c");
+        CHECK_I8(fuel_trim_short_pct, "fuel_trim_short_pct");
+        CHECK_I8(fuel_trim_long_pct,  "fuel_trim_long_pct");
+        CHECK_U32(pids_requested,     "pids_requested");
+        CHECK_U32(pids_answered,      "pids_answered");
+        CHECK_U16(poll_cadence_ms,    "poll_cadence_ms");
+
+        bool want_saturated = mj_bool_or(mj_get(doc, r, "map_saturated"), false);
+        bool got_saturated  = (got->map_kpa == 255);
+        if (got_saturated != want_saturated) {
+            record_failure(vector, "record %zu map_saturated = %d, want %d",
+                           i, got_saturated, want_saturated);
+            return false;
+        }
+
+#undef CHECK_U16
+#undef CHECK_U32
+#undef CHECK_I8
+#undef CHECK_U8
+    }
+
+    return true;
+}
+
 /* ── OTA update descriptor ────────────────────────────────────────────────── */
 
 static bool check_update(const char *dir, const char *vector,
@@ -1143,6 +1308,7 @@ static void run_vector(const char *root, const char *name)
     const mj_node_t *events   = mj_get(&doc, exp, "events");
     const mj_node_t *health   = mj_get(&doc, exp, "health");
     const mj_node_t *update   = mj_get(&doc, exp, "update");
+    const mj_node_t *obd_ext  = mj_get(&doc, exp, "obd_ext");
 
     if (segments != NULL && mj_len(&doc, segments) > 0) {
         ok = check_multi_segment(dir, name, &doc, segments);
@@ -1158,6 +1324,9 @@ static void run_vector(const char *root, const char *name)
     } else if (health != NULL) {
         ok = check_scan(dir, name, &doc, scan) &&
              check_health(dir, name, &doc, health);
+    } else if (obd_ext != NULL) {
+        ok = check_scan(dir, name, &doc, scan) &&
+             check_obd_ext(dir, name, &doc, obd_ext);
     } else if (scan != NULL) {
         ok = check_scan(dir, name, &doc, scan);
     } else if (header != NULL) {
