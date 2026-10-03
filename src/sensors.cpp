@@ -592,11 +592,21 @@ void sensors_fill_health(cairn_device_health_t *out, uint8_t health_state,
     out->reboot_count = reboot_count;
 }
 
-bool sensors_gnss_link_stats(uint16_t *sentences, uint16_t *errors)
+bool sensors_gnss_freshness(uint32_t *age_ms, uint8_t *sats)
 {
     if (s_gps == nullptr || s_status == nullptr || !s_status->gnss) return false;
 
-    *sentences = s_gps->sentences;
-    *errors    = s_gps->errors;
+    /*
+     * gpsData.ts is stamped with millis() each time the driver accepts a
+     * reading, on both transports — unlike the NMEA sentence counters, which
+     * only move on the direct-UART branch this board does not use.
+     */
+    if (s_gps->ts == 0) {
+        *age_ms = UINT32_MAX;
+    } else {
+        *age_ms = millis() - s_gps->ts;
+    }
+
+    *sats = s_gps->sat;
     return true;
 }

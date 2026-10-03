@@ -714,20 +714,22 @@ static void on_health(Lifecycle *lc, const fact_t *f)
              * location problem. A whole drive once recorded 272 GNSS samples
              * and not one fix, and the logs could not tell those apart.
              *
-             * Rendered as "n/a" rather than zero when the counters cannot be
-             * read. Printing 0/0 for both an unavailable counter and a
-             * genuinely silent receiver makes the one line meant to
-             * disambiguate ambiguous again — and the vendor driver updates
-             * these only on its internal-GNSS path, so unavailable is a real
-             * outcome rather than a theoretical one.
+             * Reported as reading freshness rather than NMEA sentence counts.
+             * Those counters are only updated on the driver's direct-UART
+             * branch, and gpsBegin() puts this board on the co-processor
+             * branch, so they read 0/0 whether the receiver is perfect or
+             * absent — which looks like evidence and is none.
              */
-            uint16_t nmea = 0, nmea_err = 0;
-            char link[32];
-            if (sensors_gnss_link_stats(&nmea, &nmea_err)) {
-                snprintf(link, sizeof(link), "nmea %u/%u err", (unsigned)nmea,
-                         (unsigned)nmea_err);
+            uint32_t age_ms = UINT32_MAX;
+            uint8_t  raw_sats = 0;
+            char link[40];
+            if (!sensors_gnss_freshness(&age_ms, &raw_sats)) {
+                snprintf(link, sizeof(link), "receiver not initialised");
+            } else if (age_ms == UINT32_MAX) {
+                snprintf(link, sizeof(link), "no reading ever arrived");
             } else {
-                snprintf(link, sizeof(link), "nmea n/a");
+                snprintf(link, sizeof(link), "last reading %ums ago",
+                         (unsigned)age_ms);
             }
 
             CAIRN_LOGI(TAG, "sensors: gnss NO FIX (sats=%u, %s) | "
