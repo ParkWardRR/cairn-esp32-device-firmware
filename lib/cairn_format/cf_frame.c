@@ -73,6 +73,7 @@ const char *cairn_record_type_name(uint8_t t)
     case CAIRN_REC_STATE_TRANSITION: return "STATE_TRANSITION";
     case CAIRN_REC_GNSS_GAP:         return "GNSS_GAP";
     case CAIRN_REC_POLICY_SNAPSHOT:  return "POLICY_SNAPSHOT";
+    case CAIRN_REC_OBD_EXTENDED:     return "OBD_EXTENDED";
     default:                         return "UNKNOWN";
     }
 }
