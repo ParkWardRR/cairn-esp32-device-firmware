@@ -274,7 +274,7 @@ static void run_selftest(void)
         t0 = millis();
         seal_ok = cairn_capture_seal(&cap, key_seed, key_pub,
                                      CAIRN_FIRMWARE_VERSION,
-                                     CAIRN_POLICY_VERSION, sealed_id);
+                                     CAIRN_POLICY_VERSION, 0, sealed_id);
         CAIRN_LOGI(TAG, "[%s] sealed in %u ms", seal_ok ? "PASS" : "FAIL",
                    (unsigned)(millis() - t0));
         log_stack_headroom("seal");

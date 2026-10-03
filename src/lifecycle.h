@@ -183,6 +183,8 @@ struct Lifecycle {
 
     cairn_dynamics_t dynamics = CAIRN_DYN_IDLE;
     uint16_t last_speed_cmps = CAIRN_U16_UNKNOWN;
+
+    uint32_t trip_seq = 0;
 };
 
 bool lifecycle_begin(Lifecycle *lc);

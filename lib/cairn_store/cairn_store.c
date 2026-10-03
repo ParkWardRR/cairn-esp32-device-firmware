@@ -910,7 +910,8 @@ static bool finish_seal(const char *dir, const char *id_text)
 
 bool cairn_capture_seal(cairn_capture_t *cap, const uint8_t seed[32],
                         const uint8_t pub[32], const char *firmware_version,
-                        uint8_t policy_version, uint8_t out_bundle_id[16])
+                        uint8_t policy_version, uint32_t trip_seq,
+                        uint8_t out_bundle_id[16])
 {
     if (!cap->active) return false;
 
@@ -942,6 +943,9 @@ bool cairn_capture_seal(cairn_capture_t *cap, const uint8_t seed[32],
     m.discarded_tail_bytes = cap->discarded_tail_bytes;
     snprintf(m.signature_algorithm, sizeof(m.signature_algorithm), "%s",
              CAIRN_SIGALG_ED25519);
+
+    m.has_trip_seq = true;
+    m.trip_seq     = trip_seq;
 
     m.member_count = collect_members(cap->dir, m.members, CAIRN_MAX_MEMBERS);
     if (m.member_count == 0) {

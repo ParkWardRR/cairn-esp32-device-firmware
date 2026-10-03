@@ -191,7 +191,8 @@ void cairn_capture_tick(cairn_capture_t *cap);
  */
 bool cairn_capture_seal(cairn_capture_t *cap, const uint8_t seed[32],
                         const uint8_t pub[32], const char *firmware_version,
-                        uint8_t policy_version, uint8_t out_bundle_id[16]);
+                        uint8_t policy_version, uint32_t trip_seq,
+                        uint8_t out_bundle_id[16]);
 
 /*
  * Finish any seal interrupted by power loss. Idempotent: run at every boot

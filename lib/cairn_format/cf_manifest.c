@@ -27,8 +27,10 @@
 #define K_RECOVERY_STATE   20
 #define K_DISCARDED_TAIL   21
 #define K_SIGNATURE_ALGO   22
+#define K_TRIP_SEQ         23
 
-#define MANIFEST_FIELD_COUNT 22
+#define MANIFEST_FIELD_COUNT_BASE 22
+#define MANIFEST_FIELD_COUNT_MAX  23
 
 /* Receipt keys. 1..10 are covered by the signature; 11 is the signature. */
 #define RK_VERSION      1
@@ -59,7 +61,8 @@ cairn_err_t cairn_manifest_encode(const cairn_manifest_t *m,
     cairn_cbor_enc_t e;
     cairn_cbor_init(&e, out, out_cap);
 
-    cairn_cbor_map(&e, MANIFEST_FIELD_COUNT);
+    cairn_cbor_map(&e, m->has_trip_seq ? MANIFEST_FIELD_COUNT_MAX
+                                      : MANIFEST_FIELD_COUNT_BASE);
 
     cairn_cbor_key(&e, K_MANIFEST_VERSION);
     cairn_cbor_uint(&e, m->manifest_version);
@@ -143,6 +146,11 @@ cairn_err_t cairn_manifest_encode(const cairn_manifest_t *m,
     cairn_cbor_key(&e, K_SIGNATURE_ALGO);
     cairn_cbor_text(&e, m->signature_algorithm);
 
+    if (m->has_trip_seq) {
+        cairn_cbor_key(&e, K_TRIP_SEQ);
+        cairn_cbor_uint(&e, m->trip_seq);
+    }
+
     if (e.overflow) return CAIRN_ERR_BUFFER_TOO_SMALL;
     if (written) *written = e.len;
     return CAIRN_OK;
@@ -161,7 +169,8 @@ static cairn_err_t manifest_decode_raw(const uint8_t *buf, size_t len,
     size_t n;
     cairn_err_t err = cairn_cbor_map_header(&d, &n);
     if (err != CAIRN_OK) return err;
-    if (n != MANIFEST_FIELD_COUNT) return CAIRN_ERR_MALFORMED;
+    if (n != MANIFEST_FIELD_COUNT_BASE && n != MANIFEST_FIELD_COUNT_MAX)
+        return CAIRN_ERR_MALFORMED;
 
     for (size_t i = 0; i < n; i++) {
         uint64_t key;
@@ -310,6 +319,11 @@ static cairn_err_t manifest_decode_raw(const uint8_t *buf, size_t len,
             if (strcmp(m->signature_algorithm, CAIRN_SIGALG_ED25519) != 0) {
                 return CAIRN_ERR_MALFORMED;
             }
+            break;
+        case K_TRIP_SEQ:
+            if ((err = cairn_cbor_uint_read(&d, &v)) != CAIRN_OK) return err;
+            m->trip_seq = (uint32_t)v;
+            m->has_trip_seq = true;
             break;
         default:
             return CAIRN_ERR_MALFORMED;

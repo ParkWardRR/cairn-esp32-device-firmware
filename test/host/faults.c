@@ -309,7 +309,7 @@ static bool seal_now(cairn_capture_t *cap, char id_out[27], uint8_t root_out[32]
     if (!cairn_identity_load(device_id, seed, pub, &boot)) return false;
 
     uint8_t bundle_id[16];
-    if (!cairn_capture_seal(cap, seed, pub, "cairn-fault-test", 1, bundle_id)) {
+    if (!cairn_capture_seal(cap, seed, pub, "cairn-fault-test", 1, 0, bundle_id)) {
         return false;
     }
     cairn_ulid_encode(bundle_id, id_out);

@@ -8,6 +8,7 @@
 #include "board_config.h"
 #include "cairn_log.h"
 #include "cairn_fs.h"
+#include "cairn_kv.h"
 #include "cairn_ota.h"
 #include "cairn_power.h"
 #include "cairn_sync.h"
@@ -265,6 +266,14 @@ bool lifecycle_begin(Lifecycle *lc)
 
     cairn_policy_defaults(&lc->policy);
     cairn_preroll_reset(&lc->preroll);
+
+    lc->trip_seq = cairn_kv_get_u32("trip_seq", 0);
+    if (cairn_kv_get_u32("trip_active", 0)) {
+        lc->capture = CaptureState::Active;
+        emit_policy_snapshot(lc);
+        emit_trip_event(lc, CAIRN_EVENT_TRIP_START, "resumed");
+        CAIRN_LOGI(TAG, "trip %u resumed across reboot", (unsigned)lc->trip_seq);
+    }
 
     /*
      * Sensing starts only after the capture is open. A fact arriving before
@@ -773,7 +782,7 @@ static void seal_and_reopen(Lifecycle *lc, uint8_t reason)
     uint8_t sealed_id[16];
     bool ok = cairn_capture_seal(&lc->cap, lc->key_seed, lc->key_public,
                                  CAIRN_FIRMWARE_VERSION, CAIRN_POLICY_VERSION,
-                                 sealed_id);
+                                 lc->trip_seq, sealed_id);
 
     /*
      * The seal is the deepest stack path this task takes — Merkle tree, CBOR
@@ -1273,6 +1282,10 @@ void lifecycle_tick(Lifecycle *lc)
              */
             set_capture_state(lc, CaptureState::Active, 1, 0);
 
+            lc->trip_seq++;
+            cairn_kv_set_u32("trip_seq", lc->trip_seq);
+            cairn_kv_set_u32("trip_active", 1);
+
             /* Policy first, then the pre-roll: the snapshot describes the
              * thresholds that admitted those very records, so it belongs ahead
              * of them in the chain. */
@@ -1314,6 +1327,7 @@ void lifecycle_tick(Lifecycle *lc)
                    now - lc->still_since_ms >= CAIRN_STOP_DWELL_MS) {
             set_capture_state(lc, CaptureState::Idle, 2, 0);
             lc->idle_since_ms = now;
+            cairn_kv_set_u32("trip_active", 0);
 
             /* Close any open gap before sealing, so the bundle's last word
              * about GNSS is accurate. */

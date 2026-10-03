@@ -397,6 +397,9 @@ typedef struct {
     uint8_t  recovery_state;
     uint32_t discarded_tail_bytes;
     char     signature_algorithm[16];
+
+    bool     has_trip_seq;
+    uint32_t trip_seq;
 } cairn_manifest_t;
 
 /*
