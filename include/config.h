@@ -121,6 +121,7 @@
 #define CAIRN_GNSS_PERIOD_MS      200
 #define CAIRN_IMU_WINDOW_MS       100
 #define CAIRN_OBD_PERIOD_MS       1200
+#define CAIRN_OBD_BATCH_PERIOD_MS 200
 
 /*
  * A GNSS poll that outruns the receiver is not a gap.

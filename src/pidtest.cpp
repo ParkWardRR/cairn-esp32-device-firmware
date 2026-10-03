@@ -205,19 +205,31 @@ void pidtest_tick(void)
     uint32_t dt = millis() - t0;
 
     /*
-     * One "41" echo per requested PID means the ECU answered all six in a
-     * single frame. Counting them is enough to tell success from an ECU that
-     * replied about only the first, without pretending to parse the payload.
+     * Count how many of the six requested PIDs appear in the response.
+     *
+     * A proper multi-PID response has ONE "41" header followed by all six
+     * PID+data pairs inline — not six separate "41 XX" replies. The previous
+     * counter looked for repeated "41 " occurrences and reported 1 on a
+     * perfect response, which was technically correct but read as failure.
+     * Counting PID codes after the "41" is the honest measure.
      */
-    int echoes = 0;
-    for (const char *q = multi; (q = strstr(q, "41 ")) != nullptr; q += 3) echoes++;
+    int pids_seen = 0;
+    {
+        const char *q = strstr(multi, "41 ");
+        if (q != nullptr) {
+            for (size_t i = 0; i < sizeof(k_multi) / sizeof(k_multi[0]); i++) {
+                char pat[4];
+                snprintf(pat, sizeof(pat), "%02X", (unsigned)k_multi[i]);
+                if (strstr(q, pat) != nullptr) pids_seen++;
+            }
+        }
+    }
 
     CAIRN_LOGI(TAG, "MULTI 6-PID (0C 0D 11 0E 0B 44) %d byte(s) in %u ms, "
-                    "%d x '41 ' echo: [%s]",
-               mn, (unsigned)dt, echoes, multi[0] ? multi : "no reply");
-    CAIRN_LOGI(TAG, "  read: 6 echoes means multi-PID works and the hot set "
-                    "costs one round trip; 1 echo means only the first PID "
-                    "answered; no reply means the request was rejected");
+                    "%d of 6 PIDs in reply: [%s]",
+               mn, (unsigned)dt, pids_seen, multi[0] ? multi : "no reply");
+    CAIRN_LOGI(TAG, "  read: 6/6 means multi-PID works and the hot set "
+                    "costs one round trip; fewer means partial or rejected");
 
     cairn_log_flush();
 }

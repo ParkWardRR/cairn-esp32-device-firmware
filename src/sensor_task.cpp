@@ -172,7 +172,6 @@ static void sensor_task(void *arg)
         }
 
         if ((int32_t)(now - next_obd) >= 0) {
-            next_obd = now + s_obd_period_ms;
 
             /*
              * The parked-silence invariant. While the controller holds the bus
@@ -189,38 +188,36 @@ static void sensor_task(void *arg)
              * current.
              */
             if (s_bus_silent) {
+                next_obd = now + s_obd_period_ms;
                 post_kind(FACT_OBD_SILENT, now);
             } else {
                 /*
-                 * Each record is stamped at the midpoint of its own read
-                 * window, not at the top of the cycle.
-                 *
-                 * Every PID in a record is a separate 120 ms request, so a
-                 * record's fields are not simultaneous however they are
-                 * labelled — an eight-PID cycle smears across about a second.
-                 * That is survivable for the slow channels and inherent to the
-                 * bus, but both records used to carry the same `now` taken
-                 * before either read began, which made the extended record's
-                 * data roughly 600 ms newer than its own timestamp claimed,
-                 * since the basic snapshot's five requests ran first.
-                 *
-                 * That mattered precisely where the data is most interesting:
-                 * during a pull, 600 ms is several hundred rpm and several psi,
-                 * so correlating boost against lambda against rpm inherited an
-                 * error nothing in the record disclosed. The midpoint halves
-                 * the residual smear and, more importantly, stops the two
-                 * records from claiming a simultaneity they never had.
-                 *
-                 * A genuinely simultaneous set needs all the PIDs in one
-                 * request, which is what the PIDTEST multi-PID probe exists to
-                 * find out.
+                 * Timestamps. When the batch succeeds, the six hot PIDs
+                 * arrived in a single CAN exchange (~56 ms) and are truly
+                 * simultaneous, so both records share the pre-batch timestamp.
+                 * When the batch fails or is absent, each record is stamped at
+                 * its own read midpoint, halving the smear from sequential
+                 * 120 ms requests.
                  */
+                obd_batch_t batch;
+                bool have_batch = sensors_read_obd_batch(&batch);
+                if (!have_batch) batch.valid = false;
+
+                next_obd = now + (batch.valid ? CAIRN_OBD_BATCH_PERIOD_MS
+                                              : s_obd_period_ms);
+
                 fact_t f;
                 memset(&f, 0, sizeof(f));
 
                 uint32_t t0 = millis();
-                bool     got_snapshot = sensors_read_obd(&f.data.obd);
-                f.monotonic_ms = t0 + (millis() - t0) / 2;
+                bool     got_snapshot = sensors_read_obd(&f.data.obd, &batch);
+                uint32_t t1 = millis();
+
+                if (batch.valid) {
+                    f.monotonic_ms = t0;
+                } else {
+                    f.monotonic_ms = t0 + (t1 - t0) / 2;
+                }
 
                 if (got_snapshot) {
                     f.kind = FACT_OBD_SNAPSHOT;
@@ -229,18 +226,18 @@ static void sensor_task(void *arg)
                     post_kind(FACT_OBD_SILENT, f.monotonic_ms);
                 }
 
-                /*
-                 * The extended PIDs ride the same cadence. Posted even when
-                 * none answered, because which of them an ECU supports is
-                 * only discoverable by asking and the answer is worth
-                 * recording once rather than re-deduced from silence.
-                 */
                 fact_t fe;
                 memset(&fe, 0, sizeof(fe));
 
                 uint32_t te0 = millis();
-                bool     got_ext = sensors_read_obd_extended(&fe.data.obd_ext);
-                fe.monotonic_ms = te0 + (millis() - te0) / 2;
+                bool     got_ext = sensors_read_obd_extended(&fe.data.obd_ext, &batch);
+                uint32_t te1 = millis();
+
+                if (batch.valid) {
+                    fe.monotonic_ms = t0;
+                } else {
+                    fe.monotonic_ms = te0 + (te1 - te0) / 2;
+                }
 
                 if (got_ext) {
                     fe.kind = FACT_OBD_EXTENDED;

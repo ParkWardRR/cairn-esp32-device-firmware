@@ -96,7 +96,30 @@ uint16_t sensors_accel_magnitude_mg(void);
  */
 bool sensors_gnss_freshness(uint32_t *age_ms, uint8_t *sats);
 
-bool sensors_read_obd(cairn_obd_snapshot_t *out);
+/*
+ * Multi-PID batch result.
+ *
+ * When the ECU supports it, a single Mode 01 request carries all six hot PIDs
+ * and comes back in ~56 ms instead of ~720 ms. The data is truly simultaneous
+ * — one CAN frame, one timestamp — which is why both read functions accept it:
+ * they fill their hot channels from the batch and skip their own sequential
+ * requests, reading only their cold channels.
+ *
+ * Confirmed working on the N20 DME (2026-10-03 drive, boot 155).
+ */
+typedef struct {
+    bool     valid;
+    int16_t  rpm;
+    int16_t  speed_kph;
+    uint8_t  throttle_pct;
+    int8_t   timing_deg;
+    uint16_t map_kpa;
+    uint16_t lambda_raw;
+} obd_batch_t;
+
+bool sensors_read_obd_batch(obd_batch_t *out);
+
+bool sensors_read_obd(cairn_obd_snapshot_t *out, const obd_batch_t *batch);
 
 /*
  * The boosted-engine and mixture PIDs: manifold pressure, barometric, mass air
@@ -108,7 +131,7 @@ bool sensors_read_obd(cairn_obd_snapshot_t *out);
  * that this ECU answers none of them, which is worth recording rather than
  * inferring from an absence.
  */
-bool sensors_read_obd_extended(cairn_obd_extended_t *out);
+bool sensors_read_obd_extended(cairn_obd_extended_t *out, const obd_batch_t *batch);
 
 #if CAIRN_PIDTEST
 /*
