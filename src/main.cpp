@@ -45,6 +45,9 @@ SET_LOOP_TASK_STACK_SIZE(CAIRN_LOOP_STACK_BYTES);
 static Lifecycle g_lifecycle;
 static bool      g_running = false;
 
+/* Non-zero while a deferred SD mount retry is pending; see setup(). */
+static uint32_t  g_mount_retry_at_ms = 0;
+
 /*
  * Report how close the deepest path came to the canary. A seal that completes
  * with 300 bytes to spare is a crash waiting for one more member in the bundle,
@@ -306,36 +309,19 @@ static void run_selftest(void)
 
 /* ── setup ────────────────────────────────────────────────────────────────── */
 
-void setup()
+
+/*
+ * Attempt the mount, retrying a few times within one call.
+ *
+ * Lifted out of setup() so loop() can retry it. The card slot on this unit is
+ * intermittent: observed mounting first-try on one boot and failing all five
+ * attempts on the next, with differing token errors (0x20, 0x3, 0x31, 0x53),
+ * on a card that verifies clean on a workstation. That is a marginal contact
+ * rather than a settling delay or a bad filesystem, and it is not something a
+ * one-second burst of retries reliably clears.
+ */
+static bool try_mount_sd(void)
 {
-    cairn_log_init(115200);
-    delay(300); /* let the serial port attach so the banner is not lost */
-
-    CAIRN_LOGI(TAG, "Cairn %s, policy v%d, built %s %s", CAIRN_FIRMWARE_VERSION,
-               CAIRN_POLICY_VERSION, __DATE__, __TIME__);
-    CAIRN_LOGI(TAG, "wake cause %d, free heap %u bytes",
-               (int)esp_sleep_get_wakeup_cause(), (unsigned)ESP.getFreeHeap());
-    log_partition_state();
-
-    pinMode(CAIRN_PIN_LED, OUTPUT);
-    digitalWrite(CAIRN_PIN_LED, HIGH);
-
-    /*
-     * Retry the mount rather than giving up on the first failure.
-     *
-     * SD-over-SPI is unreliable immediately after power-up: the card needs a
-     * settling period and its initialisation sequence can fail with a token
-     * error that succeeds on a second attempt. This unit does it often — mounts
-     * observed failing with "token error [0] 0x20" and "GO_IDLE_STATE failed"
-     * and then succeeding on the next reset, repeatedly, with a card that
-     * passes a full filesystem check on a workstation.
-     *
-     * One attempt was a genuine field defect, not just an inconvenience on the
-     * bench. A device in a car mounts the card on every ignition, and setup()
-     * returned on failure — so a single transient cost the whole drive, with no
-     * recovery until someone power-cycled it. Recording nothing is the one
-     * outcome this firmware exists to avoid.
-     */
     bool mounted = false;
     for (int attempt = 1; attempt <= CAIRN_SD_MOUNT_ATTEMPTS; attempt++) {
         if (SD.begin(CAIRN_PIN_SD_CS)) {
@@ -356,18 +342,17 @@ void setup()
         }
     }
 
-    if (!mounted) {
-        /*
-         * Without the card there is nowhere to put data, and capturing into RAM
-         * would only produce a trip that vanishes at the next reboot. Say so
-         * plainly and keep logging over UART.
-         */
-        CAIRN_LOGE(TAG, "SD mount failed on CS=%d after %d attempts. Nothing can "
-                        "be captured without a card; check that it is seated and "
-                        "formatted FAT32.",
-                   CAIRN_PIN_SD_CS, CAIRN_SD_MOUNT_ATTEMPTS);
-        return;
-    }
+    return mounted;
+}
+
+/*
+ * Everything that depends on the card, split out of setup() so it can run
+ * later if the mount only succeeds on a retry from loop().
+ *
+ * Returns true once the capture loop is live.
+ */
+static bool bring_up_after_mount(void)
+{
 
     CAIRN_LOGI(TAG, "SD mounted: %llu MiB total, %llu MiB used",
                SD.totalBytes() / (1024ULL * 1024ULL),
@@ -379,7 +364,7 @@ void setup()
 
     if (!cairn_store_init()) {
         CAIRN_LOGE(TAG, "cannot create the directory tree on the card");
-        return;
+        return false;
     }
 
     /*
@@ -425,7 +410,7 @@ void setup()
         CAIRN_LOGE(TAG, "format self-check failed; not capturing. Reflash with a "
                         "build whose CRC-32 and SHA-256 match the specification.");
         cairn_log_flush();
-        return;
+        return false;
     }
 #else
     (void)primitives_ok;
@@ -437,17 +422,54 @@ void setup()
 #if CAIRN_SELFTEST
     run_selftest();
     CAIRN_LOGI(TAG, "self-test build: halting rather than capturing");
-    return;
+    return false;
 #endif
 
     if (!lifecycle_begin(&g_lifecycle)) {
         CAIRN_LOGE(TAG, "lifecycle failed to start");
-        return;
+        return false;
     }
 
     g_running = true;
     digitalWrite(CAIRN_PIN_LED, LOW);
     CAIRN_LOGI(TAG, "capture loop running");
+
+    return true;
+}
+
+void setup()
+{
+    cairn_log_init(115200);
+    delay(300); /* let the serial port attach so the banner is not lost */
+
+    CAIRN_LOGI(TAG, "Cairn %s, policy v%d, built %s %s", CAIRN_FIRMWARE_VERSION,
+               CAIRN_POLICY_VERSION, __DATE__, __TIME__);
+    CAIRN_LOGI(TAG, "wake cause %d, free heap %u bytes",
+               (int)esp_sleep_get_wakeup_cause(), (unsigned)ESP.getFreeHeap());
+    log_partition_state();
+
+    pinMode(CAIRN_PIN_LED, OUTPUT);
+    digitalWrite(CAIRN_PIN_LED, HIGH);
+
+    if (!try_mount_sd()) {
+        /*
+         * Not fatal any more, and that change matters more than it looks.
+         *
+         * This used to return and leave the device inert until someone
+         * power-cycled it, so one marginal contact at ignition cost the whole
+         * drive — recording nothing, which is the single outcome this firmware
+         * exists to prevent. loop() now keeps retrying, so a slot that works
+         * on the third attempt a minute later still captures the journey.
+         */
+        CAIRN_LOGE(TAG, "SD mount failed on CS=%d after %d attempts; will keep "
+                        "retrying every %d ms. Check the card is seated.",
+                   CAIRN_PIN_SD_CS, CAIRN_SD_MOUNT_ATTEMPTS,
+                   CAIRN_SD_REMOUNT_RETRY_MS);
+        g_mount_retry_at_ms = millis() + CAIRN_SD_REMOUNT_RETRY_MS;
+        return;
+    }
+
+    bring_up_after_mount();
 }
 
 void loop()
@@ -458,6 +480,22 @@ void loop()
          * reaches the card, and the LED stays lit as a visible fault.
          */
         cairn_log_tick();
+
+        /* Keep trying to mount. A marginal card contact that fails at boot
+         * often succeeds moments later, and giving up permanently turns that
+         * into a drive recorded nowhere. */
+        if (g_mount_retry_at_ms != 0 &&
+            (int32_t)(millis() - g_mount_retry_at_ms) >= 0) {
+            if (try_mount_sd()) {
+                CAIRN_LOGW(TAG, "SD mounted on a deferred retry; bringing the "
+                                "capture path up now");
+                g_mount_retry_at_ms = 0;
+                bring_up_after_mount();
+            } else {
+                g_mount_retry_at_ms = millis() + CAIRN_SD_REMOUNT_RETRY_MS;
+            }
+        }
+
         delay(1000);
         return;
     }

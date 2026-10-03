@@ -72,6 +72,26 @@ uint16_t sensors_recent_accel_rms_mg(void);
  */
 uint16_t sensors_accel_magnitude_mg(void);
 
+/*
+ * NMEA parse counters from the receiver, for telling two failures apart.
+ *
+ * A satellite count of zero is ambiguous on a bench: an antenna that is not
+ * connected and a receiver indoors with no sky view both report zero, and the
+ * driver exposes only satellites *used in a fix* — not satellites in view with
+ * their signal strengths, which is what would settle it outright.
+ *
+ * These counters at least separate "the receiver is not talking to us at all"
+ * from "the receiver is fine and can see nothing", which the satellite count
+ * alone cannot do. A climbing error count points at a baud or wiring fault
+ * rather than at the sky.
+ *
+ * Added after a whole drive recorded 272 GNSS samples and not one fix, where
+ * the logs could not distinguish a disconnected antenna from a cold receiver.
+ *
+ * Returns false when GNSS is not initialised.
+ */
+bool sensors_gnss_link_stats(uint16_t *sentences, uint16_t *errors);
+
 bool sensors_read_obd(cairn_obd_snapshot_t *out);
 
 /* Battery voltage in millivolts, read through the coprocessor. */

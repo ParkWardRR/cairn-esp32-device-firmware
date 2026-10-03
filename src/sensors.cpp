@@ -591,3 +591,12 @@ void sensors_fill_health(cairn_device_health_t *out, uint8_t health_state,
     out->health_state = health_state;
     out->reboot_count = reboot_count;
 }
+
+bool sensors_gnss_link_stats(uint16_t *sentences, uint16_t *errors)
+{
+    if (s_gps == nullptr || s_status == nullptr || !s_status->gnss) return false;
+
+    *sentences = s_gps->sentences;
+    *errors    = s_gps->errors;
+    return true;
+}

@@ -705,9 +705,35 @@ static void on_health(Lifecycle *lc, const fact_t *f)
                        (unsigned)lc->start_score_e2, (unsigned)lc->stop_score_e2,
                        lc->have_recent_obd ? "live" : "absent");
         } else {
-            CAIRN_LOGI(TAG, "sensors: gnss NO FIX (sats=%u, needs sky view) | "
+            /*
+             * Report the NMEA counters alongside the satellite count, because
+             * a zero satellite count on its own is ambiguous. Climbing
+             * sentences with no satellites means the receiver is healthy and
+             * simply cannot see sky; a frozen count means it is not talking at
+             * all, which is a wiring or antenna-power fault rather than a
+             * location problem. A whole drive once recorded 272 GNSS samples
+             * and not one fix, and the logs could not tell those apart.
+             *
+             * Rendered as "n/a" rather than zero when the counters cannot be
+             * read. Printing 0/0 for both an unavailable counter and a
+             * genuinely silent receiver makes the one line meant to
+             * disambiguate ambiguous again — and the vendor driver updates
+             * these only on its internal-GNSS path, so unavailable is a real
+             * outcome rather than a theoretical one.
+             */
+            uint16_t nmea = 0, nmea_err = 0;
+            char link[32];
+            if (sensors_gnss_link_stats(&nmea, &nmea_err)) {
+                snprintf(link, sizeof(link), "nmea %u/%u err", (unsigned)nmea,
+                         (unsigned)nmea_err);
+            } else {
+                snprintf(link, sizeof(link), "nmea n/a");
+            }
+
+            CAIRN_LOGI(TAG, "sensors: gnss NO FIX (sats=%u, %s) | "
                             "accel rms=%u mg | start=%u stop=%u | obd=%s",
-                       (unsigned)g->sats_used, (unsigned)lc->last_accel_rms_mg,
+                       (unsigned)g->sats_used, link,
+                       (unsigned)lc->last_accel_rms_mg,
                        (unsigned)lc->start_score_e2, (unsigned)lc->stop_score_e2,
                        lc->have_recent_obd ? "live" : "absent");
         }

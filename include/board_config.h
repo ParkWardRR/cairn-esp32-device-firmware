@@ -47,6 +47,11 @@
 #define CAIRN_SD_MOUNT_ATTEMPTS 5
 #define CAIRN_SD_MOUNT_RETRY_MS 250
 
+/* Interval for the deferred retry from loop() when the boot-time mount fails
+ * entirely. Longer than the in-burst delay: this is a marginal contact, not a
+ * settling period, so hammering it gains nothing. */
+#define CAIRN_SD_REMOUNT_RETRY_MS 15000
+
 #define CAIRN_PIN_SD_CS  5   /* microSD over SPI; the only bus this code owns */
 #define CAIRN_PIN_LED    4   /* lit while faulted, cleared once capturing */
 
