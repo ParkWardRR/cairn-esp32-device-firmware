@@ -72,6 +72,26 @@ static const pid_probe_t k_probes[] = {
     { 0x46, "AMBIENT_TEMP",     1, "A-40 C" },
     { 0x06, "FUEL_TRIM_SHORT",  1, "(A-128)*100/128 %" },
     { 0x07, "FUEL_TRIM_LONG",   1, "(A-128)*100/128 %" },
+
+    /*
+     * Probed because 0x0B saturates at 255 kPa absolute — about 22.3 psi gauge
+     * — which is inside the range a tuned car runs in, so the primary boost
+     * signal may flatten exactly where it is being judged.
+     *
+     * 0x4F byte D declares the vehicle's own manifold-pressure maximum as
+     * D * 10 kPa, which is the standard way to learn the real ceiling instead
+     * of assuming 255. 0x87 is defined as intake manifold absolute pressure
+     * with a wider range, but its scaling could not be sourced with
+     * confidence, so this prints the raw bytes and nothing is read from it yet.
+     * 0x70 is included for the same reason.
+     *
+     * 0x04 sits beside 0x43 deliberately: calculated load really is one byte
+     * and 0..100%, and conflating the two is the likely origin of the vendor
+     * library reading absolute load a byte at a time.
+     */
+    { 0x4F, "MAX_VALUES",       4, "D*10 kPa = declared IMAP max" },
+    { 0x87, "IMAP_WIDE",        5, "unverified; raw bytes only" },
+    { 0x70, "BOOST_CONTROL",    5, "0-2047.97 kPa; x0.03125 per bit" },
 };
 
 /*

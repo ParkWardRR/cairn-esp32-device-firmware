@@ -2377,8 +2377,8 @@ static bool row_obd_extended_layout(void)
     /* 230 kPa absolute against 101 ambient is about 18.7 psi of boost. */
     s.map_kpa             = 230;
     s.maf_cgps            = 4500;
-    s.lambda_e4           = 8800;
-    s.abs_load_pct_e1     = 1420;
+    s.lambda_e4           = 8800;  /* lambda 0.88 */
+    s.abs_load_raw        = 362;
     s.baro_kpa            = 101;
     s.ambient_temp_c      = 24;
     s.fuel_trim_short_pct = -3;
@@ -2393,8 +2393,8 @@ static bool row_obd_extended_layout(void)
     CHECK(p[0] == 230 && p[1] == 0, "map_kpa is not little-endian at offset 0");
     CHECK((uint16_t)(p[2] | (p[3] << 8)) == 4500, "maf_cgps wrong at offset 2");
     CHECK((uint16_t)(p[4] | (p[5] << 8)) == 8800, "lambda_e4 wrong at offset 4");
-    CHECK((uint16_t)(p[6] | (p[7] << 8)) == 1420,
-          "abs_load_pct_e1 wrong at offset 6; a load above 100%% must survive");
+    CHECK((uint16_t)(p[6] | (p[7] << 8)) == 362,
+          "abs_load_raw wrong at offset 6; raw 362 is about 142%% once converted");
     CHECK(p[8] == 101, "baro_kpa wrong at offset 8");
     CHECK((int8_t)p[9] == 24, "ambient_temp_c wrong at offset 9");
     CHECK((int8_t)p[10] == -3, "a negative short fuel trim did not survive");
@@ -2410,7 +2410,7 @@ static bool row_obd_extended_layout(void)
     s.map_kpa             = CAIRN_U16_UNKNOWN;
     s.maf_cgps            = CAIRN_U16_UNKNOWN;
     s.lambda_e4           = CAIRN_U16_UNKNOWN;
-    s.abs_load_pct_e1     = CAIRN_U16_UNKNOWN;
+    s.abs_load_raw        = CAIRN_U16_UNKNOWN;
     s.baro_kpa            = 0xFF;
     s.ambient_temp_c      = CAIRN_I8_UNKNOWN;
     s.fuel_trim_short_pct = CAIRN_I8_UNKNOWN;

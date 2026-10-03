@@ -398,6 +398,56 @@ static bool pid_value(byte pid, int *value)
     return s_obd.readPID(pid, *value);
 }
 
+/*
+ * Read a two-byte PID as the raw 16-bit value the ECU sent, bypassing
+ * normalizeData entirely.
+ *
+ * Needed because the library mishandles both of the two-byte PIDs this
+ * firmware cares about. 0x43 absolute load is read through getPercentageValue,
+ * which takes one byte and computes A * 100 / 255 — on a true 150% load
+ * (raw 0x017F) that yields 0.39%, and because A increments once per 100% of
+ * load the result sawtooths rather than saturating. 0x44 equivalence ratio is
+ * quantised to a 0..200 scale, discarding most of a 15-bit measurement.
+ *
+ * Both are standard-defined as ((A*256)+B) with their own scaling, so the raw
+ * pair is the honest thing to capture; the conversion belongs at decode, where
+ * it can be corrected without reflashing. Confirmed against SAE J1979 /
+ * ISO 15031-5 rather than inferred: see
+ * research_notes/BMW N20 OBD PID support/.
+ */
+static bool pid_raw_u16(uint8_t pid, uint16_t *out)
+{
+    if (s_obd.link == nullptr) return false;
+
+    char cmd[16];
+    snprintf(cmd, sizeof(cmd), "01%02X\r", (unsigned)pid);
+
+    char buf[128];
+    if (s_obd.link->sendCommand(cmd, buf, sizeof(buf), OBD_TIMEOUT_SHORT) == 0) {
+        return false;
+    }
+
+    /* Require the mode-and-PID echo: NO DATA and "SEARCHING" both arrive on
+     * this path and must not be parsed as a measurement. */
+    char want[8];
+    snprintf(want, sizeof(want), "41 %02X", (unsigned)pid);
+
+    const char *p = strstr(buf, want);
+    if (p == nullptr) return false;
+    p += strlen(want);
+
+    /* Two hex bytes, space separated, as the ELM-style reply formats them. */
+    if (!(p[0] == ' ' && isxdigit((unsigned char)p[1]) && isxdigit((unsigned char)p[2]) &&
+          p[3] == ' ' && isxdigit((unsigned char)p[4]) && isxdigit((unsigned char)p[5]))) {
+        return false;
+    }
+
+    uint8_t a = hex2uint8(p + 1);
+    uint8_t b = hex2uint8(p + 4);
+    *out = (uint16_t)((uint16_t)a << 8 | b);
+    return true;
+}
+
 bool sensors_read_obd(cairn_obd_snapshot_t *out)
 {
     if (s_status == nullptr || !s_status->obd) return false;
@@ -662,45 +712,41 @@ bool sensors_read_obd_extended(cairn_obd_extended_t *out)
      * the fuel's actual stoichiometric ratio.
      */
     requested++;
-    if (pid_value(PID_AIR_FUEL_EQUIV_RATIO, &v)) {
-        /*
-         * The library hands back a 0..200 scale, not the raw 16-bit ratio:
-         * normalizeData computes getLargeValue() * 200 / 65536, so lambda 0.88
-         * arrives as 88. Multiplying by 100 puts it in the ten-thousandths the
-         * record stores.
-         *
-         * This was storing the value verbatim, which recorded lambda 0.88 as
-         * 0.0088 — a hundredfold error that would have read as an impossibly
-         * rich mixture. Worth noting the resolution ceiling that follows: the
-         * library has already quantised to 0.01, so the extra two digits of the
-         * field are headroom for reading the PID raw later, not precision we
-         * have now.
-         */
-        long e4 = (long)v * 100L;
-        out->lambda_e4 = (uint16_t)((e4 < 0) ? 0 : ((e4 > 65534L) ? 65534L : e4));
-        answered++;
-    } else {
-        out->lambda_e4 = CAIRN_U16_UNKNOWN;
+    {
+        uint16_t raw = 0;
+        if (pid_raw_u16(PID_AIR_FUEL_EQUIV_RATIO, &raw)) {
+            /* Standard scaling is raw / 32768, so ten-thousandths are
+             * raw * 10000 / 32768. Full 15-bit resolution, unlike the
+             * library's 0..200 quantisation. */
+            uint32_t e4 = ((uint32_t)raw * 10000u) / 32768u;
+            out->lambda_e4 = (uint16_t)((e4 > 65534u) ? 65534u : e4);
+            answered++;
+        } else {
+            out->lambda_e4 = CAIRN_U16_UNKNOWN;
+        }
     }
 
     /*
-     * Absolute load, scaled by ten. The scaling is right in principle —
-     * absolute load genuinely exceeds 100% under boost — but it cannot help
-     * yet: PID 0x43 is a two-byte value spanning 0..25700%, and the library
-     * reads a single byte through getPercentageValue, which computes
-     * A * 100 / 255 and therefore caps at 100.
+     * Absolute load, stored as the raw 16-bit pair. Percent is raw * 100 / 255
+     * at decode, giving the standard's full 0..25700% range.
      *
-     * Recorded as the library reports it, with the ceiling documented rather
-     * than hidden. Whether to bypass normalizeData and read the pair raw is
-     * what the PID test build is for.
+     * Read raw because the library's path is wrong in a way that would be hard
+     * to spot in a log: getPercentageValue takes one byte and computes
+     * A * 100 / 255, so a true 150% load — raw 0x017F — reads as 0.39%, and
+     * since A increments once per 100% of load the value sawtooths rather than
+     * saturating. On a turbocharged engine, where absolute load legitimately
+     * reaches something like 190% under full boost, that is the whole range of
+     * interest rendered as noise near zero.
      */
     requested++;
-    if (pid_value(PID_ABSOLUTE_ENGINE_LOAD, &v)) {
-        long e1 = (long)v * 10L;
-        out->abs_load_pct_e1 = (uint16_t)((e1 > 65534L) ? 65534L : ((e1 < 0) ? 0 : e1));
-        answered++;
-    } else {
-        out->abs_load_pct_e1 = CAIRN_U16_UNKNOWN;
+    {
+        uint16_t raw = 0;
+        if (pid_raw_u16(PID_ABSOLUTE_ENGINE_LOAD, &raw)) {
+            out->abs_load_raw = raw;
+            answered++;
+        } else {
+            out->abs_load_raw = CAIRN_U16_UNKNOWN;
+        }
     }
 
     requested++;

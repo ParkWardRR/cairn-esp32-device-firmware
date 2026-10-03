@@ -622,7 +622,7 @@ typedef struct {
     uint16_t map_kpa;            /* intake manifold absolute, PID 0x0B */
     uint16_t maf_cgps;           /* mass air flow, 0.01 g/s, PID 0x10 */
     uint16_t lambda_e4;          /* equivalence ratio x10000, PID 0x44 */
-    uint16_t abs_load_pct_e1;    /* absolute load x10; exceeds 100%% on boost */
+    uint16_t abs_load_raw;       /* raw ((A*256)+B) for PID 0x43; pct = raw*100/255 */
     uint8_t  baro_kpa;           /* PID 0x33 */
     int8_t   ambient_temp_c;     /* PID 0x46 */
     int8_t   fuel_trim_short_pct;/* PID 0x06 */

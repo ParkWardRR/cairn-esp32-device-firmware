@@ -513,7 +513,7 @@ void cairn_encode_obd_extended(const cairn_obd_extended_t *s, uint8_t out[24])
     put_u16(out + 0, s->map_kpa);
     put_u16(out + 2, s->maf_cgps);
     put_u16(out + 4, s->lambda_e4);
-    put_u16(out + 6, s->abs_load_pct_e1);
+    put_u16(out + 6, s->abs_load_raw);
     out[8]  = s->baro_kpa;
     out[9]  = (uint8_t)s->ambient_temp_c;
     out[10] = (uint8_t)s->fuel_trim_short_pct;
