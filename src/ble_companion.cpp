@@ -136,6 +136,15 @@ class ServerCallbacks : public NimBLEServerCallbacks {
 static ServerCallbacks    s_server_cbs;
 static GnssFixCallbacks   s_gnss_fix_cbs;
 
+void ble_companion_clear_bonds(void)
+{
+    int count = NimBLEDevice::getNumBonds();
+    for (int i = count - 1; i >= 0; i--)
+        NimBLEDevice::deleteBond(NimBLEDevice::getBondedAddress(i));
+    if (count > 0)
+        CAIRN_LOGI(TAG, "cleared %d bond(s)", count);
+}
+
 bool ble_companion_begin(void)
 {
     NimBLEDevice::init(CAIRN_BLE_NAME);

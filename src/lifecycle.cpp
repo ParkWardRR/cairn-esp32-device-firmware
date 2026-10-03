@@ -1397,11 +1397,16 @@ void lifecycle_tick(Lifecycle *lc)
     if ((int32_t)(now - next_ble_notify_ms) >= 0) {
         next_ble_notify_ms = now + 1000;
 
-        if (lc->phone_gnss_active &&
-            now - lc->phone_gnss_last_ms >= CAIRN_PHONE_GNSS_STALE_MS) {
-            lc->phone_gnss_active = false;
-            if (!lc->have_recent_gnss_internal)
-                lc->have_recent_gnss = false;
+        if (lc->phone_gnss_active) {
+            bool stale = (now - lc->phone_gnss_last_ms >= CAIRN_PHONE_GNSS_STALE_MS);
+            if (stale || !ble_companion_connected()) {
+                lc->phone_gnss_active = false;
+                memset(&lc->last_gnss_phone, 0, sizeof(lc->last_gnss_phone));
+                if (lc->last_gnss.source_flags & CAIRN_SOURCE_PHONE)
+                    lc->last_gnss = lc->last_gnss_internal;
+                if (!lc->have_recent_gnss_internal)
+                    lc->have_recent_gnss = false;
+            }
         }
 
         if (ble_companion_connected()) {

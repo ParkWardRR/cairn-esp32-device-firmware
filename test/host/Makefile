@@ -42,9 +42,11 @@ SRC_DIR    := ../../src
 APP_SRC    := $(SRC_DIR)/preroll.c $(SRC_DIR)/policy.c $(OTA_DIR)/cairn_ota.c $(POWER_DIR)/cairn_power.c
 
 # The conformance runner needs the policy codec, which lives in src/.
+BLE_VECTORS     ?= $(realpath ../../../../..)/cairn-companion-ios-esp32-obd2-gps-ble/docs/golden-vectors.json
 CONFORMANCE_SRC := $(FORMAT_SRC) $(SRC_DIR)/policy.c minijson.c conformance.c
 FAULTS_SRC      := $(FORMAT_SRC) $(STORE_SRC) $(FS_SRC) $(APP_SRC) \
                    log_host.c platform_host.c faults.c
+BLE_VEC_SRC     := $(FORMAT_SRC) minijson.c ble_vectors.c
 
 # -Wconversion is deliberately absent but the rest is strict: this code does a
 # great deal of width narrowing between the wire format and C types, and a
@@ -59,7 +61,7 @@ SAN := -fsanitize=address,undefined -fno-omit-frame-pointer
 
 BUILD := build
 
-.PHONY: all run asan clean conformance faults
+.PHONY: all run asan clean conformance faults ble-vectors
 
 all: run
 
@@ -72,13 +74,19 @@ $(BUILD)/conformance: $(CONFORMANCE_SRC) $(FORMAT_DIR)/cairn_format.h minijson.h
 $(BUILD)/faults: $(FAULTS_SRC) $(STORE_DIR)/cairn_store.h $(STORE_DIR)/cairn_prune.h $(SRC_DIR)/preroll.h | $(BUILD)
 	$(CC) $(CFLAGS) $(FAULTS_SRC) -o $@
 
+$(BUILD)/ble-vectors: $(BLE_VEC_SRC) $(FORMAT_DIR)/cairn_format.h minijson.h | $(BUILD)
+	$(CC) $(CFLAGS) $(BLE_VEC_SRC) -lm -o $@
+
 conformance: $(BUILD)/conformance
 	$(BUILD)/conformance $(FIXTURES)
 
 faults: $(BUILD)/faults
 	$(BUILD)/faults
 
-run: conformance faults
+ble-vectors: $(BUILD)/ble-vectors
+	$(BUILD)/ble-vectors $(BLE_VECTORS)
+
+run: conformance faults ble-vectors
 
 # Undefined behaviour in the scan path would be a parser reading past a torn
 # segment — exactly the case the format exists to handle safely.
@@ -87,6 +95,8 @@ asan: | $(BUILD)
 	$(BUILD)/conformance-asan $(FIXTURES)
 	$(CC) $(CFLAGS) $(SAN) $(FAULTS_SRC) -o $(BUILD)/faults-asan
 	$(BUILD)/faults-asan
+	$(CC) $(CFLAGS) $(SAN) $(BLE_VEC_SRC) -lm -o $(BUILD)/ble-vectors-asan
+	$(BUILD)/ble-vectors-asan $(BLE_VECTORS)
 
 clean:
 	rm -rf $(BUILD)
