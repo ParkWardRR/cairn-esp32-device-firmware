@@ -32,9 +32,10 @@ struct SensorStatus {
 
 bool sensors_begin(SensorStatus *status);
 
-/* Re-attempt the subsystems that failed. GNSS in particular often appears only
- * after the vehicle has been powered for a while. */
-void sensors_retry_failed(SensorStatus *status);
+/* Re-attempt the subsystems that failed. OBD is only retried when bus_open is
+ * true, because s_obd.init() blocks ~5 s when the ECU does not answer and
+ * stalling the sensor task while parked gains nothing. */
+void sensors_retry_failed(SensorStatus *status, bool bus_open);
 
 /*
  * Fill a GNSS sample. Returns false when the receiver has produced nothing new,

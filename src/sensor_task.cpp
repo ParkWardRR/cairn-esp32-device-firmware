@@ -269,9 +269,7 @@ static void sensor_task(void *arg)
             s_retry_requested = false;
 
             if (!s_status->gnss || !s_status->obd || !s_status->imu) {
-                /* Re-initialising touches the same driver state this task owns,
-                 * so it happens here rather than on the controller. */
-                sensors_retry_failed(s_status);
+                sensors_retry_failed(s_status, !s_bus_silent);
             }
         }
 

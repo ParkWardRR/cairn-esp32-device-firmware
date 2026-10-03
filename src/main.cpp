@@ -441,7 +441,9 @@ static bool bring_up_after_mount(void)
 void setup()
 {
     cairn_log_init(115200);
-    delay(300); /* let the serial port attach so the banner is not lost */
+#if CAIRN_SELFTEST || CAIRN_PIDTEST
+    delay(300);
+#endif
 
     CAIRN_LOGI(TAG, "Cairn %s, policy v%d, built %s %s", CAIRN_FIRMWARE_VERSION,
                CAIRN_POLICY_VERSION, __DATE__, __TIME__);

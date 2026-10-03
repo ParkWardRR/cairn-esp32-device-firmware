@@ -426,6 +426,8 @@ static void enforce_bus_silence(Lifecycle *lc)
                             "%u ms, accel %u mg for %u ms); opening the bus",
                        (unsigned)de.battery_mv, (unsigned)de.voltage_high_ms,
                        (unsigned)de.accel_rms_mg, (unsigned)de.motion_ms);
+            if (!lc->sensors.obd)
+                sensor_task_request_retry();
         }
         lc->drive_confirmed = true;
     } else {

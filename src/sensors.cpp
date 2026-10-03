@@ -111,6 +111,12 @@ static void init_obd(SensorStatus *status)
      * low, for a modem that is not there. Nothing here ever calls the cellular
      * API, so that is wasted setup rather than a conflict — the coprocessor
      * link is UART2 and the GNSS in use reaches the receiver over that link.
+     *
+     * ECU init (s_obd.init()) is deferred. It times out after ~5 s when the
+     * ignition is off, which is the common cold-boot case. The bus-silence
+     * invariant prevents OBD traffic until a drive is confirmed anyway, so
+     * attempting it at boot costs five seconds of wall time for nothing. The
+     * retry path in sensors_retry_failed() handles it once the bus is open.
      */
     if (s_sys.begin()) {
         status->coprocessor = true;
@@ -118,22 +124,7 @@ static void init_obd(SensorStatus *status)
         CAIRN_LOGI(TAG, "coprocessor up, device type %u", s_sys.devType);
 
         s_obd.begin(s_sys.link);
-
-        if (s_obd.init()) {
-            status->obd = true;
-            CAIRN_LOGI(TAG, "ECU connected");
-
-            char buf[128] = { 0 };
-            if (s_obd.getVIN(buf, sizeof(buf))) {
-                /* A VIN is 17 characters; the driver's buffer is larger, so the
-                 * copy is bounded to the field and deliberately truncating. */
-                snprintf(status->vin, sizeof(status->vin), "%.17s", buf);
-                CAIRN_LOGI(TAG, "VIN %s", status->vin);
-            }
-        } else {
-            /* Not an error: the ignition may simply be off. */
-            CAIRN_LOGW(TAG, "ECU not responding (ignition off?)");
-        }
+        CAIRN_LOGI(TAG, "ECU init deferred to drive confirmed");
     } else {
         CAIRN_LOGE(TAG, "coprocessor init failed; retrying without OBD");
         s_sys.begin(false, false);
@@ -177,18 +168,24 @@ bool sensors_begin(SensorStatus *status)
     s_status = status;
 
     init_obd(status);
-    init_imu(status);
     init_gnss(status);
+    init_imu(status);
 
     return status->coprocessor;
 }
 
-void sensors_retry_failed(SensorStatus *status)
+void sensors_retry_failed(SensorStatus *status, bool bus_open)
 {
-    if (!status->obd && status->coprocessor) {
+    if (bus_open && !status->obd && status->coprocessor) {
         if (s_obd.init()) {
             status->obd = true;
-            CAIRN_LOGI(TAG, "ECU became available");
+            CAIRN_LOGI(TAG, "ECU connected");
+
+            char buf[128] = { 0 };
+            if (s_obd.getVIN(buf, sizeof(buf))) {
+                snprintf(status->vin, sizeof(status->vin), "%.17s", buf);
+                CAIRN_LOGI(TAG, "VIN %s", status->vin);
+            }
         }
     }
     if (!status->gnss) init_gnss(status);
