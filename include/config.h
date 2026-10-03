@@ -272,6 +272,16 @@
  * that the warning arrives before the canary does. */
 #define CAIRN_STACK_WARN_BYTES 4096
 
+/* ── BLE companion ───────────────────────────────────────────────────────── */
+
+#ifndef CAIRN_BLE_COMPANION
+#define CAIRN_BLE_COMPANION 0
+#endif
+#define CAIRN_BLE_NAME "Cairn"
+#ifndef CAIRN_PHONE_GNSS_STALE_MS
+#define CAIRN_PHONE_GNSS_STALE_MS 3000
+#endif
+
 /* ── sync policy ──────────────────────────────────────────────────────────── */
 
 #define CAIRN_SYNC_CONNECT_TIMEOUT_MS 20000

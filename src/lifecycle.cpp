@@ -7,6 +7,7 @@
 
 #include "board_config.h"
 #include "cairn_log.h"
+#include "ble_companion.h"
 #include "cairn_fs.h"
 #include "cairn_kv.h"
 #include "cairn_ota.h"
@@ -293,6 +294,10 @@ bool lifecycle_begin(Lifecycle *lc)
     emit_transition(lc, CAIRN_REGION_BUNDLE, 0, (uint8_t)BundleState::Open, 0,
                     lc->cap.recovery_state);
 
+    if (!ble_companion_begin()) {
+        CAIRN_LOGW(TAG, "BLE companion init failed; phone GPS unavailable");
+    }
+
     CAIRN_LOGI(TAG, "lifecycle up: boot %u, wake cause %d, sensors obd=%d imu=%d gnss=%d",
                (unsigned)lc->boot_count, (int)esp_sleep_get_wakeup_cause(),
                (int)lc->sensors.obd, (int)lc->sensors.imu, (int)lc->sensors.gnss);
@@ -482,10 +487,28 @@ static void close_gnss_gap(Lifecycle *lc, uint8_t cause)
 
 static void on_gnss_sample(Lifecycle *lc, const fact_t *f)
 {
-    close_gnss_gap(lc, lc->sensors.gnss ? CAIRN_GAP_NO_FIX
-                                        : CAIRN_GAP_POWERED_DOWN);
+    bool from_phone = (f->data.gnss.source_flags & CAIRN_SOURCE_PHONE) != 0;
 
-    lc->last_gnss = f->data.gnss;
+    if (from_phone) {
+        lc->last_gnss_phone    = f->data.gnss;
+        lc->phone_gnss_last_ms = f->monotonic_ms;
+        lc->phone_gnss_active  = true;
+        lc->last_gnss          = f->data.gnss;
+    } else {
+        close_gnss_gap(lc, lc->sensors.gnss ? CAIRN_GAP_NO_FIX
+                                            : CAIRN_GAP_POWERED_DOWN);
+        lc->last_gnss_internal        = f->data.gnss;
+        lc->have_recent_gnss_internal = true;
+        lc->internal_gnss_last_ms     = f->monotonic_ms;
+
+        bool phone_fresh = lc->phone_gnss_active &&
+                           (millis() - lc->phone_gnss_last_ms <
+                            CAIRN_PHONE_GNSS_STALE_MS) &&
+                           lc->last_gnss_phone.fix_type > 0;
+        if (!phone_fresh)
+            lc->last_gnss = f->data.gnss;
+    }
+
     lc->have_recent_gnss = true;
 
     uint8_t payload[32];
@@ -503,8 +526,12 @@ static void on_gnss_no_fix(Lifecycle *lc, const fact_t *f)
     }
     lc->gnss_expected_in_gap++;
 
-    /* A stale fix must not keep scoring motion forever. */
-    lc->have_recent_gnss = false;
+    lc->have_recent_gnss_internal = false;
+
+    bool phone_fresh = lc->phone_gnss_active &&
+                       (millis() - lc->phone_gnss_last_ms <
+                        CAIRN_PHONE_GNSS_STALE_MS);
+    lc->have_recent_gnss = phone_fresh;
 }
 
 static void on_utc_basis(Lifecycle *lc, const fact_t *f)
@@ -570,7 +597,7 @@ static uint8_t compose_health_state(const Lifecycle *lc,
 {
     uint8_t state = CAIRN_HEALTH_OK;
 
-    if (!lc->sensors.gnss || !lc->have_recent_gnss || lc->in_gnss_gap) {
+    if (!lc->sensors.gnss || !lc->have_recent_gnss_internal || lc->in_gnss_gap) {
         state |= CAIRN_HEALTH_DEGRADED_GNSS;
     }
 
@@ -1044,6 +1071,8 @@ static void maybe_standby(Lifecycle *lc)
     /* The receiver was powered down, so position is unknown until it reacquires
      * — and the degraded bitmap should say so rather than carry a stale fix. */
     lc->have_recent_gnss = false;
+    lc->have_recent_gnss_internal = false;
+    lc->phone_gnss_active = false;
     lc->have_recent_obd = false;
 
     /*
@@ -1354,6 +1383,32 @@ void lifecycle_tick(Lifecycle *lc)
         next_retry_ms = now + 60000;
         if (!lc->sensors.gnss || !lc->sensors.obd || !lc->sensors.imu) {
             sensor_task_request_retry();
+        }
+    }
+
+    /* ── BLE companion notifications (1 Hz) ────────────────────────────── */
+
+    static uint32_t next_ble_notify_ms = 0;
+    if ((int32_t)(now - next_ble_notify_ms) >= 0) {
+        next_ble_notify_ms = now + 1000;
+
+        if (lc->phone_gnss_active &&
+            now - lc->phone_gnss_last_ms >= CAIRN_PHONE_GNSS_STALE_MS) {
+            lc->phone_gnss_active = false;
+            if (!lc->have_recent_gnss_internal)
+                lc->have_recent_gnss = false;
+        }
+
+        if (ble_companion_connected()) {
+            uint32_t fix_age = lc->have_recent_gnss_internal
+                ? (now - lc->internal_gnss_last_ms)
+                : UINT32_MAX;
+            ble_companion_notify_quality(
+                lc->last_gnss_internal.fix_type,
+                lc->last_gnss_internal.sats_used,
+                lc->last_gnss_internal.hdop_e2,
+                fix_age);
+            ble_companion_notify_status();
         }
     }
 

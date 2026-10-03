@@ -558,6 +558,8 @@ cairn_err_t cairn_update_encode(const cairn_update_descriptor_t *d,
 #define CAIRN_U8_UNKNOWN  0xFF
 #define CAIRN_I8_UNKNOWN  ((int8_t)0x80)
 
+#define CAIRN_SOURCE_PHONE 0x20
+
 typedef struct {
     int32_t  lat_e7;
     int32_t  lon_e7;

@@ -27,6 +27,10 @@ bool sensor_task_start(SensorStatus *status);
 /* Take the next fact, if one is waiting. Non-blocking. */
 bool sensor_task_poll(fact_t *out);
 
+/* Post a fact from outside the sensing task (e.g. BLE companion).
+ * Non-blocking; returns false if the queue is full. */
+bool sensor_task_post_fact(const fact_t *f);
+
 /* Facts dropped because the controller could not keep up. Reported in
  * DEVICE_HEALTH so the loss appears in the data, not only in the log. */
 uint32_t sensor_task_dropped(void);

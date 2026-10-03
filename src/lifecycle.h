@@ -135,9 +135,16 @@ struct Lifecycle {
      * contributing to the motion score rather than vouching for it forever.
      */
     cairn_gnss_sample_t  last_gnss = {};
+    cairn_gnss_sample_t  last_gnss_internal = {};
+    cairn_gnss_sample_t  last_gnss_phone = {};
     cairn_obd_snapshot_t last_obd = {};
     bool     have_recent_gnss = false;
+    bool     have_recent_gnss_internal = false;
     bool     have_recent_obd = false;
+
+    uint32_t internal_gnss_last_ms = 0;
+    bool     phone_gnss_active = false;
+    uint32_t phone_gnss_last_ms = 0;
     uint16_t last_accel_rms_mg = 0;
 
     /* Dropped facts already mentioned in the log, so the warning is not

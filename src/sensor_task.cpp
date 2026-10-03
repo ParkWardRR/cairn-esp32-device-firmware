@@ -318,6 +318,12 @@ bool sensor_task_poll(fact_t *out)
     return xQueueReceive(s_queue, out, 0) == pdTRUE;
 }
 
+bool sensor_task_post_fact(const fact_t *f)
+{
+    if (s_queue == nullptr) return false;
+    return xQueueSend(s_queue, f, 0) == pdTRUE;
+}
+
 uint32_t sensor_task_dropped(void) { return s_dropped; }
 
 void sensor_task_request_retry(void) { s_retry_requested = true; }
