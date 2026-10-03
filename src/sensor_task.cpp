@@ -173,6 +173,20 @@ static void sensor_task(void *arg)
                 } else {
                     post_kind(FACT_OBD_SILENT, now);
                 }
+
+                /*
+                 * The extended PIDs ride the same cadence. Posted even when
+                 * none answered, because which of them an ECU supports is
+                 * only discoverable by asking and the answer is worth
+                 * recording once rather than re-deduced from silence.
+                 */
+                fact_t fe;
+                memset(&fe, 0, sizeof(fe));
+                fe.monotonic_ms = now;
+                if (sensors_read_obd_extended(&fe.data.obd_ext)) {
+                    fe.kind = FACT_OBD_EXTENDED;
+                    post(&fe);
+                }
             }
         }
 

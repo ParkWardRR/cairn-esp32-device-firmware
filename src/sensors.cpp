@@ -610,3 +610,110 @@ bool sensors_gnss_freshness(uint32_t *age_ms, uint8_t *sats)
     *sats = s_gps->sat;
     return true;
 }
+
+bool sensors_read_obd_extended(cairn_obd_extended_t *out)
+{
+    if (s_status == nullptr || !s_status->obd) return false;
+
+    memset(out, 0, sizeof(*out));
+
+    uint32_t requested = 0, answered = 0;
+    int      v = 0;
+
+    /*
+     * Boost. Stored absolute, as PID 0x0B reports it, with barometric
+     * alongside so gauge pressure is recoverable at decode. Computing gauge
+     * here would bake today's barometric reading into the record permanently.
+     */
+    requested++;
+    if (pid_value(PID_INTAKE_MAP, &v)) {
+        out->map_kpa = (v < 0) ? 0 : (uint16_t)((v > 65534) ? 65534 : v);
+        answered++;
+    } else {
+        out->map_kpa = CAIRN_U16_UNKNOWN;
+    }
+
+    requested++;
+    if (pid_value(PID_BAROMETRIC, &v)) {
+        out->baro_kpa = (uint8_t)((v < 0) ? 0 : ((v > 254) ? 254 : v));
+        answered++;
+    } else {
+        out->baro_kpa = 0xFF;
+    }
+
+    /* Mass air flow in centigrams per second, so a u16 spans a turbo's range
+     * without the fractional loss a whole-gram field would cause at idle. */
+    requested++;
+    if (pid_value(PID_MAF_FLOW, &v)) {
+        long cg = (long)v * 100L;
+        out->maf_cgps = (uint16_t)((cg > 65534L) ? 65534L : ((cg < 0) ? 0 : cg));
+        answered++;
+    } else {
+        out->maf_cgps = CAIRN_U16_UNKNOWN;
+    }
+
+    /*
+     * Mixture. The equivalence ratio is the signal worth having on a tuned
+     * engine: 1.0 is stoichiometric and anything below is rich, independent of
+     * the fuel's actual stoichiometric ratio.
+     */
+    requested++;
+    if (pid_value(PID_AIR_FUEL_EQUIV_RATIO, &v)) {
+        out->lambda_e4 = (uint16_t)((v < 0) ? 0 : ((v > 65534) ? 65534 : v));
+        answered++;
+    } else {
+        out->lambda_e4 = CAIRN_U16_UNKNOWN;
+    }
+
+    /* Absolute load exceeds 100% under boost, so it is scaled by ten rather
+     * than clamped into a percentage byte. */
+    requested++;
+    if (pid_value(PID_ABSOLUTE_ENGINE_LOAD, &v)) {
+        long e1 = (long)v * 10L;
+        out->abs_load_pct_e1 = (uint16_t)((e1 > 65534L) ? 65534L : ((e1 < 0) ? 0 : e1));
+        answered++;
+    } else {
+        out->abs_load_pct_e1 = CAIRN_U16_UNKNOWN;
+    }
+
+    requested++;
+    if (pid_value(PID_AMBIENT_TEMP, &v)) {
+        out->ambient_temp_c = sat_i8(v);
+        answered++;
+    } else {
+        out->ambient_temp_c = CAIRN_I8_UNKNOWN;
+    }
+
+    /*
+     * Fuel trims. A tune that is lying to the ECU shows up here before it shows
+     * up anywhere else: large persistent trims mean the closed loop is fighting
+     * the fuelling.
+     */
+    requested++;
+    if (pid_value(PID_SHORT_TERM_FUEL_TRIM_1, &v)) {
+        out->fuel_trim_short_pct = sat_i8(v);
+        answered++;
+    } else {
+        out->fuel_trim_short_pct = CAIRN_I8_UNKNOWN;
+    }
+
+    requested++;
+    if (pid_value(PID_LONG_TERM_FUEL_TRIM_1, &v)) {
+        out->fuel_trim_long_pct = sat_i8(v);
+        answered++;
+    } else {
+        out->fuel_trim_long_pct = CAIRN_I8_UNKNOWN;
+    }
+
+    out->pids_requested = requested;
+    out->pids_answered  = answered;
+    out->poll_cadence_ms = CAIRN_OBD_PERIOD_MS;
+
+    /*
+     * Returned even when nothing answered, unlike OBD_SNAPSHOT. Which of these
+     * PIDs a given ECU supports is unknown until asked, and a record of eight
+     * sentinels with pids_answered = 0 is the evidence that it supports none —
+     * which is worth recording once rather than inferring from silence.
+     */
+    return true;
+}

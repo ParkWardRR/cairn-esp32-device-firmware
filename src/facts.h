@@ -35,6 +35,7 @@ typedef enum : uint8_t {
     FACT_MOTION,           /* live accelerometer RMS, for scoring between windows */
     FACT_OBD_SNAPSHOT,     /* at least one PID answered */
     FACT_OBD_SILENT,       /* the ECU answered nothing */
+    FACT_OBD_EXTENDED,     /* boost, mixture and trims; see sensors_read_obd_extended */
     FACT_HEALTH,           /* a device health reading */
 } fact_kind_t;
 
@@ -53,6 +54,7 @@ typedef struct {
         cairn_gnss_sample_t   gnss;
         cairn_imu_summary_t   imu;
         cairn_obd_snapshot_t  obd;
+        cairn_obd_extended_t  obd_ext;
         cairn_device_health_t health;
 
         struct {

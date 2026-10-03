@@ -507,6 +507,22 @@ void cairn_encode_obd_snapshot(const cairn_obd_snapshot_t *s, uint8_t out[24])
     put_u16(out + 20, s->poll_cadence_ms);
 }
 
+void cairn_encode_obd_extended(const cairn_obd_extended_t *s, uint8_t out[24])
+{
+    memset(out, 0, 24);
+    put_u16(out + 0, s->map_kpa);
+    put_u16(out + 2, s->maf_cgps);
+    put_u16(out + 4, s->lambda_e4);
+    put_u16(out + 6, s->abs_load_pct_e1);
+    out[8]  = s->baro_kpa;
+    out[9]  = (uint8_t)s->ambient_temp_c;
+    out[10] = (uint8_t)s->fuel_trim_short_pct;
+    out[11] = (uint8_t)s->fuel_trim_long_pct;
+    put_u32(out + 12, s->pids_requested);
+    put_u32(out + 16, s->pids_answered);
+    put_u16(out + 20, s->poll_cadence_ms);
+}
+
 void cairn_encode_device_health(const cairn_device_health_t *s, uint8_t out[16])
 {
     memset(out, 0, 16);

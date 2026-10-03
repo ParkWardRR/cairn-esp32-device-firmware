@@ -57,6 +57,7 @@ typedef enum {
     CAIRN_REC_STATE_TRANSITION = 0x07,
     CAIRN_REC_GNSS_GAP         = 0x08,
     CAIRN_REC_POLICY_SNAPSHOT  = 0x09,
+    CAIRN_REC_OBD_EXTENDED     = 0x0A,
 } cairn_record_type_t;
 
 bool cairn_record_type_known(uint8_t t);
@@ -603,6 +604,35 @@ typedef struct {
 } cairn_obd_snapshot_t;
 
 void cairn_encode_obd_snapshot(const cairn_obd_snapshot_t *s, uint8_t out[24]);
+
+/*
+ * OBD_EXTENDED (§4.10) — the boosted-engine and mixture signals, 24 bytes.
+ *
+ * A separate record rather than more fields on OBD_SNAPSHOT, which has only two
+ * reserved bytes left. Splitting also means a car that answers the basic PIDs
+ * but not these still produces clean OBD_SNAPSHOT records instead of a single
+ * record half full of sentinels.
+ *
+ * Pressures are stored absolute, as the ECU reports them. Gauge boost is
+ * map_kpa minus baro_kpa, converted at decode — storing gauge would bake a
+ * barometric assumption permanently into the recorded data, and the point of
+ * this format is that the raw measurement survives.
+ */
+typedef struct {
+    uint16_t map_kpa;            /* intake manifold absolute, PID 0x0B */
+    uint16_t maf_cgps;           /* mass air flow, 0.01 g/s, PID 0x10 */
+    uint16_t lambda_e4;          /* equivalence ratio x10000, PID 0x44 */
+    uint16_t abs_load_pct_e1;    /* absolute load x10; exceeds 100%% on boost */
+    uint8_t  baro_kpa;           /* PID 0x33 */
+    int8_t   ambient_temp_c;     /* PID 0x46 */
+    int8_t   fuel_trim_short_pct;/* PID 0x06 */
+    int8_t   fuel_trim_long_pct; /* PID 0x07 */
+    uint32_t pids_requested;
+    uint32_t pids_answered;
+    uint16_t poll_cadence_ms;
+} cairn_obd_extended_t;
+
+void cairn_encode_obd_extended(const cairn_obd_extended_t *s, uint8_t out[24]);
 
 typedef struct {
     uint16_t battery_mv;

@@ -98,6 +98,18 @@ bool sensors_gnss_freshness(uint32_t *age_ms, uint8_t *sats);
 
 bool sensors_read_obd(cairn_obd_snapshot_t *out);
 
+/*
+ * The boosted-engine and mixture PIDs: manifold pressure, barometric, mass air
+ * flow, equivalence ratio, absolute load, ambient temperature and both fuel
+ * trims.
+ *
+ * Separate from sensors_read_obd because support varies per vehicle. Always
+ * returns true: a record of sentinels with pids_answered = 0 is the evidence
+ * that this ECU answers none of them, which is worth recording rather than
+ * inferring from an absence.
+ */
+bool sensors_read_obd_extended(cairn_obd_extended_t *out);
+
 /* Battery voltage in millivolts, read through the coprocessor. */
 uint16_t sensors_battery_mv(void);
 

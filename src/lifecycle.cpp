@@ -526,6 +526,20 @@ static void on_obd_snapshot(Lifecycle *lc, const fact_t *f)
     emit_capture_record(lc, CAIRN_REC_OBD_SNAPSHOT, 1, payload, sizeof(payload));
 }
 
+/*
+ * The boost and mixture record goes to the capture chain like the basic
+ * snapshot, and deliberately does not touch have_recent_obd: that flag feeds
+ * the motion score, which reads speed and RPM from OBD_SNAPSHOT. An ECU that
+ * answers none of the extended PIDs must not therefore look like an ECU that
+ * has gone silent.
+ */
+static void on_obd_extended(Lifecycle *lc, const fact_t *f)
+{
+    uint8_t payload[24];
+    cairn_encode_obd_extended(&f->data.obd_ext, payload);
+    emit_capture_record(lc, CAIRN_REC_OBD_EXTENDED, 1, payload, sizeof(payload));
+}
+
 static void on_obd_silent(Lifecycle *lc)
 {
     /* No snapshot is written: a reading where nothing answered is a gap, not an
@@ -1149,6 +1163,7 @@ void lifecycle_tick(Lifecycle *lc)
         case FACT_GNSS_UTC_BASIS: on_utc_basis(lc, &f); break;
         case FACT_IMU_SUMMARY:   on_imu_summary(lc, &f); break;
         case FACT_OBD_SNAPSHOT:  on_obd_snapshot(lc, &f); break;
+        case FACT_OBD_EXTENDED:  on_obd_extended(lc, &f); break;
         case FACT_OBD_SILENT:    on_obd_silent(lc); break;
         case FACT_HEALTH:        on_health(lc, &f); break;
 

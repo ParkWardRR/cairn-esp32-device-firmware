@@ -2360,6 +2360,72 @@ static bool row_resume_restores_record_counts(void)
     return true;
 }
 
+/*
+ * OBD_EXTENDED encodes to the layout §4.11 specifies, with every unavailable
+ * sentinel preserved.
+ *
+ * The byte offsets are asserted explicitly rather than round-tripped through
+ * this implementation's own decoder, because a self-consistent encoder that
+ * disagrees with the specification is exactly the failure the ROM CRC wrapper
+ * already demonstrated: internally fine, rejected by every other reader.
+ */
+static bool row_obd_extended_layout(void)
+{
+    cairn_obd_extended_t s;
+    memset(&s, 0, sizeof(s));
+
+    /* 230 kPa absolute against 101 ambient is about 18.7 psi of boost. */
+    s.map_kpa             = 230;
+    s.maf_cgps            = 4500;
+    s.lambda_e4           = 8800;
+    s.abs_load_pct_e1     = 1420;
+    s.baro_kpa            = 101;
+    s.ambient_temp_c      = 24;
+    s.fuel_trim_short_pct = -3;
+    s.fuel_trim_long_pct  = 5;
+    s.pids_requested      = 8;
+    s.pids_answered       = 8;
+    s.poll_cadence_ms     = 2000;
+
+    uint8_t p[24];
+    cairn_encode_obd_extended(&s, p);
+
+    CHECK(p[0] == 230 && p[1] == 0, "map_kpa is not little-endian at offset 0");
+    CHECK((uint16_t)(p[2] | (p[3] << 8)) == 4500, "maf_cgps wrong at offset 2");
+    CHECK((uint16_t)(p[4] | (p[5] << 8)) == 8800, "lambda_e4 wrong at offset 4");
+    CHECK((uint16_t)(p[6] | (p[7] << 8)) == 1420,
+          "abs_load_pct_e1 wrong at offset 6; a load above 100%% must survive");
+    CHECK(p[8] == 101, "baro_kpa wrong at offset 8");
+    CHECK((int8_t)p[9] == 24, "ambient_temp_c wrong at offset 9");
+    CHECK((int8_t)p[10] == -3, "a negative short fuel trim did not survive");
+    CHECK((int8_t)p[11] == 5, "fuel_trim_long_pct wrong at offset 11");
+    CHECK(p[22] == 0 && p[23] == 0, "the reserved bytes are not zero");
+
+    /*
+     * Sentinels. An ECU answering none of these must encode as unavailable,
+     * not as zero — zero kPa of manifold pressure is a reading, and a wrong
+     * one.
+     */
+    memset(&s, 0, sizeof(s));
+    s.map_kpa             = CAIRN_U16_UNKNOWN;
+    s.maf_cgps            = CAIRN_U16_UNKNOWN;
+    s.lambda_e4           = CAIRN_U16_UNKNOWN;
+    s.abs_load_pct_e1     = CAIRN_U16_UNKNOWN;
+    s.baro_kpa            = 0xFF;
+    s.ambient_temp_c      = CAIRN_I8_UNKNOWN;
+    s.fuel_trim_short_pct = CAIRN_I8_UNKNOWN;
+    s.fuel_trim_long_pct  = CAIRN_I8_UNKNOWN;
+
+    cairn_encode_obd_extended(&s, p);
+
+    CHECK(p[0] == 0xFF && p[1] == 0xFF, "the map_kpa sentinel was not encoded");
+    CHECK(p[8] == 0xFF, "the baro_kpa sentinel was not encoded");
+    CHECK(p[9] == 0x80, "the ambient_temp_c sentinel was not encoded");
+    CHECK(p[10] == 0x80, "the short fuel trim sentinel was not encoded");
+
+    return true;
+}
+
 /* ── driver ───────────────────────────────────────────────────────────────── */
 
 typedef struct {
@@ -2398,6 +2464,7 @@ static const row_t ROWS[] = {
     { "ota",      "version ordering refuses rather than guesses", row_ota_version_ordering },
     { "ota",      "descriptor decoding is strict",              row_ota_descriptor_strictness },
     { "events",   "trip events round-trip through the card",    row_trip_event_round_trip },
+    { "obd",      "OBD_EXTENDED matches the specified layout",   row_obd_extended_layout },
     { "power",    "standby never strands unsent data",          row_standby_never_strands_data },
     { "power",    "waking favours the earliest reliable signal", row_wake_prefers_engine_voltage },
     { "bus",      "parked means silent on the vehicle bus",      row_parked_bus_silence },
