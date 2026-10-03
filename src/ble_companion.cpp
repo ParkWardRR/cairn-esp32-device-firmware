@@ -23,6 +23,8 @@ static NimBLECharacteristic *s_chr_status  = nullptr;
 static NimBLEServer         *s_server      = nullptr;
 
 static volatile bool s_connected = false;
+static volatile bool s_radio_off = false;
+static uint16_t      s_conn_handle = 0xFFFF;
 
 static uint16_t s_last_accepted_seq = 0;
 static uint16_t s_accepted_count    = 0;
@@ -100,6 +102,7 @@ class GnssFixCallbacks : public NimBLECharacteristicCallbacks {
 
 class ServerCallbacks : public NimBLEServerCallbacks {
     void onConnect(NimBLEServer *server, NimBLEConnInfo &info) override {
+        s_conn_handle       = info.getConnHandle();
         s_connected         = true;
         s_last_accepted_seq = 0;
         s_accepted_count    = 0;
@@ -112,9 +115,11 @@ class ServerCallbacks : public NimBLEServerCallbacks {
 
     void onDisconnect(NimBLEServer *server, NimBLEConnInfo &info,
                       int reason) override {
-        s_connected = false;
+        s_connected   = false;
+        s_conn_handle = 0xFFFF;
         CAIRN_LOGI(TAG, "companion disconnected (reason %d)", reason);
-        NimBLEDevice::startAdvertising();
+        if (!s_radio_off)
+            NimBLEDevice::startAdvertising();
     }
 
     void onAuthenticationComplete(NimBLEConnInfo &info) override {
@@ -225,6 +230,27 @@ void ble_companion_notify_status(void)
 
     s_chr_status->setValue(buf, sizeof(buf));
     s_chr_status->notify();
+}
+
+void ble_companion_radio_off(void)
+{
+    if (s_radio_off) return;
+    s_radio_off = true;
+
+    if (s_connected && s_conn_handle != 0xFFFF) {
+        s_server->disconnect(s_conn_handle);
+    }
+    NimBLEDevice::getAdvertising()->stop();
+    CAIRN_LOGI(TAG, "BLE radio released for WiFi");
+}
+
+void ble_companion_radio_on(void)
+{
+    if (!s_radio_off) return;
+    s_radio_off = false;
+
+    NimBLEDevice::getAdvertising()->start();
+    CAIRN_LOGI(TAG, "BLE advertising resumed");
 }
 
 #endif /* CAIRN_BLE_COMPANION */

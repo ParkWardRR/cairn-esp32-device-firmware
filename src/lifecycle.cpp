@@ -1019,6 +1019,8 @@ static void maybe_standby(Lifecycle *lc)
 
     lc->last_standby_blocker = nullptr;
 
+    ble_companion_radio_off();
+
     emit_transition(lc, CAIRN_REGION_HEALTH, CAIRN_POWER_STATE_AWAKE,
                     CAIRN_POWER_STATE_STANDBY, CAIRN_TRIGGER_POWER, 0);
     cairn_log_flush();
@@ -1107,6 +1109,8 @@ static void maybe_standby(Lifecycle *lc)
     if (r.wake_reason == CAIRN_WAKE_ENGINE_VOLTAGE) {
         emit_trip_event(lc, CAIRN_EVENT_HARSH_MOTION, "engine start detected");
     }
+
+    ble_companion_radio_on();
 }
 
 /*
@@ -1147,15 +1151,14 @@ static void maybe_sync(Lifecycle *lc)
     CAIRN_LOGI(TAG, "%u bundle(s) pending, %llu bytes; attempting sync",
                (unsigned)pending, (unsigned long long)bytes);
 
+    ble_companion_radio_off();
+
     set_link_state(lc, LinkState::Associating, 0);
 
     if (!cairn_sync_connect(CAIRN_SYNC_CONNECT_TIMEOUT_MS)) {
         set_link_state(lc, LinkState::Offline, 1);
-        /* Offline is normal, not a fault: the whole design is offline-first. */
-        /* Back off this retry only. Touching idle_since_ms here would reset
-         * the standby dwell, and an unreachable server is the one case where
-         * sleeping matters most. */
         lc->next_sync_ms = millis() + CAIRN_SYNC_RETRY_MS;
+        ble_companion_radio_on();
         return;
     }
 
@@ -1171,6 +1174,8 @@ static void maybe_sync(Lifecycle *lc)
 
     cairn_sync_disconnect();
     set_link_state(lc, LinkState::Offline, 0);
+
+    ble_companion_radio_on();
 
     /* Flush the log so the sync outcome is on the card even if power is cut
      * immediately afterwards. */
