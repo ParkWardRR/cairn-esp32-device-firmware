@@ -89,6 +89,21 @@ static const pid_probe_t k_probes[] = {
      * and 0..100%, and conflating the two is the likely origin of the vendor
      * library reading absolute load a byte at a time.
      */
+    /*
+     * Fuel composition. On a blended tank these two decide how the mixture
+     * data can be read at all: stoichiometric air-fuel ratio falls from about
+     * 14.7:1 on gasoline to roughly 9.8:1 on E85, so an AFR figure is
+     * meaningless without knowing the blend. Lambda is recorded instead
+     * precisely because it is blend-independent — 0.85 is fifteen per cent rich
+     * whatever is in the tank — but converting it to an AFR for display needs
+     * the ethanol fraction, and 0x52 is the standard place to ask for it.
+     *
+     * Whether an N20 answers is doubtful without a flex-fuel sensor, which is
+     * exactly why this prints rather than assumes.
+     */
+    { 0x51, "FUEL_TYPE",        1, "enum; 23 = diesel, 1 = gasoline" },
+    { 0x52, "ETHANOL_PCT",      1, "A*100/255 %" },
+
     { 0x4F, "MAX_VALUES",       4, "D*10 kPa = declared IMAP max" },
     { 0x87, "IMAP_WIDE",        5, "unverified; raw bytes only" },
     { 0x70, "BOOST_CONTROL",    5, "0-2047.97 kPa; x0.03125 per bit" },
