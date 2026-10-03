@@ -2345,6 +2345,18 @@ static bool row_resume_restores_record_counts(void)
           "numbers",
           resumed.record_counts[CAIRN_REC_STATE_TRANSITION], want_journal);
 
+    /*
+     * And the sequence range must still describe the capture chain alone. The
+     * journal is numbered independently from zero, so letting its range leak
+     * here makes the sealed manifest claim a span its segments do not hold —
+     * which is exactly what happened when folding the journal's counts was
+     * first switched on, because one flag governed both.
+     */
+    CHECK(resumed.first_seq == 0 && resumed.last_seq == 4,
+          "after resume the capture range is %u..%u, want 0..4 — the journal's "
+          "sequence numbers leaked into the capture's",
+          resumed.first_seq, resumed.last_seq);
+
     return true;
 }
 

@@ -397,16 +397,33 @@ static bool recover_segment(cairn_capture_t *cap, const char *path,
         }
     }
 
+    /*
+     * Record counts describe the whole bundle, so both chains fold in.
+     */
     if (fold_counts) {
         for (int t = 0; t < 256; t++) cap->record_counts[t] += res.record_counts[t];
+    }
 
-        if (res.frames > 0) {
-            if (!cap->have_any_frame) {
-                cap->first_seq = res.first_seq;
-                cap->have_any_frame = true;
-            }
-            cap->last_seq = res.last_seq;
+    /*
+     * The sequence range and have_any_frame describe the *capture* chain alone,
+     * and must not be touched when recovering the journal — the journal has its
+     * own independent chain, numbered from zero, and its sequence numbers mean
+     * nothing in the capture's terms.
+     *
+     * These used to live inside the fold_counts branch, which was fine only
+     * because the journal was recovered with fold_counts false. Turning that on
+     * so the journal's records would be counted therefore also let the
+     * journal's sequence range overwrite the capture's, and a resumed bundle
+     * sealed a manifest claiming a span its segments did not hold — observed as
+     * "manifest claims seq 0..28 but the segments hold 0..2". One flag was
+     * doing two unrelated jobs; now the condition says which chain it means.
+     */
+    if (chain == &cap->capture_chain && res.frames > 0) {
+        if (!cap->have_any_frame) {
+            cap->first_seq = res.first_seq;
+            cap->have_any_frame = true;
         }
+        cap->last_seq = res.last_seq;
     }
 
     chain->next_seq   = res.next.expected_seq;
