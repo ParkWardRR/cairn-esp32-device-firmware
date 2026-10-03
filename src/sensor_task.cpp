@@ -191,15 +191,42 @@ static void sensor_task(void *arg)
             if (s_bus_silent) {
                 post_kind(FACT_OBD_SILENT, now);
             } else {
+                /*
+                 * Each record is stamped at the midpoint of its own read
+                 * window, not at the top of the cycle.
+                 *
+                 * Every PID in a record is a separate 120 ms request, so a
+                 * record's fields are not simultaneous however they are
+                 * labelled — an eight-PID cycle smears across about a second.
+                 * That is survivable for the slow channels and inherent to the
+                 * bus, but both records used to carry the same `now` taken
+                 * before either read began, which made the extended record's
+                 * data roughly 600 ms newer than its own timestamp claimed,
+                 * since the basic snapshot's five requests ran first.
+                 *
+                 * That mattered precisely where the data is most interesting:
+                 * during a pull, 600 ms is several hundred rpm and several psi,
+                 * so correlating boost against lambda against rpm inherited an
+                 * error nothing in the record disclosed. The midpoint halves
+                 * the residual smear and, more importantly, stops the two
+                 * records from claiming a simultaneity they never had.
+                 *
+                 * A genuinely simultaneous set needs all the PIDs in one
+                 * request, which is what the PIDTEST multi-PID probe exists to
+                 * find out.
+                 */
                 fact_t f;
                 memset(&f, 0, sizeof(f));
-                f.monotonic_ms = now;
 
-                if (sensors_read_obd(&f.data.obd)) {
+                uint32_t t0 = millis();
+                bool     got_snapshot = sensors_read_obd(&f.data.obd);
+                f.monotonic_ms = t0 + (millis() - t0) / 2;
+
+                if (got_snapshot) {
                     f.kind = FACT_OBD_SNAPSHOT;
                     post(&f);
                 } else {
-                    post_kind(FACT_OBD_SILENT, now);
+                    post_kind(FACT_OBD_SILENT, f.monotonic_ms);
                 }
 
                 /*
@@ -210,8 +237,12 @@ static void sensor_task(void *arg)
                  */
                 fact_t fe;
                 memset(&fe, 0, sizeof(fe));
-                fe.monotonic_ms = now;
-                if (sensors_read_obd_extended(&fe.data.obd_ext)) {
+
+                uint32_t te0 = millis();
+                bool     got_ext = sensors_read_obd_extended(&fe.data.obd_ext);
+                fe.monotonic_ms = te0 + (millis() - te0) / 2;
+
+                if (got_ext) {
                     fe.kind = FACT_OBD_EXTENDED;
                     post(&fe);
                 }

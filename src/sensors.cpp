@@ -678,9 +678,26 @@ uint16_t sensors_battery_mv(void)
      * device. Three attempts, ~60 ms worst case, against a reading that governs
      * whether an OTA write is safe.
      */
+    /*
+     * Accepted only inside a range a vehicle supply can actually occupy.
+     *
+     * The guard used to be v > 0, which treats any positive number as a
+     * measurement. That is the same mistake as decoding a sentinel: a
+     * coprocessor that answers mid-warm-up with a fraction of a volt would be
+     * recorded as a real reading, and because a low reading is exactly what
+     * LOW_POWER and the OTA rail check look for, a warm-up artifact could flag
+     * a healthy car as low and refuse an update that was safe — silently,
+     * since the value looks plausible in isolation.
+     *
+     * The floor is below cranking, which sags well under 10 V on a tired
+     * battery and is a genuine reading worth keeping; the ceiling is above any
+     * charging voltage this alternator produces, measured at 14.49..14.91 V
+     * across the 2026-10-03 drive. Anything outside is the link talking, not
+     * the car, and absent is the honest answer.
+     */
     for (int attempt = 0; attempt < 3; attempt++) {
         float v = s_obd.getVoltage();
-        if (v > 0.0f) return (uint16_t)lroundf(v * 1000.0f);
+        if (v >= 6.0f && v <= 18.0f) return (uint16_t)lroundf(v * 1000.0f);
         if (attempt < 2) delay(20);
     }
 
@@ -916,6 +933,16 @@ bool sensors_read_obd_extended(cairn_obd_extended_t *out)
 
     out->pids_requested = requested;
     out->pids_answered  = answered;
+
+    /*
+     * The hot channels' cadence. The tiered cold channels arrive
+     * CAIRN_OBD_COLD_SLOTS times slower, so a reader wanting their interval
+     * multiplies. Recording the hot figure is the useful choice because it is
+     * the rate the boost and mixture fields — the ones this record is read for
+     * — actually arrive at, and which fields are which needs no guessing: a
+     * cold field not sampled this cycle is written absent, so the record says
+     * so itself.
+     */
     out->poll_cadence_ms = CAIRN_OBD_PERIOD_MS;
 
     /*
