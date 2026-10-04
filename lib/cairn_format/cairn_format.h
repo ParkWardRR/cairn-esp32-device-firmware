@@ -635,6 +635,8 @@ typedef struct {
     uint32_t pids_requested;
     uint32_t pids_answered;
     uint16_t poll_cadence_ms;
+    uint8_t  fuel_level_pct;     /* PID 0x2F, 0-100 %; 0xFF = absent */
+    uint8_t  _reserved_ext;
 } cairn_obd_extended_t;
 
 void cairn_encode_obd_extended(const cairn_obd_extended_t *s, uint8_t out[24]);

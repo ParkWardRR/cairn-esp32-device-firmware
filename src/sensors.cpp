@@ -611,7 +611,7 @@ int sensors_obd_multi_probe(const uint8_t *pids, int n, char *out, size_t cap)
  * already treats sentinels as absent, so a slow channel simply appears in one
  * record in seven instead of in all of them.
  */
-#define CAIRN_OBD_COLD_SLOTS 9
+#define CAIRN_OBD_COLD_SLOTS 10
 
 static uint8_t s_cold_phase;
 
@@ -970,6 +970,16 @@ bool sensors_read_obd_extended(cairn_obd_extended_t *out,
                 out->abs_load_raw = raw;
                 answered++;
             }
+        }
+    }
+
+    /* Cold slot 9. Fuel tank level; slow-moving but useful for economy. */
+    out->fuel_level_pct = CAIRN_U8_UNKNOWN;
+    if (cold_turn(9)) {
+        requested++;
+        if (pid_value(PID_FUEL_LEVEL, &v)) {
+            out->fuel_level_pct = (uint8_t)((v < 0) ? 0 : ((v > 100) ? 100 : v));
+            answered++;
         }
     }
 

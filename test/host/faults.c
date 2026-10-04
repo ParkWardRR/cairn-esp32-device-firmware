@@ -2383,6 +2383,7 @@ static bool row_obd_extended_layout(void)
     s.ambient_temp_c      = 24;
     s.fuel_trim_short_pct = -3;
     s.fuel_trim_long_pct  = 5;
+    s.fuel_level_pct      = 72;
     s.pids_requested      = 8;
     s.pids_answered       = 8;
     s.poll_cadence_ms     = 2000;
@@ -2399,7 +2400,8 @@ static bool row_obd_extended_layout(void)
     CHECK((int8_t)p[9] == 24, "ambient_temp_c wrong at offset 9");
     CHECK((int8_t)p[10] == -3, "a negative short fuel trim did not survive");
     CHECK((int8_t)p[11] == 5, "fuel_trim_long_pct wrong at offset 11");
-    CHECK(p[22] == 0 && p[23] == 0, "the reserved bytes are not zero");
+    CHECK(p[22] == 72, "fuel_level_pct wrong at offset 22");
+    CHECK(p[23] == 0, "the reserved byte is not zero");
 
     /*
      * Sentinels. An ECU answering none of these must encode as unavailable,
@@ -2415,6 +2417,7 @@ static bool row_obd_extended_layout(void)
     s.ambient_temp_c      = CAIRN_I8_UNKNOWN;
     s.fuel_trim_short_pct = CAIRN_I8_UNKNOWN;
     s.fuel_trim_long_pct  = CAIRN_I8_UNKNOWN;
+    s.fuel_level_pct      = CAIRN_U8_UNKNOWN;
 
     cairn_encode_obd_extended(&s, p);
 
@@ -2422,6 +2425,7 @@ static bool row_obd_extended_layout(void)
     CHECK(p[8] == 0xFF, "the baro_kpa sentinel was not encoded");
     CHECK(p[9] == 0x80, "the ambient_temp_c sentinel was not encoded");
     CHECK(p[10] == 0x80, "the short fuel trim sentinel was not encoded");
+    CHECK(p[22] == 0xFF, "the fuel_level_pct sentinel was not encoded");
 
     return true;
 }
