@@ -39,6 +39,37 @@ bool cairn_kv_get_blob_var(const char *key, void *out, size_t cap, size_t *len);
 /* Remove a key. Absent is success: the postcondition is "not there". */
 bool cairn_kv_erase(const char *key);
 
+/*
+ * Overwrite the flash that held deleted values.
+ *
+ * Erasing a key only marks its entry deleted: NVS physically wipes a page when
+ * it garbage-collects it, so a deleted private key can sit readable in the chip
+ * for as long as nothing forces a collection. This churns scratch data through
+ * the store until every page has been recycled, which erases the old bytes.
+ * Live values survive (NVS copies them forward); it costs about a second and some
+ * flash wear, so call it once, not on every boot. Returns false if it could not
+ * complete, in which case deleted values may still be recoverable.
+ *
+ * **Best effort, not a guarantee.** NVS collects the page with the most deleted
+ * entries, so a page where a few deleted values sit among live ones can survive
+ * the churn. Measured on the car's dongle: a PEM private key and certificate (large
+ * blobs, so their pages were mostly deleted) were overwritten; a Wi-Fi password in
+ * the Wi-Fi stack's own namespace was not. Only flash encryption (ROADMAP Phase 24)
+ * makes residue in the chip harmless.
+ */
+bool cairn_kv_scrub_freed(void);
+
+/*
+ * Erase the Wi-Fi credentials the ESP32 Wi-Fi stack persists on its own.
+ *
+ * Firmware that called WiFi.begin() left the SSID and password in the stack's NVS
+ * namespace (nvs.net80211), outside this module's namespace and so invisible to
+ * every other call here. The current firmware has no Wi-Fi to use them, and a
+ * password sitting in flash is a liability. Returns true if any were present.
+ * A no-op on the host.
+ */
+bool cairn_kv_erase_platform_wifi(void);
+
 uint32_t cairn_kv_get_u32(const char *key, uint32_t fallback);
 bool     cairn_kv_set_u32(const char *key, uint32_t value);
 

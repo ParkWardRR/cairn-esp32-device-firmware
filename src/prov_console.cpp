@@ -170,8 +170,9 @@ void prov_console_begin(void)
     /* Firmware that still had Wi-Fi left a password and a client private key in
      * NVS. This one has no use for them, so they go. */
     if (cairn_prov_erase_legacy_credentials()) {
-        CAIRN_LOGW(TAG, "erased Wi-Fi and client-certificate material left in NVS by "
-                        "earlier firmware; this device holds no network credentials");
+        CAIRN_LOGW(TAG, "removed any Wi-Fi and client-certificate material earlier firmware "
+                        "left in NVS and overwrote the flash that held it; this device "
+                        "holds no network credentials");
     }
 
     s_provisioned = load_provisioned();

@@ -169,6 +169,20 @@ bool cairn_kv_set_blob(const char *key, const void *data, size_t len)
     return true;
 }
 
+/* A file has no deleted-but-readable pages; count calls so tests can see that the
+ * device path would have run. */
+static int s_scrubs;
+int cairn_kv_host_scrub_count(void);
+int cairn_kv_host_scrub_count(void) { return s_scrubs; }
+
+bool cairn_kv_erase_platform_wifi(void) { return false; }
+
+bool cairn_kv_scrub_freed(void)
+{
+    s_scrubs++;
+    return true;
+}
+
 bool cairn_kv_erase(const char *key)
 {
     if (!s_open) return false;

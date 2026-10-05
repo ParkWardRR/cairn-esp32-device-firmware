@@ -7,6 +7,8 @@
 #include "cairn_prov.h"
 
 #define KV_SLOT "pv_slot"
+/* v2: v1 scrubbed the flash but left the Wi-Fi stack's own copy of the password. */
+#define KV_SCRUBBED "scrub_v2"
 
 static const char *const FIELDS[] = { "ssid", "pass", "crt", "key" };
 
@@ -39,5 +41,19 @@ bool cairn_prov_erase_legacy_credentials(void)
     /* The slot selector goes last: with it gone nothing can point at a slot. */
     if (cairn_kv_get_u32(KV_SLOT, 0xFFFFFFFFu) != 0xFFFFFFFFu) any = true;
     cairn_kv_erase(KV_SLOT);
+
+    /* The Wi-Fi stack keeps its own copy of the SSID and password. */
+    if (cairn_kv_erase_platform_wifi()) any = true;
+
+    /*
+     * Make the deleted bytes unreadable. Once: on a unit where the legacy entries
+     * were erased by an earlier boot there is nothing left to detect, but the
+     * bytes are still in flash, so the marker, not the presence of entries,
+     * decides. The marker is only set after a scrub that completed.
+     */
+    if (any || cairn_kv_get_u32(KV_SCRUBBED, 0) == 0) {
+        any = true;
+        if (cairn_kv_scrub_freed()) (void)cairn_kv_set_u32(KV_SCRUBBED, 1);
+    }
     return any;
 }

@@ -142,8 +142,13 @@ void cairn_prov_abort(cairn_prov_t *p);
 /*
  * Earlier firmware kept a Wi-Fi password and a client certificate and private key
  * in two NVS slots. This firmware has no use for them and a private key in flash
- * is a liability, so they are erased at boot. Idempotent; returns true when
- * anything was there to erase.
+ * is a liability, so they are erased at boot.
+ *
+ * Erasing is not enough: NVS only marks the entries deleted, and the bytes stay
+ * readable in flash until a page is garbage-collected. So this also forces every
+ * page to be recycled, **once** per device (a marker records that it was done),
+ * which is also what cleans a unit whose entries were already marked deleted.
+ * Returns true when it removed or scrubbed anything this call.
  */
 bool cairn_prov_erase_legacy_credentials(void);
 

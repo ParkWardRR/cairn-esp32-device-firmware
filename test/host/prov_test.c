@@ -23,6 +23,7 @@
 #include "minijson.h"
 
 void cairn_kv_host_set_path(const char *path);
+int  cairn_kv_host_scrub_count(void);
 
 static int s_pass, s_fail;
 
@@ -475,8 +476,16 @@ static bool row_legacy_slots_are_erased(void)
     cairn_kv_host_set_path("/tmp/cairn-prov-kv.bin");
     CHECK(cairn_kv_begin(), "kv");
 
-    /* A fresh store has nothing to erase. */
-    CHECK(!cairn_prov_erase_legacy_credentials(), "reported erasing something on a fresh store");
+    /*
+     * A fresh store has no legacy entries, but the first boot still scrubs the
+     * flash once: a unit whose entries an earlier boot already marked deleted looks
+     * exactly like this, and its bytes are still readable.
+     */
+    int base = cairn_kv_host_scrub_count();
+    CHECK(cairn_prov_erase_legacy_credentials(), "the first call did not scrub");
+    CHECK(cairn_kv_host_scrub_count() == base + 1, "the first call scrubbed %d times, want 1", cairn_kv_host_scrub_count() - base);
+    CHECK(!cairn_prov_erase_legacy_credentials(), "a second call on a clean store claimed to do something");
+    CHECK(cairn_kv_host_scrub_count() == base + 1, "a clean store was scrubbed again: the marker is not honoured");
 
     /* What earlier firmware left behind: both slots, and the selector. */
     static const char *const names[] = { "pv0_ssid", "pv0_pass", "pv0_crt", "pv0_key",
@@ -489,14 +498,16 @@ static bool row_legacy_slots_are_erased(void)
     CHECK(cairn_kv_set_u32("st_counter", 41), "seeding an unrelated key");
 
     CHECK(cairn_prov_erase_legacy_credentials(), "did not report erasing the legacy slots");
+    CHECK(cairn_kv_host_scrub_count() == base + 2, "erasing legacy entries did not force a flash scrub (deleted bytes would stay readable)");
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
         CHECK(!kv_has(names[i]), "%s survived the erase: a private key is still in flash", names[i]);
     }
     CHECK(cairn_kv_get_u32("pv_slot", 0xFFFFFFFFu) == 0xFFFFFFFFu, "the slot selector survived");
     CHECK(cairn_kv_get_u32("st_counter", 0) == 41, "the erase touched an unrelated key");
 
-    /* Idempotent: a second boot finds nothing and says so. */
+    /* Idempotent: a second boot finds nothing, scrubs nothing and says so. */
     CHECK(!cairn_prov_erase_legacy_credentials(), "a second erase claimed to find something");
+    CHECK(cairn_kv_host_scrub_count() == base + 2, "a second erase scrubbed again");
 
     cairn_kv_end();
     remove("/tmp/cairn-prov-kv.bin");
