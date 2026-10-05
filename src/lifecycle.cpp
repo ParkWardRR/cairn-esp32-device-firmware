@@ -244,6 +244,17 @@ bool lifecycle_begin(Lifecycle *lc)
                              &lc->boot_count)) {
         return false;
     }
+
+    /*
+     * The storage root every frame is sealed under. Without one nothing can be
+     * written that anyone could later decrypt, so failing to load or persist it
+     * is as fatal as failing to load the signing key. A missing *assignment* is
+     * not fatal: capture continues, bound to zero ids, and the loader says so.
+     */
+    if (!cairn_storage_identity_load(&lc->storage)) {
+        CAIRN_LOGE(TAG, "no storage key; refusing to capture data nobody could read");
+        return false;
+    }
     cairn_new_boot_id(lc->boot_id);
     cairn_log_set_context(lc->boot_id);
 
@@ -260,7 +271,8 @@ bool lifecycle_begin(Lifecycle *lc)
     cairn_store_resume_interrupted_seals();
     cairn_sync_resume_interrupted_prunes();
 
-    if (!cairn_capture_open_or_resume(&lc->cap, lc->device_id, lc->boot_id)) {
+    if (!cairn_capture_open_or_resume(&lc->cap, lc->device_id, lc->boot_id,
+                                      &lc->storage)) {
         CAIRN_LOGE(TAG, "cannot open a capture bundle");
         return false;
     }
@@ -845,7 +857,8 @@ static void seal_and_reopen(Lifecycle *lc, uint8_t reason)
     lc->bundle = BundleState::Sealed;
 
     /* A fresh capture, with its own bundle id and its own chains. */
-    if (!cairn_capture_open_or_resume(&lc->cap, lc->device_id, lc->boot_id)) {
+    if (!cairn_capture_open_or_resume(&lc->cap, lc->device_id, lc->boot_id,
+                                      &lc->storage)) {
         CAIRN_LOGE(TAG, "cannot open a new capture after sealing");
         return;
     }

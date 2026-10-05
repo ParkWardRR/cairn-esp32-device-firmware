@@ -1,7 +1,13 @@
 /*
- * On-card storage: framed append, atomic seal, and boot recovery.
+ * On-card storage: sealed append, atomic seal, and boot recovery.
  *
- * Four invariants from docs/bundle-format-v2.md govern everything here:
+ * Every frame written here is encrypted (bundle format v3): the card holds
+ * ciphertext, and the keys live in on-chip NVS, because the card is never the
+ * security boundary. Recovery does not need the key — torn tails, CRCs and the
+ * chain are all checked over the stored bytes — so a device that has lost its
+ * key still recovers and seals what is on the card rather than discarding it.
+ *
+ * Four invariants from docs/bundle-format-v3.md govern everything here:
  *
  *   1. A sealed bundle is never mutated. Sealing moves a directory; it never
  *      rewrites one in place.
@@ -68,12 +74,79 @@ typedef struct {
     uint32_t prev_crc32;
 } cairn_chain_t;
 
+/*
+ * The storage identity: the root the segment keys derive from, the vehicle
+ * assignment every segment and manifest is bound to, and the device's
+ * monotonic bundle counter.
+ *
+ * An interface rather than globals so the store does not decide where any of
+ * it lives. On the device cairn_storage_identity_load() backs it with NVS; a
+ * host test can wrap the counter hooks to cut power between them and the
+ * signature, which is the property that matters most here.
+ *
+ * The counter is per bundle and is written into every segment header, where
+ * the AAD binds it into every frame — so it has to be fixed when the bundle's
+ * first segment is created, not when the bundle is sealed. It is therefore
+ * *reserved* (made durable) before the first header naming it is written, and
+ * *committed* again before the manifest naming it is signed. Between the two,
+ * no power cut can hand the same counter to different content: a reserved
+ * counter whose bundle never seals is a hole the server reports, and a hole is
+ * the harmless direction.
+ */
+typedef struct {
+    uint8_t  root_key[CAIRN_ROOT_KEY_SIZE];
+    uint32_t storage_key_version;
+
+    /*
+     * The assignment as provisioned. With none provisioned both are all-zero
+     * and `assigned` is false: the device still captures and seals — data
+     * first — but the server will refuse such a bundle until an assignment
+     * exists, which is the correct direction for that failure.
+     */
+    uint8_t  vehicle_id[16];
+    uint8_t  assignment_id[16];
+    bool     assigned;
+
+    /* Allocate the next counter, durably, before returning true. */
+    bool (*counter_reserve)(void *ctx, uint64_t *out);
+    /* Ensure `counter` is recorded as spent, durably, before returning true. */
+    bool (*counter_commit)(void *ctx, uint64_t counter);
+    void *counter_ctx;
+} cairn_storage_identity_t;
+
 typedef struct {
     bool     active;
     uint8_t  bundle_id[16];
     uint8_t  device_id[16];
     uint8_t  boot_id[16];
     char     dir[80];
+
+    /*
+     * This bundle's binding, as written into its segment headers. For a
+     * resumed capture it is read back from those headers rather than taken from
+     * the current identity: a manifest must agree with every header it covers
+     * (§5.4), so a capture opened under one boot or assignment is sealed under
+     * the same one even if the device has since rebooted or been reassigned.
+     */
+    uint8_t  vehicle_id[16];
+    uint8_t  assignment_id[16];
+    bool     assigned;
+    uint32_t storage_key_version;
+    uint64_t device_counter;
+
+    /* Not owned. Supplies the counter hooks at seal. */
+    const cairn_storage_identity_t *identity;
+
+    /*
+     * The ciphers of the two segments currently being appended to. False
+     * `can_encrypt` means the device holds no key that matches this bundle —
+     * a different storage_key_version, or a root that cannot authenticate what
+     * is already on the card — so nothing more may be appended and the bundle
+     * is sealed as it stands.
+     */
+    bool                   can_encrypt;
+    cairn_segment_cipher_t segment_cipher;
+    cairn_segment_cipher_t journal_cipher;
 
     /* Capture segments share one chain across rotations; journal.seg has its
      * own. Mixing them would make a journal write appear to be a gap in the
@@ -153,15 +226,37 @@ void cairn_identity_print_enrolment(const uint8_t device_id[16],
 void cairn_new_boot_id(uint8_t boot_id[16]);
 
 /*
+ * The storage identity from NVS: K_root (generated from the hardware RNG on
+ * first boot), its storage_key_version, the provisioned vehicle assignment, and
+ * counter hooks backed by NVS. Logs loudly when no assignment is provisioned.
+ */
+bool cairn_storage_identity_load(cairn_storage_identity_t *out);
+
+/*
+ * Provision the vehicle assignment. Takes effect for the next bundle opened; an
+ * open capture keeps the assignment its headers already carry.
+ */
+bool cairn_storage_set_assignment(const uint8_t vehicle_id[16],
+                                  const uint8_t assignment_id[16]);
+
+/* The highest device counter ever reserved, 0 if none. For logs and tests. */
+uint64_t cairn_storage_counter_high_water(void);
+
+/*
  * Resume the open capture if one exists, else start a new one.
  *
  * Resuming runs the recovery scan over every existing segment, truncates a torn
  * tail to the last valid frame, and restores the chain state so the next append
  * continues the sequence. The discarded byte count is carried into the manifest.
+ * The scan is structural, so it needs no key; the key is then used only to
+ * confirm that the segments about to be extended authenticate under it.
+ *
+ * `identity` must outlive the capture.
  */
 bool cairn_capture_open_or_resume(cairn_capture_t *cap,
                                   const uint8_t device_id[16],
-                                  const uint8_t boot_id[16]);
+                                  const uint8_t boot_id[16],
+                                  const cairn_storage_identity_t *identity);
 
 /* Append one record. Rotates the segment when full. */
 bool cairn_capture_append(cairn_capture_t *cap, cairn_chain_id_t chain,
@@ -188,6 +283,11 @@ void cairn_capture_tick(cairn_capture_t *cap);
  * capture directory that already contains a valid manifest — finished by
  * cairn_store_resume_interrupted_seals() — or a completed bundle. Neither state
  * loses data, and neither produces a bundle without a manifest.
+ *
+ * The bundle's device counter is committed through the identity's hook before
+ * the manifest is signed; if that fails the seal does not proceed, because a
+ * signed manifest naming a counter the device could forget is how one counter
+ * ends up on two different bundles.
  */
 bool cairn_capture_seal(cairn_capture_t *cap, const uint8_t seed[32],
                         const uint8_t pub[32], const char *firmware_version,

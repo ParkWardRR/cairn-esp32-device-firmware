@@ -238,8 +238,16 @@ static void run_selftest(void)
     uint8_t boot_id[16];
     cairn_new_boot_id(boot_id);
 
+    /* Static: the capture keeps a pointer to it. */
+    static cairn_storage_identity_t storage;
+    bool storage_ok = cairn_storage_identity_load(&storage);
+    CAIRN_LOGI(TAG, "[%s] storage root loaded, key version %u, %s",
+               storage_ok ? "PASS" : "FAIL", (unsigned)storage.storage_key_version,
+               storage.assigned ? "assigned" : "UNASSIGNED (server will refuse bundles)");
+
     static cairn_capture_t cap;
-    bool store_ok = cairn_capture_open_or_resume(&cap, device_id, boot_id);
+    bool store_ok = storage_ok &&
+                    cairn_capture_open_or_resume(&cap, device_id, boot_id, &storage);
 
     int appended = 0;
     if (store_ok) {

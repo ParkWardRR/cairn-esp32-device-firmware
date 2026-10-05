@@ -41,7 +41,34 @@
 /* From platform_host.c / cairn_kv_posix.c. */
 void cairn_host_advance(uint32_t ms);
 void cairn_host_seed(uint64_t seed);
+void cairn_host_rng_seed(uint64_t seed);
+void cairn_host_rng_force_cycle(size_t bytes);
 void cairn_kv_host_set_path(const char *path);
+
+/*
+ * Every frame is sealed, so a GNSS sample's 32-byte payload costs 68 bytes of
+ * envelope, nonce and tag: 100 bytes a frame. Rows that tear or flip bytes at
+ * frame boundaries compute them from this rather than from a literal, which is
+ * how the v2 suite broke when the overhead changed.
+ */
+#define GNSS_FRAME_LEN (CAIRN_FRAME_OVERHEAD + 32)
+
+/*
+ * The provisioned assignment every row runs under unless it is testing the
+ * unassigned case. Arbitrary, but not zero: zero is the "unassigned" value.
+ */
+static const uint8_t TEST_VEHICLE_ID[16] = {
+    0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37,
+    0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f,
+};
+static const uint8_t TEST_ASSIGNMENT_ID[16] = {
+    0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57,
+    0x58, 0x59, 0x5a, 0x5b, 0x5c, 0x5d, 0x5e, 0x5f,
+};
+
+/* The storage identity each row's captures are opened under, loaded from the
+ * row's own fresh key store — the NVS-backed loader the device uses. */
+static cairn_storage_identity_t g_ident;
 
 /*
  * Fixed server keys, so a "pinned" key means something here. Declared as char
@@ -127,8 +154,18 @@ static bool fresh_tree(const char *row)
 
     if (!cairn_fs_begin(card)) return false;
     cairn_host_seed(g_seed);
+    /* Seeded apart from the id generator, so the two streams never coincide. */
+    cairn_host_rng_seed(g_seed ^ 0xA5A5A5A5DEADBEEFULL);
 
-    return cairn_store_init();
+    if (!cairn_store_init()) return false;
+
+    /* The device's own loader, against this row's empty key store: it
+     * generates K_root exactly as a first boot does. */
+    if (!cairn_kv_begin() ||
+        !cairn_storage_set_assignment(TEST_VEHICLE_ID, TEST_ASSIGNMENT_ID)) {
+        return false;
+    }
+    return cairn_storage_identity_load(&g_ident);
 }
 
 static void path_in_card(const char *rel, char *out, size_t cap)
@@ -336,6 +373,166 @@ static bool seal_now(cairn_capture_t *cap, char id_out[27], uint8_t root_out[32]
     return true;
 }
 
+/* The scan options for reading payloads back off the card: they are sealed, so
+ * it takes the row's root key. */
+static cairn_root_key_t g_scan_root;
+
+static cairn_scan_opts_t keyed_opts(cairn_frame_cb cb, void *user)
+{
+    memcpy(g_scan_root.root, g_ident.root_key, CAIRN_ROOT_KEY_SIZE);
+    g_scan_root.version = g_ident.storage_key_version;
+
+    cairn_scan_opts_t o = { cairn_root_key_provider, &g_scan_root, cb, user };
+    return o;
+}
+
+/* Scan a card file, keyless when `root` is NULL. */
+static cairn_err_t scan_file(const char *rel, cairn_scan_state_t state,
+                             const cairn_root_key_t *root, cairn_frame_cb cb, void *user,
+                             cairn_scan_result_t *res)
+{
+    cairn_file_t *f = cairn_fs_open(rel, CAIRN_FS_READ);
+    if (f == NULL) return CAIRN_ERR_READ_FAILED;
+
+    cairn_scan_opts_t opts = { NULL, NULL, cb, user };
+    if (root != NULL) {
+        opts.key      = cairn_root_key_provider;
+        opts.key_user = (void *)(uintptr_t)root;
+    }
+
+    cairn_err_t err =
+        cairn_scan_segment_stream(fs_read_for_test, f, cairn_fs_size(f), state, &opts, res);
+    cairn_fs_close(f);
+    return err;
+}
+
+static bool read_card_file(const char *rel, uint8_t *buf, size_t cap, size_t *len)
+{
+    cairn_file_t *f = cairn_fs_open(rel, CAIRN_FS_READ);
+    if (f == NULL) return false;
+    *len = cairn_fs_read(f, buf, cap);
+    cairn_fs_close(f);
+    return true;
+}
+
+/*
+ * Verify a sealed bundle as the server would, from the card alone plus the
+ * device's public key and storage root.
+ *
+ * Signature over the exact bytes, canonical decode, content root from the
+ * members, every member's digest and length, every segment header bound to the
+ * manifest (§5.4), the capture chain authenticated end to end across its
+ * segments, the journal authenticated on its own chain, and the manifest's
+ * record counts and sequence range equal to what the segments actually hold.
+ * A row that seals is only as good as this check; "the seal returned true" is
+ * not evidence that the server would accept the result.
+ */
+static bool verify_sealed_bundle(const char *id, const uint8_t pub[32],
+                                 const cairn_root_key_t *root, cairn_manifest_t *out)
+{
+    char path[256];
+    static uint8_t encoded[4096];
+    size_t enc_len = 0, sig_len = 0;
+    uint8_t sig[64];
+
+    snprintf(path, sizeof(path), "%s/%s/manifest.cbor", CAIRN_DIR_BUNDLES, id);
+    CHECK(read_card_file(path, encoded, sizeof(encoded), &enc_len), "no manifest");
+    snprintf(path, sizeof(path), "%s/%s/manifest.sig", CAIRN_DIR_BUNDLES, id);
+    CHECK(read_card_file(path, sig, sizeof(sig), &sig_len) && sig_len == 64,
+          "no 64-byte signature");
+
+    CHECK(cairn_manifest_verify(encoded, enc_len, sig, pub) == CAIRN_OK,
+          "manifest signature does not verify");
+
+    static uint8_t scratch[8192];
+    CHECK(cairn_manifest_decode(encoded, enc_len, out, scratch, sizeof(scratch))
+              == CAIRN_OK, "manifest does not decode canonically");
+    CHECK(out->manifest_version == CAIRN_MANIFEST_VERSION, "manifest_version %u",
+          (unsigned)out->manifest_version);
+    CHECK(strcmp(out->encryption_suite, CAIRN_ENCRYPTION_SUITE_V1) == 0,
+          "encryption_suite \"%s\"", out->encryption_suite);
+    CHECK(cairn_manifest_verify_content_root(out) == CAIRN_OK,
+          "content root does not match the members it names");
+
+    cairn_scan_state_t capture_state = { 0, 0 };
+    uint32_t counts[256];
+    memset(counts, 0, sizeof(counts));
+    uint32_t captures = 0;
+    bool     have_seq = false;
+    uint32_t first_seq = 0, last_seq = 0;
+
+    for (size_t i = 0; i < out->member_count; i++) {
+        const cairn_member_t *mem = &out->members[i];
+        snprintf(path, sizeof(path), "%s/%s/%s", CAIRN_DIR_BUNDLES, id, mem->name);
+
+        /* Digest and length of the bytes actually on the card. */
+        cairn_file_t *f = cairn_fs_open(path, CAIRN_FS_READ);
+        CHECK(f != NULL, "member %s is missing", mem->name);
+        cairn_sha256_t ctx;
+        cairn_sha256_init(&ctx);
+        uint8_t  block[2048];
+        uint64_t total = 0;
+        size_t   got;
+        while ((got = cairn_fs_read(f, block, sizeof(block))) > 0) {
+            cairn_sha256_update(&ctx, block, got);
+            total += got;
+        }
+        uint8_t hdr_bytes[CAIRN_SEGMENT_HEADER_SIZE];
+        bool have_hdr = cairn_fs_seek(f, 0) &&
+                        cairn_fs_read(f, hdr_bytes, sizeof(hdr_bytes)) == sizeof(hdr_bytes);
+        cairn_fs_close(f);
+        uint8_t digest[32];
+        cairn_sha256_final(&ctx, digest);
+        CHECK(total == mem->length && memcmp(digest, mem->sha256, 32) == 0,
+              "member %s does not match its manifest digest", mem->name);
+
+        cairn_segment_header_t h;
+        CHECK(have_hdr && cairn_parse_segment_header(hdr_bytes, sizeof(hdr_bytes), &h,
+                                                     NULL) == CAIRN_OK,
+              "member %s header does not parse", mem->name);
+
+        const char *field = NULL;
+        CHECK(cairn_verify_segment_binding(out, mem->name, &h, &field) == CAIRN_OK,
+              "member %s disagrees with the manifest on %s", mem->name,
+              field ? field : "?");
+
+        bool is_journal = strcmp(mem->name, "journal.seg") == 0;
+        if (!is_journal) {
+            char want[CAIRN_MAX_MEMBER_NAME];
+            snprintf(want, sizeof(want), "seg-%08u.seg", (unsigned)captures++);
+            CHECK(strcmp(want, mem->name) == 0, "capture segments are not contiguous: "
+                                                "found %s, want %s", mem->name, want);
+        }
+
+        cairn_scan_state_t  zero = { 0, 0 };
+        cairn_scan_result_t res;
+        CHECK(scan_file(path, is_journal ? zero : capture_state, root, NULL, NULL, &res)
+                  == CAIRN_OK, "member %s does not scan with the key", mem->name);
+        CHECK(res.stop == CAIRN_STOP_EOF, "member %s keyed scan stopped with %s at %zu",
+              mem->name, cairn_stop_reason_name(res.stop), res.stop_offset);
+
+        for (int t = 0; t < 256; t++) counts[t] += (uint32_t)res.record_counts[t];
+        if (!is_journal) {
+            capture_state = res.next;
+            if (res.frames > 0) {
+                if (!have_seq) first_seq = res.first_seq;
+                have_seq = true;
+                last_seq = res.last_seq;
+            }
+        }
+    }
+
+    CHECK(memcmp(counts, out->record_counts, sizeof(counts)) == 0,
+          "manifest record_counts disagree with what the segments hold");
+    if (have_seq) {
+        CHECK(out->first_seq == first_seq && out->last_seq == last_seq,
+              "manifest claims seq %u..%u but the segments hold %u..%u",
+              (unsigned)out->first_seq, (unsigned)out->last_seq, (unsigned)first_seq,
+              (unsigned)last_seq);
+    }
+    return true;
+}
+
 static uint8_t g_seen_health_state;
 
 static uint8_t g_seen_event_type;
@@ -389,7 +586,7 @@ static bool row_clean_seal(void)
     cairn_new_boot_id(boot_id);
 
     cairn_capture_t cap;
-    CHECK(cairn_capture_open_or_resume(&cap, device_id, boot_id), "open failed");
+    CHECK(cairn_capture_open_or_resume(&cap, device_id, boot_id, &g_ident), "open failed");
     CHECK(append_samples(&cap, 16) == 16, "not all frames appended");
 
     char    id[27];
@@ -435,6 +632,40 @@ static bool row_clean_seal(void)
     CHECK(m.discarded_tail_bytes == 0, "discarded_tail_bytes is %u on a clean seal",
           (unsigned)m.discarded_tail_bytes);
 
+    /*
+     * v3: the bundle is bound to the provisioned assignment and to the first
+     * counter this device ever reserved, and everything on the card verifies
+     * as the server would verify it — every frame authenticated under the
+     * storage root.
+     */
+    CHECK(memcmp(m.vehicle_id, TEST_VEHICLE_ID, 16) == 0 &&
+          memcmp(m.assignment_id, TEST_ASSIGNMENT_ID, 16) == 0,
+          "the manifest does not carry the provisioned assignment");
+    CHECK(m.device_counter == 1, "the first bundle's device_counter is %llu, want 1",
+          (unsigned long long)m.device_counter);
+    CHECK(m.storage_key_version == g_ident.storage_key_version,
+          "storage_key_version %u, want %u", (unsigned)m.storage_key_version,
+          (unsigned)g_ident.storage_key_version);
+
+    cairn_root_key_t storage_root;
+    memcpy(storage_root.root, g_ident.root_key, 32);
+    storage_root.version = g_ident.storage_key_version;
+    static cairn_manifest_t verified;
+    if (!verify_sealed_bundle(id, pub, &storage_root, &verified)) return false;
+
+    /* The card holds ciphertext: no GNSS payload appears in the clear. */
+    char seg[256];
+    snprintf(seg, sizeof(seg), "%s/%s/seg-00000000.seg", CAIRN_DIR_BUNDLES, id);
+    static uint8_t raw[8192];
+    size_t raw_len = 0;
+    CHECK(read_card_file(seg, raw, sizeof(raw), &raw_len), "cannot read the segment");
+    uint8_t plain[32];
+    make_gnss_payload(plain, 0);
+    for (size_t at = 0; at + sizeof(plain) <= raw_len; at++) {
+        CHECK(memcmp(raw + at, plain, sizeof(plain)) != 0,
+              "a GNSS payload is stored in the clear at offset %zu", at);
+    }
+
     return true;
 }
 
@@ -453,7 +684,7 @@ static bool row_torn_tail_mid_frame(void)
     cairn_new_boot_id(boot_id);
 
     cairn_capture_t cap;
-    CHECK(cairn_capture_open_or_resume(&cap, device_id, boot_id), "open failed");
+    CHECK(cairn_capture_open_or_resume(&cap, device_id, boot_id, &g_ident), "open failed");
     CHECK(append_samples(&cap, 10) == 10, "not all frames appended");
 
     char id[27];
@@ -474,7 +705,7 @@ static bool row_torn_tail_mid_frame(void)
 
     /* Reboot. */
     cairn_capture_t resumed;
-    CHECK(cairn_capture_open_or_resume(&resumed, device_id, boot_id),
+    CHECK(cairn_capture_open_or_resume(&resumed, device_id, boot_id, &g_ident),
           "resume failed");
 
     CHECK(resumed.recovery_state == CAIRN_RECOVERY_RECOVERED_TAIL,
@@ -482,11 +713,12 @@ static bool row_torn_tail_mid_frame(void)
           (unsigned)resumed.recovery_state, CAIRN_RECOVERY_RECOVERED_TAIL);
 
     /*
-     * The frame was 60 bytes and 20 were lost, so the surviving prefix of that
-     * frame — 40 bytes — is what recovery must discard. Reporting the 20 bytes
-     * that never arrived would understate the loss.
+     * The frame was GNSS_FRAME_LEN (100) bytes and 20 were lost, so the
+     * surviving prefix of that frame — 80 bytes — is what recovery must
+     * discard. Reporting the 20 bytes that never arrived would understate the
+     * loss.
      */
-    const uint32_t frame_len = 60;
+    const uint32_t frame_len = GNSS_FRAME_LEN;
     const uint32_t want_discarded = frame_len - dropped;
     CHECK(resumed.discarded_tail_bytes == want_discarded,
           "discarded_tail_bytes is %u, want %u",
@@ -511,7 +743,7 @@ static bool row_torn_tail_mid_frame(void)
 
     /* A second reboot must find a clean segment and discard nothing more. */
     cairn_capture_t again;
-    CHECK(cairn_capture_open_or_resume(&again, device_id, boot_id),
+    CHECK(cairn_capture_open_or_resume(&again, device_id, boot_id, &g_ident),
           "second resume failed");
     CHECK(again.discarded_tail_bytes == 0,
           "a clean segment discarded %u bytes on re-open",
@@ -538,7 +770,7 @@ static bool row_torn_tail_mid_header(void)
     cairn_new_boot_id(boot_id);
 
     cairn_capture_t cap;
-    CHECK(cairn_capture_open_or_resume(&cap, device_id, boot_id), "open failed");
+    CHECK(cairn_capture_open_or_resume(&cap, device_id, boot_id, &g_ident), "open failed");
     CHECK(append_samples(&cap, 5) == 5, "not all frames appended");
 
     char id[27];
@@ -547,12 +779,12 @@ static bool row_torn_tail_mid_header(void)
     char seg_rel[256];
     snprintf(seg_rel, sizeof(seg_rel), "%s/%s/seg-00000000.seg", CAIRN_DIR_CAPTURE, id);
 
-    /* Leave only 10 bytes of the final 60-byte frame: fewer than the 24-byte
-     * frame header, let alone a complete record. */
-    CHECK(tear_file(seg_rel, 50), "cannot tear the segment");
+    /* Leave only 10 bytes of the final frame: fewer than the 24-byte frame
+     * header, let alone a complete record. */
+    CHECK(tear_file(seg_rel, GNSS_FRAME_LEN - 10), "cannot tear the segment");
 
     cairn_capture_t resumed;
-    CHECK(cairn_capture_open_or_resume(&resumed, device_id, boot_id),
+    CHECK(cairn_capture_open_or_resume(&resumed, device_id, boot_id, &g_ident),
           "resume failed");
 
     CHECK(resumed.recovery_state == CAIRN_RECOVERY_RECOVERED_TAIL,
@@ -581,7 +813,7 @@ static bool row_corrupt_frame_isolated(void)
     cairn_new_boot_id(boot_id);
 
     cairn_capture_t cap;
-    CHECK(cairn_capture_open_or_resume(&cap, device_id, boot_id), "open failed");
+    CHECK(cairn_capture_open_or_resume(&cap, device_id, boot_id, &g_ident), "open failed");
     CHECK(append_samples(&cap, 10) == 10, "not all frames appended");
 
     char id[27];
@@ -590,12 +822,14 @@ static bool row_corrupt_frame_isolated(void)
     char seg_rel[256];
     snprintf(seg_rel, sizeof(seg_rel), "%s/%s/seg-00000000.seg", CAIRN_DIR_CAPTURE, id);
 
-    /* Frame 4's payload: header(64) + 4 frames * 60 + frame header(24) + 2. */
-    long offset = CAIRN_SEGMENT_HEADER_SIZE + 4 * 60 + CAIRN_FRAME_HEADER_SIZE + 2;
+    /* Inside frame 4, past its header: header(128) + 4 frames + frame header(24)
+     * + 2, which lands in the nonce. The CRC is not repaired, so this is damage,
+     * not tampering. */
+    long offset = CAIRN_SEGMENT_HEADER_SIZE + 4 * GNSS_FRAME_LEN + CAIRN_FRAME_HEADER_SIZE + 2;
     CHECK(flip_byte(seg_rel, offset), "cannot flip a payload byte");
 
     cairn_capture_t resumed;
-    CHECK(cairn_capture_open_or_resume(&resumed, device_id, boot_id),
+    CHECK(cairn_capture_open_or_resume(&resumed, device_id, boot_id, &g_ident),
           "resume failed");
 
     /* Corruption is salvage, not a clean tail recovery — the distinction is
@@ -609,10 +843,10 @@ static bool row_corrupt_frame_isolated(void)
           "next_seq is %u, want 4 (frames 0-3 survive)",
           (unsigned)resumed.capture_chain.next_seq);
 
-    /* Six frames of 60 bytes were given up. */
-    CHECK(resumed.discarded_tail_bytes == 6 * 60,
+    /* Six whole frames were given up. */
+    CHECK(resumed.discarded_tail_bytes == 6 * GNSS_FRAME_LEN,
           "discarded_tail_bytes is %u, want %d",
-          (unsigned)resumed.discarded_tail_bytes, 6 * 60);
+          (unsigned)resumed.discarded_tail_bytes, 6 * GNSS_FRAME_LEN);
 
     return true;
 }
@@ -632,10 +866,10 @@ static bool row_chain_spans_rotation(void)
     cairn_new_boot_id(boot_id);
 
     cairn_capture_t cap;
-    CHECK(cairn_capture_open_or_resume(&cap, device_id, boot_id), "open failed");
+    CHECK(cairn_capture_open_or_resume(&cap, device_id, boot_id, &g_ident), "open failed");
 
     /* Enough frames to pass CAIRN_SEGMENT_MAX_BYTES and force a rotation. */
-    const int needed = (int)(CAIRN_SEGMENT_MAX_BYTES / 60) + 40;
+    const int needed = (int)(CAIRN_SEGMENT_MAX_BYTES / GNSS_FRAME_LEN) + 40;
     int wrote = append_samples(&cap, needed);
     CHECK(wrote == needed, "wrote %d of %d frames", wrote, needed);
     CHECK(cap.segment_index >= 1, "no rotation occurred (segment_index %u)",
@@ -662,7 +896,7 @@ static bool row_chain_spans_rotation(void)
 
     /* Re-open and resume: the whole chain must be walked without complaint. */
     cairn_capture_t resumed;
-    CHECK(cairn_capture_open_or_resume(&resumed, device_id, boot_id),
+    CHECK(cairn_capture_open_or_resume(&resumed, device_id, boot_id, &g_ident),
           "resume across segments failed");
     CHECK(resumed.recovery_state == CAIRN_RECOVERY_CLEAN,
           "a clean multi-segment capture reported recovery_state %u",
@@ -692,7 +926,7 @@ static bool row_journal_chain_independent(void)
     cairn_new_boot_id(boot_id);
 
     cairn_capture_t cap;
-    CHECK(cairn_capture_open_or_resume(&cap, device_id, boot_id), "open failed");
+    CHECK(cairn_capture_open_or_resume(&cap, device_id, boot_id, &g_ident), "open failed");
 
     CHECK(append_samples(&cap, 3) == 3, "capture frames failed");
 
@@ -724,7 +958,7 @@ static bool row_journal_chain_independent(void)
 
     /* Both must survive a reboot with their own continuity intact. */
     cairn_capture_t resumed;
-    CHECK(cairn_capture_open_or_resume(&resumed, device_id, boot_id),
+    CHECK(cairn_capture_open_or_resume(&resumed, device_id, boot_id, &g_ident),
           "resume failed");
     CHECK(resumed.recovery_state == CAIRN_RECOVERY_CLEAN,
           "clean two-chain capture reported recovery_state %u",
@@ -754,7 +988,7 @@ static bool row_interrupted_seal_completed(void)
     cairn_new_boot_id(boot_id);
 
     cairn_capture_t cap;
-    CHECK(cairn_capture_open_or_resume(&cap, device_id, boot_id), "open failed");
+    CHECK(cairn_capture_open_or_resume(&cap, device_id, boot_id, &g_ident), "open failed");
     CHECK(append_samples(&cap, 8) == 8, "appends failed");
 
     char id[27];
@@ -781,9 +1015,15 @@ static bool row_interrupted_seal_completed(void)
     m.schema_version = 1;
     snprintf(m.signature_algorithm, sizeof(m.signature_algorithm), "%s",
              CAIRN_SIGALG_ED25519);
+    memcpy(m.vehicle_id, cap.vehicle_id, 16);
+    memcpy(m.assignment_id, cap.assignment_id, 16);
+    m.device_counter      = cap.device_counter;
+    m.storage_key_version = cap.storage_key_version;
+    snprintf(m.encryption_suite, sizeof(m.encryption_suite), "%s",
+             CAIRN_ENCRYPTION_SUITE_V1);
     m.member_count = 1;
     snprintf(m.members[0].name, CAIRN_MAX_MEMBER_NAME, "seg-00000000.seg");
-    m.members[0].length = 64;
+    m.members[0].length = CAIRN_SEGMENT_HEADER_SIZE;
     CHECK(cairn_content_root(m.members, m.member_count, m.content_root) == CAIRN_OK,
           "content root failed");
 
@@ -838,7 +1078,7 @@ static bool row_live_capture_not_sealed(void)
     cairn_new_boot_id(boot_id);
 
     cairn_capture_t cap;
-    CHECK(cairn_capture_open_or_resume(&cap, device_id, boot_id), "open failed");
+    CHECK(cairn_capture_open_or_resume(&cap, device_id, boot_id, &g_ident), "open failed");
     CHECK(append_samples(&cap, 4) == 4, "appends failed");
 
     int finished = cairn_store_resume_interrupted_seals();
@@ -866,7 +1106,7 @@ static bool sealed_bundle(char id_out[27], uint8_t root_out[32])
     cairn_new_boot_id(boot_id);
 
     cairn_capture_t cap;
-    if (!cairn_capture_open_or_resume(&cap, device_id, boot_id)) return false;
+    if (!cairn_capture_open_or_resume(&cap, device_id, boot_id, &g_ident)) return false;
     if (append_samples(&cap, 8) != 8) return false;
 
     return seal_now(&cap, id_out, root_out);
@@ -1231,9 +1471,11 @@ static bool scan_capture_segment(const char *id, tally_t *t)
 
     cairn_scan_state_t state = { 0, 0 };
     cairn_scan_result_t res;
+    /* Keyed: the tally reads flags and times, and every frame the store wrote
+     * must also authenticate. */
+    cairn_scan_opts_t opts = keyed_opts(tally_cb, t);
     cairn_err_t err =
-        cairn_scan_segment_stream(fs_read_for_test, f, size, state, &res,
-                                  tally_cb, t);
+        cairn_scan_segment_stream(fs_read_for_test, f, size, state, &opts, &res);
     cairn_fs_close(f);
 
     return err == CAIRN_OK && res.stop == CAIRN_STOP_EOF;
@@ -1253,7 +1495,7 @@ static bool row_preroll_holds_while_idle(void)
     cairn_new_boot_id(boot_id);
 
     cairn_capture_t cap;
-    CHECK(cairn_capture_open_or_resume(&cap, device_id, boot_id), "open failed");
+    CHECK(cairn_capture_open_or_resume(&cap, device_id, boot_id, &g_ident), "open failed");
 
     char id[27];
     CHECK(current_capture_id(id, sizeof(id)), "no capture directory");
@@ -1304,7 +1546,7 @@ static bool row_preroll_flush_marks_pretrip(void)
     cairn_new_boot_id(boot_id);
 
     cairn_capture_t cap;
-    CHECK(cairn_capture_open_or_resume(&cap, device_id, boot_id), "open failed");
+    CHECK(cairn_capture_open_or_resume(&cap, device_id, boot_id, &g_ident), "open failed");
 
     char id[27];
     CHECK(current_capture_id(id, sizeof(id)), "no capture directory");
@@ -1370,7 +1612,7 @@ static bool row_preroll_wrap_keeps_newest(void)
     cairn_new_boot_id(boot_id);
 
     cairn_capture_t cap;
-    CHECK(cairn_capture_open_or_resume(&cap, device_id, boot_id), "open failed");
+    CHECK(cairn_capture_open_or_resume(&cap, device_id, boot_id, &g_ident), "open failed");
 
     char id[27];
     CHECK(current_capture_id(id, sizeof(id)), "no capture directory");
@@ -1465,7 +1707,7 @@ static bool row_health_bitmap_round_trips(void)
     cairn_new_boot_id(boot_id);
 
     cairn_capture_t cap;
-    CHECK(cairn_capture_open_or_resume(&cap, device_id, boot_id), "open failed");
+    CHECK(cairn_capture_open_or_resume(&cap, device_id, boot_id, &g_ident), "open failed");
 
     /* Several conditions at once — the case a scalar severity would flatten. */
     const uint8_t want = (uint8_t)(CAIRN_HEALTH_DEGRADED_GNSS |
@@ -1505,9 +1747,9 @@ static bool row_health_bitmap_round_trips(void)
     uint64_t size = cairn_fs_size(f);
     cairn_scan_state_t state = { 0, 0 };
     cairn_scan_result_t res;
+    cairn_scan_opts_t opts = keyed_opts(capture_health_cb, NULL);
     cairn_err_t err =
-        cairn_scan_segment_stream(fs_read_for_test, f, size, state, &res,
-                                  capture_health_cb, NULL);
+        cairn_scan_segment_stream(fs_read_for_test, f, size, state, &opts, &res);
     cairn_fs_close(f);
 
     CHECK(err == CAIRN_OK, "journal scan failed: %s", cairn_strerror(err));
@@ -1593,16 +1835,57 @@ static bool row_adaptive_never_slower_during_trip(void)
           "idle with no trip should sample slower to save power, got %u ms",
           (unsigned)idle.gnss_period_ms);
 
-    /* An event must actually resolve finer than cruise, or adaptation is inert. */
+    /* An event must actually resolve finer than cruise, or adaptation is inert.
+     *
+     * "Finer" is only possible where the nominal rate has headroom above its
+     * floor. The nominals were tuned to the sensors' real limits (GNSS at the
+     * receiver's 5 Hz, a 100 ms IMU window) and so now sit AT their floors:
+     * there EVENT cannot beat CRUISE, and demanding it would only force the
+     * floors to be lowered into duplicate records. So the row asserts the
+     * invariant that is true on every axis — never below the floor — and
+     * strict improvement on every axis that has room, and requires that at
+     * least one axis has room, so a policy pinned at the floor everywhere
+     * (adaptation entirely inert) still fails. */
     cairn_rates_t cruise, event;
     cairn_policy_rates(&p, CAIRN_DYN_CRUISE, true, &cruise);
     cairn_policy_rates(&p, CAIRN_DYN_EVENT, true, &event);
-    CHECK(event.gnss_period_ms < cruise.gnss_period_ms,
-          "an event samples GNSS at %u ms, no faster than cruise at %u ms",
-          (unsigned)event.gnss_period_ms, (unsigned)cruise.gnss_period_ms);
-    CHECK(event.imu_window_ms < cruise.imu_window_ms,
-          "an event summarizes the IMU over %u ms, no shorter than cruise at %u ms",
-          (unsigned)event.imu_window_ms, (unsigned)cruise.imu_window_ms);
+
+    CHECK(event.gnss_period_ms >= CAIRN_FLOOR_GNSS_PERIOD_MS &&
+          event.imu_window_ms  >= CAIRN_FLOOR_IMU_WINDOW_MS &&
+          event.obd_period_ms  >= CAIRN_FLOOR_OBD_PERIOD_MS,
+          "an event went below a floor: GNSS %u, IMU %u, OBD %u ms",
+          (unsigned)event.gnss_period_ms, (unsigned)event.imu_window_ms,
+          (unsigned)event.obd_period_ms);
+
+    int axes_with_room = 0;
+    if (cruise.gnss_period_ms > CAIRN_FLOOR_GNSS_PERIOD_MS) {
+        axes_with_room++;
+        CHECK(event.gnss_period_ms < cruise.gnss_period_ms,
+              "an event samples GNSS at %u ms, no faster than cruise at %u ms",
+              (unsigned)event.gnss_period_ms, (unsigned)cruise.gnss_period_ms);
+    } else {
+        CHECK(event.gnss_period_ms == cruise.gnss_period_ms,
+              "GNSS is at its floor yet an event changed it to %u ms",
+              (unsigned)event.gnss_period_ms);
+    }
+    if (cruise.imu_window_ms > CAIRN_FLOOR_IMU_WINDOW_MS) {
+        axes_with_room++;
+        CHECK(event.imu_window_ms < cruise.imu_window_ms,
+              "an event summarizes the IMU over %u ms, no shorter than cruise at %u ms",
+              (unsigned)event.imu_window_ms, (unsigned)cruise.imu_window_ms);
+    } else {
+        CHECK(event.imu_window_ms == cruise.imu_window_ms,
+              "the IMU window is at its floor yet an event changed it to %u ms",
+              (unsigned)event.imu_window_ms);
+    }
+    if (cruise.obd_period_ms > CAIRN_FLOOR_OBD_PERIOD_MS) {
+        axes_with_room++;
+        CHECK(event.obd_period_ms < cruise.obd_period_ms,
+              "an event polls OBD every %u ms, no faster than cruise at %u ms",
+              (unsigned)event.obd_period_ms, (unsigned)cruise.obd_period_ms);
+    }
+    CHECK(axes_with_room > 0,
+          "every axis is pinned at its floor, so adaptation can never do anything");
 
     /* Disabling adaptation must give exactly nominal, so the flag in the
      * snapshot means what it says. */
@@ -1917,7 +2200,7 @@ static bool row_trip_event_round_trip(void)
     cairn_new_boot_id(boot_id);
 
     cairn_capture_t cap;
-    CHECK(cairn_capture_open_or_resume(&cap, device_id, boot_id), "open failed");
+    CHECK(cairn_capture_open_or_resume(&cap, device_id, boot_id, &g_ident), "open failed");
 
     /* A detail string and a real position. */
     const char *detail = "rms=1800mg dv=-640cm/s";
@@ -1949,8 +2232,9 @@ static bool row_trip_event_round_trip(void)
     cairn_scan_result_t res;
     g_seen_event_type = 0;
     g_seen_event_len = 0;
+    cairn_scan_opts_t opts = keyed_opts(capture_event_cb, NULL);
     cairn_err_t err = cairn_scan_segment_stream(fs_read_for_test, f, size, state,
-                                                &res, capture_event_cb, NULL);
+                                                &opts, &res);
     cairn_fs_close(f);
 
     CHECK(err == CAIRN_OK, "scan failed: %s", cairn_strerror(err));
@@ -2302,7 +2586,7 @@ static bool row_resume_restores_record_counts(void)
     cairn_new_boot_id(boot_id);
 
     cairn_capture_t cap;
-    CHECK(cairn_capture_open_or_resume(&cap, device_id, boot_id), "open failed");
+    CHECK(cairn_capture_open_or_resume(&cap, device_id, boot_id, &g_ident), "open failed");
 
     /* Both chains, so the test fails if either is forgotten. */
     CHECK(append_samples(&cap, 5) == 5, "capture frames failed");
@@ -2332,7 +2616,7 @@ static bool row_resume_restores_record_counts(void)
     /* Simulate the reboot: drop the in-RAM capture and resume from the card. */
     cairn_capture_t resumed;
     memset(&resumed, 0, sizeof(resumed));
-    CHECK(cairn_capture_open_or_resume(&resumed, device_id, boot_id),
+    CHECK(cairn_capture_open_or_resume(&resumed, device_id, boot_id, &g_ident),
           "resume failed");
 
     CHECK(resumed.record_counts[CAIRN_REC_GNSS_SAMPLE] == want_capture,
@@ -2430,6 +2714,678 @@ static bool row_obd_extended_layout(void)
     return true;
 }
 
+/* ── format v3: encryption, keys and the device counter ───────────────────── */
+
+/* The NVS key the store keeps K_root under. Named here rather than exported:
+ * only a test has any business overwriting it. */
+#define TEST_KV_STORAGE_ROOT "storage_root"
+
+static cairn_root_key_t root_of(const cairn_storage_identity_t *id)
+{
+    cairn_root_key_t r;
+    memcpy(r.root, id->root_key, CAIRN_ROOT_KEY_SIZE);
+    r.version = id->storage_key_version;
+    return r;
+}
+
+static bool read_header_of(const char *rel, cairn_segment_header_t *h)
+{
+    uint8_t buf[CAIRN_SEGMENT_HEADER_SIZE];
+    size_t  len = 0;
+    return read_card_file(rel, buf, sizeof(buf), &len) && len == sizeof(buf) &&
+           cairn_parse_segment_header(buf, len, h, NULL) == CAIRN_OK;
+}
+
+/*
+ * Edit a frame the way an attacker with a hex editor would: flip one ciphertext
+ * bit, then recompute the frame CRC so nothing keyless can tell.
+ */
+static bool tamper_and_repair_crc(const char *rel, long frame_start, uint32_t frame_len)
+{
+    char full[1024];
+    path_in_card(rel, full, sizeof(full));
+
+    FILE *f = fopen(full, "r+b");
+    if (f == NULL) return false;
+
+    uint8_t frame[CAIRN_MAX_FRAME_LEN];
+    bool ok = fseek(f, frame_start, SEEK_SET) == 0 &&
+              fread(frame, 1, frame_len, f) == frame_len;
+    if (ok) {
+        /* Into the ciphertext: past the 24-byte header and the 24-byte nonce. */
+        frame[CAIRN_FRAME_HEADER_SIZE + CAIRN_NONCE_SIZE + 5] ^= 0x10;
+
+        uint32_t crc = cairn_crc32(frame, frame_len - 4);
+        frame[frame_len - 4] = (uint8_t)crc;
+        frame[frame_len - 3] = (uint8_t)(crc >> 8);
+        frame[frame_len - 2] = (uint8_t)(crc >> 16);
+        frame[frame_len - 1] = (uint8_t)(crc >> 24);
+
+        ok = fseek(f, frame_start, SEEK_SET) == 0 &&
+             fwrite(frame, 1, frame_len, f) == frame_len;
+    }
+    fclose(f);
+    return ok;
+}
+
+/*
+ * Recovery after a power cut needs no key. A device that boots without the key
+ * for the bundle it was writing — here, holding a different key version, so no
+ * key applies at all — must still find the torn tail, truncate it to the byte,
+ * and keep every complete frame authentic. What it must not do is append: it
+ * cannot seal frames for that bundle.
+ */
+static bool row_encrypted_torn_tail_keyless(void)
+{
+    uint8_t device_id[16], seed[32], pub[32];
+    uint32_t boot = 0;
+    CHECK(cairn_identity_load(device_id, seed, pub, &boot), "identity load failed");
+
+    uint8_t boot_id[16];
+    cairn_new_boot_id(boot_id);
+
+    cairn_capture_t cap;
+    CHECK(cairn_capture_open_or_resume(&cap, device_id, boot_id, &g_ident), "open failed");
+    CHECK(append_samples(&cap, 10) == 10, "not all frames appended");
+
+    char id[27], seg[256];
+    CHECK(current_capture_id(id, sizeof(id)), "no capture directory");
+    snprintf(seg, sizeof(seg), "%s/%s/seg-00000000.seg", CAIRN_DIR_CAPTURE, id);
+
+    uint64_t before = 0;
+    CHECK(file_size_of(seg, &before), "cannot size the segment");
+    CHECK(tear_file(seg, 20), "cannot tear the segment");
+
+    /* Reboot holding no key that matches the bundle. */
+    cairn_storage_identity_t keyless = g_ident;
+    keyless.storage_key_version = g_ident.storage_key_version + 1;
+
+    cairn_capture_t resumed;
+    CHECK(cairn_capture_open_or_resume(&resumed, device_id, boot_id, &keyless),
+          "resume without a key failed — recovery must not need one");
+    CHECK(resumed.recovery_state == CAIRN_RECOVERY_RECOVERED_TAIL,
+          "recovery_state %u, want RECOVERED_TAIL", (unsigned)resumed.recovery_state);
+    CHECK(resumed.discarded_tail_bytes == GNSS_FRAME_LEN - 20,
+          "discarded %u bytes, want %u", (unsigned)resumed.discarded_tail_bytes,
+          (unsigned)(GNSS_FRAME_LEN - 20));
+    CHECK(resumed.capture_chain.next_seq == 9, "next_seq %u, want 9",
+          (unsigned)resumed.capture_chain.next_seq);
+
+    uint64_t after = 0;
+    CHECK(file_size_of(seg, &after) && after == before - GNSS_FRAME_LEN,
+          "segment is %llu bytes, want %llu", (unsigned long long)after,
+          (unsigned long long)(before - GNSS_FRAME_LEN));
+
+    /* No key, no append — and no bytes written by trying. */
+    CHECK(!resumed.can_encrypt && resumed.needs_seal,
+          "a capture with no matching key was left appendable");
+    uint8_t payload[32];
+    make_gnss_payload(payload, 77);
+    CHECK(!cairn_capture_append(&resumed, CAIRN_CHAIN_CAPTURE, CAIRN_REC_GNSS_SAMPLE, 1,
+                                0, cairn_millis(), payload, sizeof(payload)),
+          "a frame was appended with no key for the bundle");
+    CHECK(file_size_of(seg, &after) && after == before - GNSS_FRAME_LEN,
+          "a refused append still changed the segment");
+
+    /* What survived is exactly the nine complete frames, still authentic. */
+    cairn_scan_state_t  zero = { 0, 0 };
+    cairn_scan_result_t res;
+    CHECK(scan_file(seg, zero, NULL, NULL, NULL, &res) == CAIRN_OK &&
+              res.stop == CAIRN_STOP_EOF && res.frames == 9,
+          "keyless scan after recovery: %s, %zu frames",
+          cairn_stop_reason_name(res.stop), res.frames);
+    cairn_root_key_t root = root_of(&g_ident);
+    CHECK(scan_file(seg, zero, &root, NULL, NULL, &res) == CAIRN_OK &&
+              res.stop == CAIRN_STOP_EOF && res.frames == 9,
+          "keyed scan after recovery: %s, %zu frames",
+          cairn_stop_reason_name(res.stop), res.frames);
+
+    /* With the key back, the same bundle extends and stays authentic. */
+    cairn_capture_t keyed;
+    CHECK(cairn_capture_open_or_resume(&keyed, device_id, boot_id, &g_ident),
+          "resume with the key failed");
+    CHECK(keyed.can_encrypt, "the right key could not extend the bundle");
+    CHECK(append_samples(&keyed, 3) == 3, "cannot append after recovery");
+    CHECK(scan_file(seg, zero, &root, NULL, NULL, &res) == CAIRN_OK &&
+              res.stop == CAIRN_STOP_EOF && res.frames == 12,
+          "keyed scan after extending: %s, %zu frames",
+          cairn_stop_reason_name(res.stop), res.frames);
+
+    return true;
+}
+
+/*
+ * A card written under one root, booted on a device holding another — a card
+ * moved between dongles, or NVS erased and the root regenerated.
+ *
+ * Structurally nothing is wrong, and recovery must say so: nothing truncated,
+ * nothing discarded. Cryptographically every frame fails under the wrong root
+ * and passes under the right one. The device must not extend the bundle (it
+ * would mix two roots in one segment), but it must still seal it — sealing
+ * needs no key — so the holder of the right root can read every byte.
+ */
+static bool row_wrong_key_card(void)
+{
+    uint8_t device_id[16], seed[32], pub[32];
+    uint32_t boot = 0;
+    CHECK(cairn_identity_load(device_id, seed, pub, &boot), "identity load failed");
+
+    uint8_t boot_id[16];
+    cairn_new_boot_id(boot_id);
+
+    cairn_capture_t cap;
+    CHECK(cairn_capture_open_or_resume(&cap, device_id, boot_id, &g_ident), "open failed");
+    CHECK(append_samples(&cap, 6) == 6, "not all frames appended");
+
+    char id[27], seg[256];
+    CHECK(current_capture_id(id, sizeof(id)), "no capture directory");
+    snprintf(seg, sizeof(seg), "%s/%s/seg-00000000.seg", CAIRN_DIR_CAPTURE, id);
+    uint64_t before = 0;
+    CHECK(file_size_of(seg, &before), "cannot size the segment");
+
+    cairn_root_key_t root_a = root_of(&g_ident);
+
+    /* Another root, same version: the case a version check cannot catch. */
+    uint8_t other[CAIRN_ROOT_KEY_SIZE];
+    memcpy(other, g_ident.root_key, sizeof(other));
+    other[0] ^= 0xFF;
+    CHECK(cairn_kv_set_blob(TEST_KV_STORAGE_ROOT, other, sizeof(other)),
+          "cannot replace the stored root");
+    cairn_storage_identity_t ident_b;
+    CHECK(cairn_storage_identity_load(&ident_b), "identity reload failed");
+    CHECK(memcmp(ident_b.root_key, other, sizeof(other)) == 0, "the root did not change");
+    cairn_root_key_t root_b = root_of(&ident_b);
+
+    cairn_capture_t resumed;
+    CHECK(cairn_capture_open_or_resume(&resumed, device_id, boot_id, &ident_b),
+          "resume under the wrong root failed");
+    CHECK(resumed.recovery_state == CAIRN_RECOVERY_CLEAN &&
+              resumed.discarded_tail_bytes == 0 && resumed.capture_chain.next_seq == 6,
+          "the wrong root changed the structural recovery: state %u, %u discarded, "
+          "next_seq %u", (unsigned)resumed.recovery_state,
+          (unsigned)resumed.discarded_tail_bytes,
+          (unsigned)resumed.capture_chain.next_seq);
+    CHECK(!resumed.can_encrypt && resumed.needs_seal,
+          "a bundle that does not authenticate under this root was left appendable");
+    CHECK(append_samples(&resumed, 1) == 0, "a frame was appended under the wrong root");
+
+    uint64_t after = 0;
+    CHECK(file_size_of(seg, &after) && after == before, "the segment changed size");
+
+    cairn_scan_state_t  zero = { 0, 0 };
+    cairn_scan_result_t res;
+    CHECK(scan_file(seg, zero, NULL, NULL, NULL, &res) == CAIRN_OK &&
+              res.stop == CAIRN_STOP_EOF && res.frames == 6,
+          "structural scan: %s, %zu frames", cairn_stop_reason_name(res.stop), res.frames);
+    CHECK(scan_file(seg, zero, &root_b, NULL, NULL, &res) == CAIRN_OK &&
+              res.stop == CAIRN_STOP_AUTH_FAILED && res.frames == 0 &&
+              res.stop_offset == CAIRN_SEGMENT_HEADER_SIZE,
+          "wrong-root scan: %s, %zu frames at %zu, want AUTH_FAILED at the first frame",
+          cairn_stop_reason_name(res.stop), res.frames, res.stop_offset);
+    CHECK(scan_file(seg, zero, &root_a, NULL, NULL, &res) == CAIRN_OK &&
+              res.stop == CAIRN_STOP_EOF && res.frames == 6,
+          "right-root scan: %s, %zu frames", cairn_stop_reason_name(res.stop), res.frames);
+
+    /* Sealed as it stands, and readable by the holder of the original root. */
+    char    sealed_id[27];
+    uint8_t content_root[32];
+    CHECK(seal_now(&resumed, sealed_id, content_root), "sealing needs no key, yet failed");
+    static cairn_manifest_t m;
+    if (!verify_sealed_bundle(sealed_id, pub, &root_a, &m)) return false;
+
+    return true;
+}
+
+/*
+ * The attack the CRC cannot see. One ciphertext bit flipped in the last frame
+ * and its CRC recomputed: structurally perfect, so the keyless scan accepts
+ * every frame, and only the tag catches it — AUTH_FAILED at exactly that frame,
+ * with every frame before it retained.
+ *
+ * (It is the last frame for the same reason as in the auth-tag-tampered vector.
+ * A repaired CRC on an earlier frame changes that frame's crc32, so the next
+ * frame's prev_crc32 no longer matches and the keyless scan reports a chain
+ * break — and re-chaining the rest would change their headers, which are in
+ * their AAD. The last frame is the one edit only the key can see.)
+ *
+ * And boot recovery must not treat it as damage. Truncating at an auth failure
+ * would delete the tampered frame — the evidence — on the device's own say-so.
+ * The device keeps every byte, refuses to chain new frames from one it cannot
+ * authenticate, and seals; the server's keyed scan quarantines.
+ */
+static bool row_repaired_crc_auth_failed(void)
+{
+    uint8_t device_id[16], seed[32], pub[32];
+    uint32_t boot = 0;
+    CHECK(cairn_identity_load(device_id, seed, pub, &boot), "identity load failed");
+
+    uint8_t boot_id[16];
+    cairn_new_boot_id(boot_id);
+
+    cairn_capture_t cap;
+    CHECK(cairn_capture_open_or_resume(&cap, device_id, boot_id, &g_ident), "open failed");
+    CHECK(append_samples(&cap, 6) == 6, "not all frames appended");
+
+    char id[27], seg[256];
+    CHECK(current_capture_id(id, sizeof(id)), "no capture directory");
+    snprintf(seg, sizeof(seg), "%s/%s/seg-00000000.seg", CAIRN_DIR_CAPTURE, id);
+
+    long last = CAIRN_SEGMENT_HEADER_SIZE + 5 * GNSS_FRAME_LEN;
+    CHECK(tamper_and_repair_crc(seg, last, GNSS_FRAME_LEN), "cannot tamper");
+
+    cairn_root_key_t    root = root_of(&g_ident);
+    cairn_scan_state_t  zero = { 0, 0 };
+    cairn_scan_result_t res;
+
+    CHECK(scan_file(seg, zero, NULL, NULL, NULL, &res) == CAIRN_OK &&
+              res.stop == CAIRN_STOP_EOF && res.frames == 6,
+          "structural scan: %s, %zu frames — a repaired CRC should be invisible "
+          "without the key", cairn_stop_reason_name(res.stop), res.frames);
+    CHECK(scan_file(seg, zero, &root, NULL, NULL, &res) == CAIRN_OK &&
+              res.stop == CAIRN_STOP_AUTH_FAILED && res.frames == 5 &&
+              res.stop_offset == (size_t)last,
+          "keyed scan: %s, %zu frames at %zu, want AUTH_FAILED with 5 at %ld",
+          cairn_stop_reason_name(res.stop), res.frames, res.stop_offset, last);
+
+    uint64_t before = 0, after = 0;
+    CHECK(file_size_of(seg, &before), "cannot size the segment");
+
+    cairn_capture_t resumed;
+    CHECK(cairn_capture_open_or_resume(&resumed, device_id, boot_id, &g_ident),
+          "resume failed");
+    CHECK(file_size_of(seg, &after) && after == before,
+          "recovery truncated at an authentication failure: %llu -> %llu bytes",
+          (unsigned long long)before, (unsigned long long)after);
+    CHECK(resumed.discarded_tail_bytes == 0 &&
+              resumed.recovery_state == CAIRN_RECOVERY_CLEAN &&
+              resumed.capture_chain.next_seq == 6,
+          "recovery reported %u bytes discarded, state %u, next_seq %u",
+          (unsigned)resumed.discarded_tail_bytes, (unsigned)resumed.recovery_state,
+          (unsigned)resumed.capture_chain.next_seq);
+    CHECK(!resumed.can_encrypt && resumed.needs_seal,
+          "a tampered last frame was accepted as a base to extend from");
+    CHECK(append_samples(&resumed, 1) == 0, "a frame was chained to a tampered one");
+
+    /* Sealed as it stands: the keyed verifier must reject it, at that frame. */
+    char    sealed[27];
+    uint8_t content_root[32];
+    CHECK(seal_now(&resumed, sealed, content_root), "seal failed");
+    snprintf(seg, sizeof(seg), "%s/%s/seg-00000000.seg", CAIRN_DIR_BUNDLES, sealed);
+    CHECK(scan_file(seg, zero, &root, NULL, NULL, &res) == CAIRN_OK &&
+              res.stop == CAIRN_STOP_AUTH_FAILED && res.frames == 5,
+          "the sealed bundle no longer shows the tampering: %s, %zu frames",
+          cairn_stop_reason_name(res.stop), res.frames);
+
+    return true;
+}
+
+/* A counter hook that commits durably and then loses power. */
+typedef struct {
+    const cairn_storage_identity_t *real;
+    char  capture_dir[128];
+    int   calls;
+    bool  manifest_existed;
+} cut_state_t;
+
+static bool commit_then_power_cut(void *ctx, uint64_t counter)
+{
+    cut_state_t *s = (cut_state_t *)ctx;
+    s->calls++;
+
+    char m[256];
+    snprintf(m, sizeof(m), "%s/manifest.cbor", s->capture_dir);
+    s->manifest_existed = cairn_fs_exists(m);
+
+    (void)s->real->counter_commit(s->real->counter_ctx, counter);
+    return false; /* the lights go out before the signature exists */
+}
+
+/*
+ * The device counter survives a power cut in the middle of a seal, and is
+ * never handed to two different bundles.
+ *
+ * The counter is in every segment header, so it is reserved — durably — when
+ * the bundle opens, and committed again before the manifest is signed. This
+ * row cuts power at that commit, reboots, rolls NVS back to before the
+ * reservation for good measure, and checks the resumed seal still signs the
+ * counter its headers carry, raises the high-water mark first, and that the
+ * next bundle gets the next counter rather than a reused one.
+ */
+static bool row_counter_durable_across_seal_power_cut(void)
+{
+    uint8_t device_id[16], seed[32], pub[32];
+    uint32_t boot = 0;
+    CHECK(cairn_identity_load(device_id, seed, pub, &boot), "identity load failed");
+
+    uint8_t boot_id[16];
+    cairn_new_boot_id(boot_id);
+
+    CHECK(cairn_storage_counter_high_water() == 0, "a fresh device has spent counters");
+
+    cairn_capture_t cap;
+    CHECK(cairn_capture_open_or_resume(&cap, device_id, boot_id, &g_ident), "open failed");
+    CHECK(cap.device_counter == 1, "the first bundle got counter %llu, want 1",
+          (unsigned long long)cap.device_counter);
+    CHECK(cairn_storage_counter_high_water() == 1,
+          "the counter was not durable when the bundle opened — a power cut now "
+          "would let the next boot reuse it");
+
+    char id[27], rel[256];
+    CHECK(current_capture_id(id, sizeof(id)), "no capture directory");
+    cairn_segment_header_t h;
+    snprintf(rel, sizeof(rel), "%s/%s/seg-00000000.seg", CAIRN_DIR_CAPTURE, id);
+    CHECK(read_header_of(rel, &h) && h.device_counter == 1, "segment 0 header counter");
+    snprintf(rel, sizeof(rel), "%s/%s/journal.seg", CAIRN_DIR_CAPTURE, id);
+    CHECK(read_header_of(rel, &h) && h.device_counter == 1 &&
+              h.segment_index == CAIRN_JOURNAL_SEGMENT_INDEX,
+          "journal header counter %llu, index %08x", (unsigned long long)h.device_counter,
+          (unsigned)h.segment_index);
+
+    CHECK(append_samples(&cap, 5) == 5, "appends failed");
+
+    /* Seal, with power lost at the commit. */
+    cut_state_t cut;
+    memset(&cut, 0, sizeof(cut));
+    cut.real = &g_ident;
+    snprintf(cut.capture_dir, sizeof(cut.capture_dir), "%s", cap.dir);
+    cairn_storage_identity_t cutting = g_ident;
+    cutting.counter_commit = commit_then_power_cut;
+    cutting.counter_ctx    = &cut;
+    cap.identity = &cutting;
+
+    char    sealed[27];
+    uint8_t content_root[32];
+    CHECK(!seal_now(&cap, sealed, content_root), "the seal survived losing power");
+    CHECK(cut.calls == 1, "the counter commit ran %d times", cut.calls);
+    CHECK(!cut.manifest_existed,
+          "a manifest existed before the counter was durable — the order is backwards");
+
+    char mpath[256];
+    snprintf(mpath, sizeof(mpath), "%s/manifest.cbor", cap.dir);
+    CHECK(!cairn_fs_exists(mpath), "a manifest was written after the commit failed");
+    int bundles = 0, captures = 0;
+    CHECK(count_dirs(CAIRN_DIR_BUNDLES, &bundles) && bundles == 0, "%d bundles", bundles);
+    CHECK(count_dirs(CAIRN_DIR_CAPTURE, &captures) && captures == 1,
+          "the capture did not survive the failed seal (%d)", captures);
+
+    /* Reboot, with NVS rolled back to before the reservation. */
+    cairn_kv_end();
+    CHECK(cairn_kv_begin(), "key store did not reopen");
+    uint8_t zero_counter[8] = { 0 };
+    CHECK(cairn_kv_set_blob("dev_counter", zero_counter, sizeof(zero_counter)),
+          "cannot roll the counter back");
+    CHECK(cairn_storage_identity_load(&g_ident), "identity reload failed");
+
+    cairn_capture_t resumed;
+    CHECK(cairn_capture_open_or_resume(&resumed, device_id, boot_id, &g_ident),
+          "resume failed");
+    CHECK(resumed.device_counter == 1,
+          "the resumed bundle has counter %llu; its headers say 1",
+          (unsigned long long)resumed.device_counter);
+
+    CHECK(seal_now(&resumed, sealed, content_root), "the resumed seal failed");
+    CHECK(cairn_storage_counter_high_water() == 1,
+          "sealing counter 1 left the high-water mark at %llu",
+          (unsigned long long)cairn_storage_counter_high_water());
+
+    cairn_root_key_t root = root_of(&g_ident);
+    static cairn_manifest_t m;
+    if (!verify_sealed_bundle(sealed, pub, &root, &m)) return false;
+    CHECK(m.device_counter == 1, "manifest counter %llu, want 1",
+          (unsigned long long)m.device_counter);
+
+    /* The next bundle is a different bundle, so it gets a different counter. */
+    cairn_capture_t next;
+    CHECK(cairn_capture_open_or_resume(&next, device_id, boot_id, &g_ident),
+          "next open failed");
+    CHECK(next.device_counter == 2,
+          "the next bundle got counter %llu — counter 1 is spent on different content",
+          (unsigned long long)next.device_counter);
+    CHECK(append_samples(&next, 2) == 2, "appends to the next bundle failed");
+    CHECK(seal_now(&next, sealed, content_root), "the next seal failed");
+    if (!verify_sealed_bundle(sealed, pub, &root, &m)) return false;
+    CHECK(m.device_counter == 2, "second manifest counter %llu, want 2",
+          (unsigned long long)m.device_counter);
+
+    return true;
+}
+
+/* Collect each frame's nonce from a structural scan. */
+typedef struct {
+    uint8_t nonces[64][CAIRN_NONCE_SIZE];
+    size_t  count;
+} nonce_list_t;
+
+static bool collect_nonce(const cairn_frame_t *f, void *user)
+{
+    nonce_list_t *l = (nonce_list_t *)user;
+    if (l->count < 64 && f->sealed != NULL) {
+        memcpy(l->nonces[l->count++], f->sealed, CAIRN_NONCE_SIZE);
+    }
+    return true;
+}
+
+static bool scan_nonces(const char *rel, nonce_list_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    cairn_scan_state_t  zero = { 0, 0 };
+    cairn_scan_result_t res;
+    return scan_file(rel, zero, NULL, collect_nonce, out, &res) == CAIRN_OK &&
+           res.stop == CAIRN_STOP_EOF;
+}
+
+/*
+ * Tear the last frame of `rel` (seq `seq`), reboot, and write seq `seq` again
+ * with a different payload. Returns the nonce the rewrite was sealed with.
+ */
+static bool torn_rewrite(const char *rel, const uint8_t device_id[16],
+                         const uint8_t boot_id[16], uint32_t seq, int payload_seed,
+                         uint8_t nonce_out[CAIRN_NONCE_SIZE])
+{
+    if (!tear_file(rel, 20)) return false;
+
+    cairn_capture_t resumed;
+    if (!cairn_capture_open_or_resume(&resumed, device_id, boot_id, &g_ident)) return false;
+    if (resumed.capture_chain.next_seq != seq) return false;
+
+    uint8_t payload[32];
+    make_gnss_payload(payload, payload_seed);
+    if (!cairn_capture_append(&resumed, CAIRN_CHAIN_CAPTURE, CAIRN_REC_GNSS_SAMPLE, 1, 0,
+                              cairn_millis(), payload, sizeof(payload))) {
+        return false;
+    }
+
+    nonce_list_t l;
+    if (!scan_nonces(rel, &l) || l.count != seq + 1) return false;
+    memcpy(nonce_out, l.nonces[seq], CAIRN_NONCE_SIZE);
+    return true;
+}
+
+/*
+ * After a torn tail, the same seq is written again with different plaintext
+ * under the same segment key. If the nonce were derived from seq — or from
+ * anything a power cut resets — that rewrite would reuse a (key, nonce) pair:
+ * the XOR of two plaintexts, and the Poly1305 key, handed to anyone with the
+ * card. Every nonce on the card, across the original and its rewrites, must be
+ * distinct.
+ *
+ * The row also proves it could see a repeat: with the RNG forced to replay one
+ * nonce, the same procedure must show two rewrites sharing it. Without that
+ * control, "no repeat found" could mean "no repeat possible to find".
+ */
+static bool row_nonce_never_repeats_across_rewrite(void)
+{
+    uint8_t device_id[16], seed[32], pub[32];
+    uint32_t boot = 0;
+    CHECK(cairn_identity_load(device_id, seed, pub, &boot), "identity load failed");
+
+    uint8_t boot_id[16];
+    cairn_new_boot_id(boot_id);
+
+    cairn_capture_t cap;
+    CHECK(cairn_capture_open_or_resume(&cap, device_id, boot_id, &g_ident), "open failed");
+    CHECK(append_samples(&cap, 10) == 10, "not all frames appended");
+
+    char id[27], seg[256];
+    CHECK(current_capture_id(id, sizeof(id)), "no capture directory");
+    snprintf(seg, sizeof(seg), "%s/%s/seg-00000000.seg", CAIRN_DIR_CAPTURE, id);
+
+    static nonce_list_t seen;
+    CHECK(scan_nonces(seg, &seen) && seen.count == 10, "cannot read the nonces back");
+
+    /* Two torn rewrites of seq 9, each with different plaintext. */
+    for (int round = 0; round < 2; round++) {
+        uint8_t n[CAIRN_NONCE_SIZE];
+        CHECK(torn_rewrite(seg, device_id, boot_id, 9, 100 + round, n),
+              "torn rewrite %d of seq 9 failed", round);
+        CHECK(seen.count < 64, "too many nonces");
+        memcpy(seen.nonces[seen.count++], n, CAIRN_NONCE_SIZE);
+    }
+
+    for (size_t i = 0; i < seen.count; i++) {
+        for (size_t j = i + 1; j < seen.count; j++) {
+            CHECK(memcmp(seen.nonces[i], seen.nonces[j], CAIRN_NONCE_SIZE) != 0,
+                  "nonce %zu repeats nonce %zu — the seq 9 rewrite reused a "
+                  "(key, nonce) pair", j, i);
+        }
+    }
+
+    /* The rewritten frame is the new plaintext, and authentic. */
+    cairn_root_key_t    root = root_of(&g_ident);
+    cairn_scan_state_t  zero = { 0, 0 };
+    cairn_scan_result_t res;
+    CHECK(scan_file(seg, zero, &root, NULL, NULL, &res) == CAIRN_OK &&
+              res.stop == CAIRN_STOP_EOF && res.frames == 10,
+          "keyed scan after the rewrites: %s, %zu frames",
+          cairn_stop_reason_name(res.stop), res.frames);
+
+    /* Control: a replaying RNG must be caught by the same procedure. */
+    cairn_host_rng_force_cycle(CAIRN_NONCE_SIZE);
+    uint8_t a[CAIRN_NONCE_SIZE], b[CAIRN_NONCE_SIZE];
+    bool rewrote = torn_rewrite(seg, device_id, boot_id, 9, 200, a) &&
+                   torn_rewrite(seg, device_id, boot_id, 9, 201, b);
+    cairn_host_rng_seed(g_seed ^ 0xA5A5A5A5DEADBEEFULL);
+    CHECK(rewrote, "the control rewrites failed");
+    CHECK(memcmp(a, b, CAIRN_NONCE_SIZE) == 0,
+          "with a replaying RNG the rewrites still drew different nonces, so this "
+          "row could not have detected a reuse");
+
+    return true;
+}
+
+/*
+ * A bundle resumed after a reboot — and after a reassignment that arrived
+ * while it was open — is still one bundle, bound one way.
+ *
+ * §5.4 requires every header, the journal's included, to agree with the
+ * manifest on boot, vehicle, assignment, counter and key version. A resume that
+ * took the new boot or the new assignment for segments it opened afterwards
+ * would seal a bundle the server must reject. The new assignment applies from
+ * the next bundle.
+ */
+static bool row_resumed_bundle_keeps_its_binding(void)
+{
+    uint8_t device_id[16], seed[32], pub[32];
+    uint32_t boot = 0;
+    CHECK(cairn_identity_load(device_id, seed, pub, &boot), "identity load failed");
+
+    uint8_t boot_a[16], boot_b[16];
+    cairn_new_boot_id(boot_a);
+    cairn_new_boot_id(boot_b);
+
+    cairn_capture_t cap;
+    CHECK(cairn_capture_open_or_resume(&cap, device_id, boot_a, &g_ident), "open failed");
+    CHECK(append_samples(&cap, 5) == 5, "appends failed");
+    uint8_t t[20];
+    cairn_state_transition_t st;
+    memset(&st, 0, sizeof(st));
+    st.region = CAIRN_REGION_BUNDLE;
+    cairn_encode_state_transition(&st, t);
+    CHECK(cairn_capture_append(&cap, CAIRN_CHAIN_JOURNAL, CAIRN_REC_STATE_TRANSITION, 1,
+                               0, cairn_millis(), t, sizeof(t)), "journal append failed");
+
+    /* Reassigned while the capture is open, then a reboot. */
+    uint8_t new_vehicle[16], new_assignment[16];
+    memset(new_vehicle, 0x77, sizeof(new_vehicle));
+    memset(new_assignment, 0x88, sizeof(new_assignment));
+    CHECK(cairn_storage_set_assignment(new_vehicle, new_assignment), "reassign failed");
+    CHECK(cairn_storage_identity_load(&g_ident), "identity reload failed");
+
+    cairn_capture_t resumed;
+    CHECK(cairn_capture_open_or_resume(&resumed, device_id, boot_b, &g_ident),
+          "resume failed");
+    CHECK(memcmp(resumed.boot_id, boot_a, 16) == 0,
+          "the resumed bundle took the new boot id");
+    CHECK(memcmp(resumed.vehicle_id, TEST_VEHICLE_ID, 16) == 0 &&
+              memcmp(resumed.assignment_id, TEST_ASSIGNMENT_ID, 16) == 0,
+          "the resumed bundle took the new assignment");
+
+    /* Force a rotation, so a segment is created after the reboot. */
+    const int needed = (int)(CAIRN_SEGMENT_MAX_BYTES / GNSS_FRAME_LEN) + 10;
+    CHECK(append_samples(&resumed, needed) == needed, "appends after resume failed");
+    CHECK(resumed.segment_index >= 1, "no rotation happened");
+
+    char    sealed[27];
+    uint8_t content_root[32];
+    CHECK(seal_now(&resumed, sealed, content_root), "seal failed");
+
+    cairn_root_key_t root = root_of(&g_ident);
+    static cairn_manifest_t m;
+    if (!verify_sealed_bundle(sealed, pub, &root, &m)) return false;
+    CHECK(memcmp(m.boot_id, boot_a, 16) == 0, "the manifest names the wrong boot");
+    CHECK(memcmp(m.vehicle_id, TEST_VEHICLE_ID, 16) == 0, "the manifest names the "
+          "new vehicle for data captured under the old assignment");
+
+    /* The next bundle is the one the reassignment applies to. */
+    cairn_capture_t next;
+    CHECK(cairn_capture_open_or_resume(&next, device_id, boot_b, &g_ident),
+          "next open failed");
+    CHECK(memcmp(next.vehicle_id, new_vehicle, 16) == 0 &&
+              memcmp(next.assignment_id, new_assignment, 16) == 0 &&
+              memcmp(next.boot_id, boot_b, 16) == 0,
+          "the next bundle did not take the new assignment and boot");
+
+    return true;
+}
+
+/*
+ * With no assignment provisioned the device still captures and seals — data
+ * first — but binds the bundle to all-zero ids, says so, and the result is a
+ * bundle the server will refuse rather than one it would file under a guessed
+ * vehicle.
+ */
+static bool row_unassigned_is_visible(void)
+{
+    uint8_t zeros[16];
+    memset(zeros, 0, sizeof(zeros));
+    CHECK(cairn_storage_set_assignment(zeros, zeros), "cannot clear the assignment");
+    CHECK(cairn_storage_identity_load(&g_ident), "identity reload failed");
+    CHECK(!g_ident.assigned, "all-zero ids were reported as an assignment");
+
+    uint8_t device_id[16], seed[32], pub[32];
+    uint32_t boot = 0;
+    CHECK(cairn_identity_load(device_id, seed, pub, &boot), "identity load failed");
+    uint8_t boot_id[16];
+    cairn_new_boot_id(boot_id);
+
+    cairn_capture_t cap;
+    CHECK(cairn_capture_open_or_resume(&cap, device_id, boot_id, &g_ident), "open failed");
+    CHECK(!cap.assigned, "an unassigned capture claims an assignment");
+    CHECK(append_samples(&cap, 3) == 3, "an unassigned device stopped capturing");
+
+    char    sealed[27];
+    uint8_t content_root[32];
+    CHECK(seal_now(&cap, sealed, content_root), "an unassigned device could not seal");
+
+    cairn_root_key_t root = root_of(&g_ident);
+    static cairn_manifest_t m;
+    if (!verify_sealed_bundle(sealed, pub, &root, &m)) return false;
+    CHECK(memcmp(m.vehicle_id, zeros, 16) == 0 && memcmp(m.assignment_id, zeros, 16) == 0,
+          "an unassigned bundle names a vehicle");
+
+    return true;
+}
+
 /* ── driver ───────────────────────────────────────────────────────────────── */
 
 typedef struct {
@@ -2473,6 +3429,13 @@ static const row_t ROWS[] = {
     { "power",    "waking favours the earliest reliable signal", row_wake_prefers_engine_voltage },
     { "bus",      "parked means silent on the vehicle bus",      row_parked_bus_silence },
     { "bus",      "a drive is confirmed from local signals only", row_drive_confirmed_from_local_signals },
+    { "v3",       "encrypted torn tail recovers with no key",    row_encrypted_torn_tail_keyless },
+    { "v3",       "a wrong-key card scans, never extends, seals", row_wrong_key_card },
+    { "v3",       "a repaired CRC is AUTH_FAILED, never truncated", row_repaired_crc_auth_failed },
+    { "v3",       "the counter survives a power cut mid-seal",   row_counter_durable_across_seal_power_cut },
+    { "v3",       "no nonce repeats across a torn-tail rewrite", row_nonce_never_repeats_across_rewrite },
+    { "v3",       "a resumed bundle keeps one binding",          row_resumed_bundle_keeps_its_binding },
+    { "v3",       "an unassigned device seals, visibly unbound", row_unassigned_is_visible },
 };
 
 int main(int argc, char **argv)

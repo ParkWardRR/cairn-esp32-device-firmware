@@ -27,10 +27,21 @@
 #define K_RECOVERY_STATE   20
 #define K_DISCARDED_TAIL   21
 #define K_SIGNATURE_ALGO   22
-#define K_TRIP_SEQ         23
+#define K_TRIP_SEQ         23 /* optional */
 
-#define MANIFEST_FIELD_COUNT_BASE 22
-#define MANIFEST_FIELD_COUNT_MAX  23
+/*
+ * Keys 24-28 are mandatory. They sit after the optional trip_seq so the encoder
+ * emits keys in ascending order with a single conditional, and a manifest has
+ * 27 or 28 fields.
+ */
+#define K_VEHICLE_ID       24
+#define K_ASSIGNMENT_ID    25
+#define K_DEVICE_COUNTER   26
+#define K_KEY_VERSION      27
+#define K_ENCRYPTION_SUITE 28
+
+#define MANIFEST_FIELD_COUNT_BASE 27
+#define MANIFEST_FIELD_COUNT_MAX  28
 
 /* Receipt keys. 1..10 are covered by the signature; 11 is the signature. */
 #define RK_VERSION      1
@@ -54,6 +65,11 @@ cairn_err_t cairn_manifest_encode(const cairn_manifest_t *m,
                                   uint8_t *out, size_t out_cap, size_t *written)
 {
     if (strcmp(m->signature_algorithm, CAIRN_SIGALG_ED25519) != 0) {
+        return CAIRN_ERR_MALFORMED;
+    }
+    /* Mandatory, and only one suite exists: a manifest naming anything else
+     * would describe segments this code did not seal. */
+    if (strcmp(m->encryption_suite, CAIRN_ENCRYPTION_SUITE_V1) != 0) {
         return CAIRN_ERR_MALFORMED;
     }
     if (m->member_count > CAIRN_MAX_MEMBERS) return CAIRN_ERR_TOO_MANY_MEMBERS;
@@ -150,6 +166,17 @@ cairn_err_t cairn_manifest_encode(const cairn_manifest_t *m,
         cairn_cbor_key(&e, K_TRIP_SEQ);
         cairn_cbor_uint(&e, m->trip_seq);
     }
+
+    cairn_cbor_key(&e, K_VEHICLE_ID);
+    cairn_cbor_bytes(&e, m->vehicle_id, 16);
+    cairn_cbor_key(&e, K_ASSIGNMENT_ID);
+    cairn_cbor_bytes(&e, m->assignment_id, 16);
+    cairn_cbor_key(&e, K_DEVICE_COUNTER);
+    cairn_cbor_uint(&e, m->device_counter);
+    cairn_cbor_key(&e, K_KEY_VERSION);
+    cairn_cbor_uint(&e, m->storage_key_version);
+    cairn_cbor_key(&e, K_ENCRYPTION_SUITE);
+    cairn_cbor_text(&e, m->encryption_suite);
 
     if (e.overflow) return CAIRN_ERR_BUFFER_TOO_SMALL;
     if (written) *written = e.len;
@@ -322,8 +349,31 @@ static cairn_err_t manifest_decode_raw(const uint8_t *buf, size_t len,
             break;
         case K_TRIP_SEQ:
             if ((err = cairn_cbor_uint_read(&d, &v)) != CAIRN_OK) return err;
+            if (v > UINT32_MAX) return CAIRN_ERR_MALFORMED;
             m->trip_seq = (uint32_t)v;
             m->has_trip_seq = true;
+            break;
+        case K_VEHICLE_ID:
+            if ((err = cairn_cbor_bytes_n(&d, m->vehicle_id, 16)) != CAIRN_OK) return err;
+            break;
+        case K_ASSIGNMENT_ID:
+            if ((err = cairn_cbor_bytes_n(&d, m->assignment_id, 16)) != CAIRN_OK) return err;
+            break;
+        case K_DEVICE_COUNTER:
+            if ((err = cairn_cbor_uint_read(&d, &m->device_counter)) != CAIRN_OK) return err;
+            break;
+        case K_KEY_VERSION:
+            if ((err = cairn_cbor_uint_read(&d, &v)) != CAIRN_OK) return err;
+            if (v > UINT32_MAX) return CAIRN_ERR_MALFORMED;
+            m->storage_key_version = (uint32_t)v;
+            break;
+        case K_ENCRYPTION_SUITE:
+            err = cairn_cbor_text_read(&d, m->encryption_suite,
+                                       sizeof(m->encryption_suite));
+            if (err != CAIRN_OK) return err;
+            if (strcmp(m->encryption_suite, CAIRN_ENCRYPTION_SUITE_V1) != 0) {
+                return CAIRN_ERR_MALFORMED;
+            }
             break;
         default:
             return CAIRN_ERR_MALFORMED;
@@ -369,6 +419,67 @@ cairn_err_t cairn_manifest_verify_content_root(const cairn_manifest_t *m)
         return CAIRN_ERR_CONTENT_ROOT_MISMATCH;
     }
     return CAIRN_OK;
+}
+
+/* ── binding (§5.4) ───────────────────────────────────────────────────────── */
+
+/*
+ * The capture segment index named by "seg-NNNNNNNN.seg", exactly that shape —
+ * eight decimal digits, as the store and the Go reference both write it. Any
+ * other spelling is not a capture segment name, so a header cannot be matched
+ * to it.
+ */
+static bool capture_index_from_name(const char *name, uint32_t *out)
+{
+    if (strlen(name) != 16 || strncmp(name, "seg-", 4) != 0 ||
+        strcmp(name + 12, ".seg") != 0) {
+        return false;
+    }
+
+    uint32_t v = 0;
+    for (int i = 4; i < 12; i++) {
+        if (name[i] < '0' || name[i] > '9') return false;
+        v = v * 10u + (uint32_t)(name[i] - '0');
+    }
+    *out = v;
+    return true;
+}
+
+cairn_err_t cairn_verify_segment_binding(const cairn_manifest_t *m, const char *name,
+                                         const cairn_segment_header_t *h,
+                                         const char **field)
+{
+    const char *bad = NULL;
+
+    /* Same order as the Go reference, so both name the same first mismatch. */
+    if (memcmp(h->device_id, m->device_id, 16) != 0) {
+        bad = "device_id";
+    } else if (memcmp(h->boot_id, m->boot_id, 16) != 0) {
+        bad = "boot_id";
+    } else if (memcmp(h->vehicle_id, m->vehicle_id, 16) != 0) {
+        bad = "vehicle_id";
+    } else if (memcmp(h->assignment_id, m->assignment_id, 16) != 0) {
+        bad = "assignment_id";
+    } else if (h->device_counter != m->device_counter) {
+        bad = "device_counter";
+    } else if (h->storage_key_version != m->storage_key_version) {
+        bad = "storage_key_version";
+    } else if (strcmp(name, "journal.seg") == 0) {
+        if (h->segment_index != CAIRN_JOURNAL_SEGMENT_INDEX) bad = "segment_index";
+    } else {
+        /*
+         * A capture segment's index is a key-derivation input, so a segment
+         * renamed into another position would still open under its own key —
+         * only this check notices that it is in the wrong place.
+         */
+        uint32_t want = 0;
+        if (!capture_index_from_name(name, &want) || want != h->segment_index) {
+            bad = "segment_index";
+        }
+    }
+
+    if (field) *field = bad;
+    return (bad == NULL) ? CAIRN_OK : CAIRN_ERR_BINDING_MISMATCH;
 }
 
 /* ── manifest signing ─────────────────────────────────────────────────────── */

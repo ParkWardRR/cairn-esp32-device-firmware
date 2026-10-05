@@ -18,7 +18,7 @@
 #   make clean
 
 CC       ?= cc
-FIXTURES ?= ../../../../fixtures/format-v2
+FIXTURES ?= ../../../../fixtures/format-v3
 
 FORMAT_DIR := ../../lib/cairn_format
 STORE_DIR  := ../../lib/cairn_store
@@ -57,24 +57,31 @@ CFLAGS  ?= -std=c11 -O1 -g \
            -Wmissing-prototypes -Wno-unused-parameter \
            -I$(FORMAT_DIR) -I$(STORE_DIR) -I$(FS_DIR) -I$(LOG_DIR) -I$(INCLUDE_DIR) -I$(SRC_DIR) -I$(OTA_DIR) -I$(POWER_DIR) -I.
 
+# Every header the sources can include. Without this a change to a shared header
+# (config.h, cairn_platform.h, policy.h) leaves a stale binary in build/ and a
+# result that describes yesterday's code — which already produced one false
+# failure and could as easily produce a false pass.
+HEADERS := $(wildcard $(FORMAT_DIR)/*.h $(STORE_DIR)/*.h $(FS_DIR)/*.h $(LOG_DIR)/*.h \
+                      $(INCLUDE_DIR)/*.h $(SRC_DIR)/*.h $(OTA_DIR)/*.h $(POWER_DIR)/*.h *.h)
+
 SAN := -fsanitize=address,undefined -fno-omit-frame-pointer
 
 BUILD := build
 
-.PHONY: all run asan clean conformance faults ble-vectors
+.PHONY: all run asan clean conformance faults ble-vectors mtprobe
 
 all: run
 
 $(BUILD):
 	mkdir -p $(BUILD)
 
-$(BUILD)/conformance: $(CONFORMANCE_SRC) $(FORMAT_DIR)/cairn_format.h minijson.h | $(BUILD)
+$(BUILD)/conformance: $(CONFORMANCE_SRC) $(HEADERS) | $(BUILD)
 	$(CC) $(CFLAGS) $(CONFORMANCE_SRC) -o $@
 
-$(BUILD)/faults: $(FAULTS_SRC) $(STORE_DIR)/cairn_store.h $(STORE_DIR)/cairn_prune.h $(SRC_DIR)/preroll.h | $(BUILD)
+$(BUILD)/faults: $(FAULTS_SRC) $(HEADERS) | $(BUILD)
 	$(CC) $(CFLAGS) $(FAULTS_SRC) -o $@
 
-$(BUILD)/ble-vectors: $(BLE_VEC_SRC) $(FORMAT_DIR)/cairn_format.h minijson.h | $(BUILD)
+$(BUILD)/ble-vectors: $(BLE_VEC_SRC) $(HEADERS) | $(BUILD)
 	$(CC) $(CFLAGS) $(BLE_VEC_SRC) -lm -o $@
 
 conformance: $(BUILD)/conformance
@@ -86,7 +93,13 @@ faults: $(BUILD)/faults
 ble-vectors: $(BUILD)/ble-vectors
 	$(BUILD)/ble-vectors $(BLE_VECTORS)
 
-run: conformance faults ble-vectors
+$(BUILD)/mtprobe: $(SRC_DIR)/mtprobe_parse.c $(HEADERS) mtprobe_parse_test.c | $(BUILD)
+	$(CC) $(CFLAGS) $(SRC_DIR)/mtprobe_parse.c mtprobe_parse_test.c -o $@
+
+mtprobe: $(BUILD)/mtprobe
+	$(BUILD)/mtprobe
+
+run: conformance faults ble-vectors mtprobe
 
 # Undefined behaviour in the scan path would be a parser reading past a torn
 # segment — exactly the case the format exists to handle safely.
@@ -97,6 +110,8 @@ asan: | $(BUILD)
 	$(BUILD)/faults-asan
 	$(CC) $(CFLAGS) $(SAN) $(BLE_VEC_SRC) -lm -o $(BUILD)/ble-vectors-asan
 	$(BUILD)/ble-vectors-asan $(BLE_VECTORS)
+	$(CC) $(CFLAGS) $(SAN) $(SRC_DIR)/mtprobe_parse.c mtprobe_parse_test.c -o $(BUILD)/mtprobe-asan
+	$(BUILD)/mtprobe-asan
 
 clean:
 	rm -rf $(BUILD)

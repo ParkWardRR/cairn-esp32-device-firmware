@@ -15,6 +15,9 @@ uint64_t cairn_micros(void) { return (uint64_t)esp_timer_get_time(); }
 
 void cairn_random(uint8_t *out, size_t len) { esp_fill_random(out, len); }
 
+/* The hardware RNG, for keys and nonces. Never derived from anything. */
+void cairn_rng_fill(uint8_t *out, size_t len) { esp_fill_random(out, len); }
+
 void cairn_hw_unique_id(uint8_t out[6])
 {
     /* The efuse MAC is burned at manufacture, so it survives an NVS wipe and a

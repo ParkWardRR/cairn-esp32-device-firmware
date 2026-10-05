@@ -41,6 +41,53 @@ void cairn_random(uint8_t *out, size_t len)
     }
 }
 
+/*
+ * The key/nonce stream, injectable.
+ *
+ * By default a SplitMix64 stream of its own, seeded apart from cairn_random so
+ * that reseeding one never replays the other. A test can reset it to a fixed
+ * seed (to make two runs seal identical bytes) or force it to repeat a short
+ * cycle — which is how the nonce row proves it would notice a reused nonce,
+ * rather than passing because nothing could ever repeat.
+ */
+static uint64_t s_crypto_state = 0x9E3779B97F4A7C15ULL;
+static size_t   s_crypto_cycle;  /* 0: no forced repeat */
+static size_t   s_crypto_drawn;
+static uint64_t s_crypto_seed = 0x9E3779B97F4A7C15ULL;
+
+void cairn_host_rng_seed(uint64_t seed);
+void cairn_host_rng_force_cycle(size_t bytes);
+
+void cairn_host_rng_seed(uint64_t seed)
+{
+    s_crypto_seed  = seed;
+    s_crypto_state = seed;
+    s_crypto_drawn = 0;
+    s_crypto_cycle = 0;
+}
+
+void cairn_host_rng_force_cycle(size_t bytes)
+{
+    s_crypto_state = s_crypto_seed;
+    s_crypto_drawn = 0;
+    s_crypto_cycle = bytes;
+}
+
+void cairn_rng_fill(uint8_t *out, size_t len)
+{
+    for (size_t i = 0; i < len; i++) {
+        if (s_crypto_cycle > 0 && s_crypto_drawn % s_crypto_cycle == 0) {
+            s_crypto_state = s_crypto_seed; /* replay from the top */
+        }
+        s_crypto_drawn++;
+
+        uint64_t z = (s_crypto_state += 0x9E3779B97F4A7C15ULL);
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+        out[i] = (uint8_t)(z ^ (z >> 31));
+    }
+}
+
 void cairn_hw_unique_id(uint8_t out[6])
 {
     /* Fixed, so the derived device id is stable across simulated reboots — the

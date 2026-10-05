@@ -1,16 +1,28 @@
 /*
- * Cairn bundle format v2 — C implementation.
+ * Cairn bundle format v3 — C implementation.
  *
- * The normative specification is docs/bundle-format-v2.md. This is the third
+ * The normative specification is docs/bundle-format-v3.md. This is the third
  * implementation of it, after Go (server/format) and Rust (emulator/src/format),
  * and it is the one that matters most: a disagreement here means a device
  * writing bundles the server cannot recover.
  *
+ * v3 replaces v2 outright. There is no v2 read path: v2 recordings were test
+ * data, and a reader for a dead format is code that can only be wrong.
+ *
+ * What v3 adds is that every frame is sealed with XChaCha20-Poly1305 under a
+ * per-segment key, and every segment and manifest names its vehicle, its
+ * assignment and a monotonic device counter. Everything structural — torn tails,
+ * CRCs, the prev_crc32 chain, the Merkle root — still works on the stored bytes
+ * with no key at all, which is why the recovery scan below takes the key as an
+ * optional callback rather than a requirement.
+ *
  * Deliberately portable C11 with no ESP-IDF dependency, so exactly this code
  * can be compiled natively and checked against the committed conformance
- * vectors in fixtures/format-v2/. Verifying firmware correctness without
+ * vectors in fixtures/format-v3/. Verifying firmware correctness without
  * hardware is otherwise impossible, and "it compiled" is not the same as "it
- * agrees with the other two implementations".
+ * agrees with the other two implementations". The one thing this library does
+ * not do is generate randomness: nonces are passed in, so the caller owns the
+ * RNG (the hardware one on the device, a fixed stream under test).
  *
  * On ESP32, CAIRN_USE_ESP_ROM_CRC routes the checksum through esp_rom_crc32_le,
  * which is why the specification chose CRC-32 over CRC32C in the first place.
@@ -29,21 +41,56 @@ extern "C" {
 
 /* ── versions ─────────────────────────────────────────────────────────────── */
 
-#define CAIRN_FORMAT_VERSION    2
-#define CAIRN_MANIFEST_VERSION  2
+#define CAIRN_FORMAT_VERSION    3
+#define CAIRN_MANIFEST_VERSION  3
+/* Receipts did not change in v3, so neither did their version. */
 #define CAIRN_RECEIPT_VERSION   2
 
 #define CAIRN_SIGALG_ED25519 "ed25519"
 
+/*
+ * Named in the signed manifest so a future suite is an explicit, detectable
+ * change rather than something inferred from key or nonce length.
+ */
+#define CAIRN_ENCRYPTION_SUITE_V1 "xchacha20poly1305+hkdf-sha256/v1"
+
+/* The fixed prefix of the HKDF info string for segment keys (§3.6). */
+#define CAIRN_HKDF_SEGMENT_LABEL "cairn/segment/v3"
+
 /* ── geometry ─────────────────────────────────────────────────────────────── */
 
-#define CAIRN_SEGMENT_HEADER_SIZE 64
+#define CAIRN_SEGMENT_HEADER_SIZE 128
+
+/*
+ * The longest header_len a *keyed* scan will accept. header_len lets a reader
+ * skip a longer header from a future version, but every byte of it except the
+ * CRC is AAD, so a keyed scan must hold all of it. A structural scan needs only
+ * the first 128 bytes and has no such limit. Every v3 writer emits 128.
+ */
+#define CAIRN_MAX_HEADER_LEN      256
+
+/* segment_index reserved for journal.seg. It is a KDF input, so the journal's
+ * key can never coincide with a capture segment's. */
+#define CAIRN_JOURNAL_SEGMENT_INDEX 0xFFFFFFFFu
+
+#define CAIRN_ROOT_KEY_SIZE    32
+#define CAIRN_SEGMENT_KEY_SIZE 32
+#define CAIRN_NONCE_SIZE       24
+#define CAIRN_TAG_SIZE         16
+#define CAIRN_AEAD_OVERHEAD    (CAIRN_NONCE_SIZE + CAIRN_TAG_SIZE) /* 40 */
+
 #define CAIRN_FRAME_HEADER_SIZE   24
 #define CAIRN_FRAME_TRAILER_SIZE  4
-#define CAIRN_FRAME_OVERHEAD      (CAIRN_FRAME_HEADER_SIZE + CAIRN_FRAME_TRAILER_SIZE) /* 28 */
+/*
+ * Every frame is sealed, so even an empty record carries the nonce and tag:
+ * frame_len = 68 + N. The maximum frame is unchanged from v2, which is why the
+ * largest plaintext payload shrank from 4068 to 4028.
+ */
+#define CAIRN_FRAME_OVERHEAD      (CAIRN_FRAME_HEADER_SIZE + CAIRN_AEAD_OVERHEAD + \
+                                   CAIRN_FRAME_TRAILER_SIZE)                          /* 68 */
 #define CAIRN_MIN_FRAME_LEN       CAIRN_FRAME_OVERHEAD
 #define CAIRN_MAX_FRAME_LEN       4096
-#define CAIRN_MAX_PAYLOAD_SIZE    (CAIRN_MAX_FRAME_LEN - CAIRN_FRAME_OVERHEAD)         /* 4068 */
+#define CAIRN_MAX_PAYLOAD_SIZE    (CAIRN_MAX_FRAME_LEN - CAIRN_FRAME_OVERHEAD)         /* 4028 */
 
 /* ── record types ─────────────────────────────────────────────────────────── */
 
@@ -118,6 +165,18 @@ typedef enum {
     CAIRN_ERR_RECEIPT_ROOT_MISMATCH,
     CAIRN_ERR_TOO_MANY_MEMBERS,
     CAIRN_ERR_READ_FAILED,
+    /* The key provider holds no key for this segment's device. The segment is
+     * intact; it can be scanned structurally but not decrypted. */
+    CAIRN_ERR_NO_KEY,
+    /* The segment was sealed under a storage_key_version the provider does not
+     * hold. A key is missing — this is not tampering, and is reported apart
+     * from it so an operator is told which. */
+    CAIRN_ERR_KEY_VERSION_MISMATCH,
+    /* A frame's tag did not verify. Only cairn_open_frame returns this; a scan
+     * reports the same condition as CAIRN_STOP_AUTH_FAILED. */
+    CAIRN_ERR_AUTH_FAILED,
+    /* A segment header disagrees with the manifest about whose data it is. */
+    CAIRN_ERR_BINDING_MISMATCH,
 } cairn_err_t;
 
 const char *cairn_strerror(cairn_err_t e);
@@ -146,6 +205,59 @@ void cairn_sha256_init(cairn_sha256_t *ctx);
 void cairn_sha256_update(cairn_sha256_t *ctx, const uint8_t *data, size_t len);
 void cairn_sha256_final(cairn_sha256_t *ctx, uint8_t out[32]);
 void cairn_sha256(const uint8_t *data, size_t len, uint8_t out[32]);
+
+/* ── HMAC and HKDF (cf_hkdf.c) ────────────────────────────────────────────── */
+
+void cairn_hmac_sha256(const uint8_t *key, size_t key_len, const uint8_t *msg,
+                       size_t len, uint8_t out[32]);
+
+/*
+ * HKDF-SHA256, RFC 5869: extract with `salt`, expand with `info` to `out_len`
+ * bytes. Returns false only for out_len > 255 * 32, which RFC 5869 forbids.
+ */
+bool cairn_hkdf_sha256(const uint8_t *salt, size_t salt_len, const uint8_t *ikm,
+                       size_t ikm_len, const uint8_t *info, size_t info_len,
+                       uint8_t *out, size_t out_len);
+
+/* ── XChaCha20-Poly1305 (cf_aead.c) ───────────────────────────────────────── */
+
+/* HChaCha20 (draft-irtf-cfrg-xchacha §2.2): the subkey derivation step. */
+void cairn_hchacha20(const uint8_t key[32], const uint8_t in[16], uint8_t out[32]);
+
+/*
+ * Seal `len` bytes of `pt` into `ct` (which may equal `pt`) and produce the
+ * 16-byte tag. The AAD is authenticated but not encrypted.
+ */
+void cairn_xchacha20poly1305_seal(const uint8_t key[32], const uint8_t nonce[24],
+                                  const uint8_t *aad, size_t aad_len,
+                                  const uint8_t *pt, size_t len, uint8_t *ct,
+                                  uint8_t tag[16]);
+
+/*
+ * Verify the tag, then decrypt into `pt` (which may equal `ct`). Returns false
+ * and leaves `pt` untouched if the tag does not verify — nothing
+ * unauthenticated is ever written out.
+ */
+bool cairn_xchacha20poly1305_open(const uint8_t key[32], const uint8_t nonce[24],
+                                  const uint8_t *aad, size_t aad_len,
+                                  const uint8_t *ct, size_t len,
+                                  const uint8_t tag[16], uint8_t *pt);
+
+/*
+ * The same with the AAD supplied in two pieces, authenticated as their
+ * concatenation. A frame's AAD is its own 24-byte header followed by the
+ * segment header, which live in different buffers.
+ */
+void cairn_xchacha20poly1305_seal2(const uint8_t key[32], const uint8_t nonce[24],
+                                   const uint8_t *aad_a, size_t aad_a_len,
+                                   const uint8_t *aad_b, size_t aad_b_len,
+                                   const uint8_t *pt, size_t len, uint8_t *ct,
+                                   uint8_t tag[16]);
+bool cairn_xchacha20poly1305_open2(const uint8_t key[32], const uint8_t nonce[24],
+                                   const uint8_t *aad_a, size_t aad_a_len,
+                                   const uint8_t *aad_b, size_t aad_b_len,
+                                   const uint8_t *ct, size_t len,
+                                   const uint8_t tag[16], uint8_t *pt);
 
 /* ── Merkle tree ──────────────────────────────────────────────────────────── */
 
@@ -194,23 +306,91 @@ cairn_err_t cairn_content_root(const cairn_member_t *members, size_t count,
 
 /* ── segment header ───────────────────────────────────────────────────────── */
 
+/*
+ * The 128-byte v3 header (§3.1). Every field but the CRC is AAD on every frame
+ * of the segment, so the identity fields are bound, not merely labels — and
+ * they are readable without any key, because intake must be able to authorise
+ * a bundle (does this assignment exist, is this counter spent?) before it ever
+ * decrypts anything.
+ */
 typedef struct {
     uint16_t format_version;
     uint8_t  device_id[16];
     uint8_t  boot_id[16];
-    uint32_t segment_index;
+    uint8_t  vehicle_id[16];
+    uint8_t  assignment_id[16];
+    uint32_t segment_index;       /* CAIRN_JOURNAL_SEGMENT_INDEX for journal.seg */
     uint32_t first_seq;
     uint64_t opened_monotonic_us;
+    uint32_t storage_key_version; /* selects which K_root the segment key derives from */
+    uint64_t device_counter;      /* identical in every segment of a bundle */
 } cairn_segment_header_t;
 
-/* Encode a 64-byte header into `out`. */
+/* Encode a 128-byte header into `out`. */
 cairn_err_t cairn_encode_segment_header(const cairn_segment_header_t *h,
                                         uint8_t *out, size_t out_cap);
 
-/* Decode and verify. `header_len` receives where frame scanning begins. */
+/*
+ * Decode and verify. `header_len` receives where frame scanning begins. `len`
+ * is the number of bytes available at `buf`, which must be at least 128; it is
+ * not required to cover a longer header_len — callers that know the segment's
+ * total size check that themselves.
+ */
 cairn_err_t cairn_parse_segment_header(const uint8_t *buf, size_t len,
                                        cairn_segment_header_t *out,
                                        size_t *header_len);
+
+/* ── keys ─────────────────────────────────────────────────────────────────── */
+
+/*
+ * K_seg = HKDF-SHA256(ikm = K_root, salt = vehicle_id,
+ *                     info = "cairn/segment/v3" || device_id || assignment_id
+ *                            || boot_id || segment_index u32le, L = 32)
+ *
+ * The header, not the caller, says which key applies.
+ */
+void cairn_derive_segment_key(const uint8_t root[CAIRN_ROOT_KEY_SIZE],
+                              const cairn_segment_header_t *h,
+                              uint8_t out[CAIRN_SEGMENT_KEY_SIZE]);
+
+/*
+ * Supplies the segment key for a parsed header, or refuses with
+ * CAIRN_ERR_NO_KEY / CAIRN_ERR_KEY_VERSION_MISMATCH. A server holding many
+ * escrowed roots looks one up by h->device_id and h->storage_key_version; a
+ * device holding its own root checks the version and derives.
+ */
+typedef cairn_err_t (*cairn_key_fn)(void *user, const cairn_segment_header_t *h,
+                                    uint8_t key_out[CAIRN_SEGMENT_KEY_SIZE]);
+
+/* A single storage root at a single version. */
+typedef struct {
+    uint8_t  root[CAIRN_ROOT_KEY_SIZE];
+    uint32_t version;
+} cairn_root_key_t;
+
+/* A cairn_key_fn over a cairn_root_key_t passed as `user`. */
+cairn_err_t cairn_root_key_provider(void *user, const cairn_segment_header_t *h,
+                                    uint8_t key_out[CAIRN_SEGMENT_KEY_SIZE]);
+
+/*
+ * Everything needed to seal or open the frames of one segment: its key, and
+ * the AAD suffix — the segment header bytes [0, header_len - 4). Binding the
+ * header into every frame is what stops a valid frame being moved to another
+ * segment, bundle, vehicle, device or counter.
+ */
+typedef struct {
+    uint8_t key[CAIRN_SEGMENT_KEY_SIZE];
+    uint8_t header_aad[CAIRN_MAX_HEADER_LEN - 4];
+    size_t  header_aad_len;
+} cairn_segment_cipher_t;
+
+/* `header` is the encoded segment header, `header_len` bytes of it. */
+cairn_err_t cairn_segment_cipher_init(cairn_segment_cipher_t *c,
+                                      const uint8_t key[CAIRN_SEGMENT_KEY_SIZE],
+                                      const uint8_t *header, size_t header_len);
+
+/* Zero the key. A capture holds one per open segment; sealing drops them. */
+void cairn_segment_cipher_wipe(cairn_segment_cipher_t *c);
 
 /* ── frames ───────────────────────────────────────────────────────────────── */
 
@@ -222,22 +402,60 @@ typedef struct {
     uint32_t monotonic_ms;
     uint32_t prev_crc32;
 
+    /*
+     * The plaintext record body — but only after a keyed scan authenticated it
+     * (`decrypted` true). After a structural scan `payload` is NULL and
+     * `payload_len` is 0, deliberately rather than pointing at ciphertext:
+     * ciphertext is exactly as long as plaintext, so a payload parser handed it
+     * would not fail on length, it would return a plausible record of random
+     * numbers.
+     */
     const uint8_t *payload;
     size_t         payload_len;
+    bool           decrypted;
+
+    /*
+     * nonce[24] || ciphertext || tag[16], as stored. Set by a structural scan;
+     * NULL after a keyed one, which decrypts in place.
+     */
+    const uint8_t *sealed;
+    size_t         sealed_len;
 
     uint32_t crc32; /* computed on encode, read on scan */
 } cairn_frame_t;
 
 /*
- * Encode a frame into `out`, returning its length in `written` and its CRC in
- * `crc_out` — which is the next frame's prev_crc32.
+ * Seal `payload` and encode the frame into `out`, returning its length in
+ * `written` and its CRC in `crc_out` — which is the next frame's prev_crc32.
+ *
+ * `nonce` must be 24 fresh random bytes. It is never derived from seq: after a
+ * torn-tail truncation the same seq is legitimately written again with
+ * different plaintext, and a seq-derived nonce would then encrypt two
+ * plaintexts under one (key, nonce) pair — leaking their XOR and, through
+ * Poly1305, the authenticator key. The library takes the nonce as an argument
+ * so the caller owns the RNG.
+ *
+ * The CRC covers the ciphertext frame, so a holder of no key can still find a
+ * torn tail, a corrupt frame or a broken chain.
  */
-cairn_err_t cairn_encode_frame(uint8_t record_type, uint8_t schema_version,
+cairn_err_t cairn_encode_frame(const cairn_segment_cipher_t *c,
+                               const uint8_t nonce[CAIRN_NONCE_SIZE],
+                               uint8_t record_type, uint8_t schema_version,
                                uint16_t flags, uint32_t seq,
                                uint32_t monotonic_ms, uint32_t prev_crc32,
                                const uint8_t *payload, size_t payload_len,
                                uint8_t *out, size_t out_cap,
                                size_t *written, uint32_t *crc_out);
+
+/*
+ * Authenticate one complete, CRC-valid frame of `frame_len` bytes and decrypt
+ * its payload in place. On success `*payload` points into `frame` and
+ * `*payload_len` is the plaintext length. CAIRN_ERR_AUTH_FAILED leaves the
+ * frame untouched.
+ */
+cairn_err_t cairn_open_frame(const cairn_segment_cipher_t *c, uint8_t *frame,
+                             size_t frame_len, const uint8_t **payload,
+                             size_t *payload_len);
 
 /* ── the recovery scan ────────────────────────────────────────────────────── */
 
@@ -247,6 +465,13 @@ typedef enum {
     CAIRN_STOP_CORRUPT_FRAME,
     CAIRN_STOP_CHAIN_BREAK,
     CAIRN_STOP_SEQ_GAP,
+    /*
+     * Keyed scans only. CRC, chain and sequence all held but the tag did not:
+     * the signature of a repaired-CRC edit, a frame moved from another segment,
+     * or the wrong key — never of a power cut. A structural scan cannot
+     * produce it.
+     */
+    CAIRN_STOP_AUTH_FAILED,
 } cairn_stop_reason_t;
 
 const char *cairn_stop_reason_name(cairn_stop_reason_t r);
@@ -259,6 +484,10 @@ typedef struct {
 
 typedef struct {
     cairn_segment_header_t header;
+    size_t   header_len;
+
+    /* True when every retained frame was also authenticated and decrypted. */
+    bool     keyed;
 
     size_t   frames;               /* valid frames retained */
     uint32_t first_seq;
@@ -281,17 +510,35 @@ typedef struct {
 typedef bool (*cairn_frame_cb)(const cairn_frame_t *f, void *user);
 
 /*
- * Walk a segment's frames per the specification's recovery algorithm.
+ * How to scan. A NULL options pointer, or a NULL `key`, is a structural scan:
+ * torn tails, CRCs, the chain and the sequence are verified over the stored
+ * ciphertext with no key at all. A `key` provider adds authentication of every
+ * frame and hands the callback plaintext.
+ */
+typedef struct {
+    cairn_key_fn   key;
+    void          *key_user;
+    cairn_frame_cb on_frame;
+    void          *frame_user;
+} cairn_scan_opts_t;
+
+/*
+ * Walk a segment's frames per the specification's recovery algorithm (§3.3).
  *
  * Stop-at-first-invalid: every frame before the failure point is valid and
  * retained; everything from there to end-of-segment is reported as a discarded
  * tail, with the exact byte count and the reason. A header error is returned as
- * an error — the segment is unusable, but the caller must not delete it.
+ * an error — the segment is unusable, but the caller must not delete it. So is
+ * a key error (CAIRN_ERR_NO_KEY, CAIRN_ERR_KEY_VERSION_MISMATCH): the segment is
+ * intact, merely unreadable with what the caller holds.
+ *
+ * Authentication runs after the structural checks, never before, so a damaged
+ * frame reports as damage whether or not a key is held.
  */
 cairn_err_t cairn_scan_segment(const uint8_t *buf, size_t len,
                                cairn_scan_state_t state,
-                               cairn_scan_result_t *out,
-                               cairn_frame_cb cb, void *user);
+                               const cairn_scan_opts_t *opts,
+                               cairn_scan_result_t *out);
 
 /*
  * Read `len` bytes at `offset`. Must fill the request completely or return
@@ -309,6 +556,10 @@ typedef bool (*cairn_read_fn)(void *user, uint64_t offset, uint8_t *buf, size_t 
  * conformance vectors exercise it, so the device and the test agree on one body
  * of code rather than two that merely resemble each other.
  *
+ * That includes the keyed scan: a frame is authenticated and decrypted in place
+ * in the same one-frame stage, so a segment far larger than DRAM is still
+ * fully authenticated with one frame resident.
+ *
  * Not reentrant: the one-frame staging buffer is static, to keep a 4 KiB
  * allocation off a FreeRTOS task stack. Recovery runs once at boot on a single
  * task, which is the only caller that matters.
@@ -316,8 +567,8 @@ typedef bool (*cairn_read_fn)(void *user, uint64_t offset, uint8_t *buf, size_t 
 cairn_err_t cairn_scan_segment_stream(cairn_read_fn read, void *read_user,
                                       uint64_t len,
                                       cairn_scan_state_t state,
-                                      cairn_scan_result_t *out,
-                                      cairn_frame_cb cb, void *user);
+                                      const cairn_scan_opts_t *opts,
+                                      cairn_scan_result_t *out);
 
 /* ── deterministic CBOR ───────────────────────────────────────────────────── */
 
@@ -400,6 +651,21 @@ typedef struct {
 
     bool     has_trip_seq;
     uint32_t trip_seq;
+
+    /*
+     * Keys 24-28, all mandatory. They bind the bundle to a vehicle, to the
+     * device-to-vehicle assignment active when it was captured, to a position
+     * in the device's monotonic bundle sequence, and to the root its segments
+     * were sealed under. Each is repeated in every segment header, where it is
+     * also authenticated into every frame; cairn_verify_segment_binding checks
+     * the two agree. They are signed here so the server can enforce assignment
+     * and replay policy on the manifest alone, before fetching any content.
+     */
+    uint8_t  vehicle_id[16];
+    uint8_t  assignment_id[16];
+    uint64_t device_counter;      /* starts at 1 */
+    uint32_t storage_key_version;
+    char     encryption_suite[40];
 } cairn_manifest_t;
 
 /*
@@ -423,6 +689,25 @@ cairn_err_t cairn_manifest_decode(const uint8_t *buf, size_t len,
 
 /* Recompute the content root from the members and compare to the signed value. */
 cairn_err_t cairn_manifest_verify_content_root(const cairn_manifest_t *m);
+
+/*
+ * Binding rules, §5.4: check one member segment's parsed header against the
+ * manifest it is listed in under `name`.
+ *
+ * device_id, boot_id, vehicle_id, assignment_id, device_counter and
+ * storage_key_version must equal the manifest's; a capture segment's
+ * segment_index must equal the index in its name, and journal.seg must carry
+ * the reserved index — otherwise a segment could be renamed into another
+ * position while keeping its own key-derivation inputs.
+ *
+ * A valid manifest signature does not make this redundant: the signature binds
+ * the manifest to the device key, not the manifest to its segments. On a
+ * mismatch `field` (if non-NULL) receives the name of the first field that
+ * disagreed, in the same order the Go reference checks them.
+ */
+cairn_err_t cairn_verify_segment_binding(const cairn_manifest_t *m, const char *name,
+                                         const cairn_segment_header_t *h,
+                                         const char **field);
 
 /* ── receipt ──────────────────────────────────────────────────────────────── */
 

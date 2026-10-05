@@ -30,6 +30,22 @@
 extern "C" {
 #endif
 
+/*
+ * Floors on adaptive rates. Sampling GNSS faster than the receiver produces
+ * fixes would manufacture duplicate records, an IMU window shorter than a few
+ * samples has no statistics to summarize, and the OBD round trip measured
+ * 110..140 ms per request.
+ *
+ * They are exported, not private to policy.c, because the nominal periods are
+ * tuned toward them: once a nominal period reaches its floor, adaptation has no
+ * headroom on that axis and an EVENT cannot be finer than CRUISE there. That is
+ * a property of the hardware, not a defect, and the tests need the numbers to
+ * tell "inert because pinned at the floor" from "inert because broken".
+ */
+#define CAIRN_FLOOR_GNSS_PERIOD_MS 200
+#define CAIRN_FLOOR_IMU_WINDOW_MS  100
+#define CAIRN_FLOOR_OBD_PERIOD_MS  250
+
 typedef struct {
     uint8_t  policy_version;
 

@@ -245,7 +245,7 @@ void cairn_policy_rates(const cairn_policy_t *p, cairn_dynamics_t d,
     /* Floors. Sampling GNSS faster than the receiver produces fixes would
      * manufacture duplicate records, and an IMU window shorter than a few
      * samples has no statistics to summarize. */
-    if (out->gnss_period_ms < 200) out->gnss_period_ms = 200;
-    if (out->imu_window_ms < 100) out->imu_window_ms = 100;
-    if (out->obd_period_ms < 250) out->obd_period_ms = 250;
+    if (out->gnss_period_ms < CAIRN_FLOOR_GNSS_PERIOD_MS) out->gnss_period_ms = CAIRN_FLOOR_GNSS_PERIOD_MS;
+    if (out->imu_window_ms < CAIRN_FLOOR_IMU_WINDOW_MS) out->imu_window_ms = CAIRN_FLOOR_IMU_WINDOW_MS;
+    if (out->obd_period_ms < CAIRN_FLOOR_OBD_PERIOD_MS) out->obd_period_ms = CAIRN_FLOOR_OBD_PERIOD_MS;
 }

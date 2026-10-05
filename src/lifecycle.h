@@ -87,6 +87,14 @@ struct Lifecycle {
     uint32_t boot_count;
 
     /*
+     * Storage root, vehicle assignment and device-counter hooks (format v3),
+     * from NVS. Every capture is opened against this; it must outlive `cap`.
+     * `storage.assigned` false means bundles are being bound to all-zero ids
+     * and the server will refuse them until the device is assigned.
+     */
+    cairn_storage_identity_t storage;
+
+    /*
      * The standby blocker reported last tick, so a reason is logged when it
      * changes rather than on every pass. Holds a string literal returned by
      * cairn_power_standby_blocker, or nullptr when nothing is blocking.

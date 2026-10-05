@@ -1,11 +1,16 @@
 /*
- * Segment headers, frame encoding and the recovery scan.
+ * Segment headers, frame sealing and the recovery scan.
  *
  * The scan is the algorithm that decides what survives a power cut, so it
  * follows the specification literally and is checked against the committed
  * vectors. Its behaviour is stop-at-first-invalid: every frame before the
  * failure is retained, everything after it is reported as a discarded tail
  * with an exact byte count and a reason.
+ *
+ * In v3 every frame is sealed, but nothing structural depends on the key: the
+ * CRC and the prev_crc32 chain are computed over the ciphertext frame, so a
+ * keyless scan reaches exactly the same structural verdict as a keyed one. The
+ * key adds one check, authentication, and it runs last.
  */
 
 #include <stdio.h>
@@ -13,7 +18,24 @@
 
 #include "cairn_format.h"
 
-static const uint8_t SEGMENT_MAGIC[4] = { 'C', 'R', 'N', '2' };
+static const uint8_t SEGMENT_MAGIC[4] = { 'C', 'R', 'N', '3' };
+
+/* Byte offsets within the 128-byte segment header (§3.1). Spelled out because
+ * an off-by-one here is invisible until two implementations disagree on a card. */
+#define OFF_MAGIC           0
+#define OFF_FORMAT_VERSION  4
+#define OFF_HEADER_LEN      6
+#define OFF_DEVICE_ID       8
+#define OFF_BOOT_ID         24
+#define OFF_VEHICLE_ID      40
+#define OFF_ASSIGNMENT_ID   56
+#define OFF_SEGMENT_INDEX   72
+#define OFF_FIRST_SEQ       76
+#define OFF_OPENED_US       80
+#define OFF_KEY_VERSION     88
+#define OFF_DEVICE_COUNTER  92
+#define OFF_RESERVED        100 /* 24 bytes, zero */
+#define OFF_HEADER_CRC      (CAIRN_SEGMENT_HEADER_SIZE - 4)
 
 /* ── little-endian helpers ────────────────────────────────────────────────── */
 
@@ -169,6 +191,7 @@ const char *cairn_stop_reason_name(cairn_stop_reason_t r)
     case CAIRN_STOP_CORRUPT_FRAME: return "CORRUPT_FRAME";
     case CAIRN_STOP_CHAIN_BREAK:   return "CHAIN_BREAK";
     case CAIRN_STOP_SEQ_GAP:       return "SEQ_GAP";
+    case CAIRN_STOP_AUTH_FAILED:   return "AUTH_FAILED";
     default:                       return "?";
     }
 }
@@ -193,6 +216,10 @@ const char *cairn_strerror(cairn_err_t e)
     case CAIRN_ERR_RECEIPT_ROOT_MISMATCH: return "receipt acknowledges different content";
     case CAIRN_ERR_TOO_MANY_MEMBERS:      return "too many members";
     case CAIRN_ERR_READ_FAILED:           return "segment read failed";
+    case CAIRN_ERR_NO_KEY:                return "no storage key for this segment";
+    case CAIRN_ERR_KEY_VERSION_MISMATCH:  return "segment storage_key_version does not match the key held";
+    case CAIRN_ERR_AUTH_FAILED:           return "frame authentication failed";
+    case CAIRN_ERR_BINDING_MISMATCH:      return "segment header disagrees with manifest";
     default:                              return "unknown error";
     }
 }
@@ -204,17 +231,20 @@ cairn_err_t cairn_encode_segment_header(const cairn_segment_header_t *h,
 {
     if (out_cap < CAIRN_SEGMENT_HEADER_SIZE) return CAIRN_ERR_BUFFER_TOO_SMALL;
 
-    memset(out, 0, CAIRN_SEGMENT_HEADER_SIZE);
-    memcpy(out, SEGMENT_MAGIC, 4);
-    put_u16(out + 4, CAIRN_FORMAT_VERSION);
-    put_u16(out + 6, CAIRN_SEGMENT_HEADER_SIZE);
-    memcpy(out + 8, h->device_id, 16);
-    memcpy(out + 24, h->boot_id, 16);
-    put_u32(out + 40, h->segment_index);
-    put_u32(out + 44, h->first_seq);
-    put_u64(out + 48, h->opened_monotonic_us);
-    put_u32(out + 56, 0); /* reserved */
-    put_u32(out + 60, cairn_crc32(out, 60));
+    memset(out, 0, CAIRN_SEGMENT_HEADER_SIZE); /* reserved bytes are zero */
+    memcpy(out + OFF_MAGIC, SEGMENT_MAGIC, 4);
+    put_u16(out + OFF_FORMAT_VERSION, CAIRN_FORMAT_VERSION);
+    put_u16(out + OFF_HEADER_LEN, CAIRN_SEGMENT_HEADER_SIZE);
+    memcpy(out + OFF_DEVICE_ID, h->device_id, 16);
+    memcpy(out + OFF_BOOT_ID, h->boot_id, 16);
+    memcpy(out + OFF_VEHICLE_ID, h->vehicle_id, 16);
+    memcpy(out + OFF_ASSIGNMENT_ID, h->assignment_id, 16);
+    put_u32(out + OFF_SEGMENT_INDEX, h->segment_index);
+    put_u32(out + OFF_FIRST_SEQ, h->first_seq);
+    put_u64(out + OFF_OPENED_US, h->opened_monotonic_us);
+    put_u32(out + OFF_KEY_VERSION, h->storage_key_version);
+    put_u64(out + OFF_DEVICE_COUNTER, h->device_counter);
+    put_u32(out + OFF_HEADER_CRC, cairn_crc32(out, OFF_HEADER_CRC));
 
     return CAIRN_OK;
 }
@@ -224,19 +254,23 @@ cairn_err_t cairn_parse_segment_header(const uint8_t *buf, size_t len,
                                        size_t *header_len)
 {
     if (len < CAIRN_SEGMENT_HEADER_SIZE) return CAIRN_ERR_SHORT_HEADER;
-    if (memcmp(buf, SEGMENT_MAGIC, 4) != 0) return CAIRN_ERR_BAD_MAGIC;
+    if (memcmp(buf + OFF_MAGIC, SEGMENT_MAGIC, 4) != 0) return CAIRN_ERR_BAD_MAGIC;
 
-    uint32_t stored = get_u32(buf + 60);
-    if (cairn_crc32(buf, 60) != stored) return CAIRN_ERR_BAD_HEADER_CRC;
+    uint32_t stored = get_u32(buf + OFF_HEADER_CRC);
+    if (cairn_crc32(buf, OFF_HEADER_CRC) != stored) return CAIRN_ERR_BAD_HEADER_CRC;
 
-    out->format_version = get_u16(buf + 4);
-    size_t hlen = get_u16(buf + 6);
+    out->format_version = get_u16(buf + OFF_FORMAT_VERSION);
+    size_t hlen = get_u16(buf + OFF_HEADER_LEN);
 
-    memcpy(out->device_id, buf + 8, 16);
-    memcpy(out->boot_id, buf + 24, 16);
-    out->segment_index       = get_u32(buf + 40);
-    out->first_seq           = get_u32(buf + 44);
-    out->opened_monotonic_us = get_u64(buf + 48);
+    memcpy(out->device_id, buf + OFF_DEVICE_ID, 16);
+    memcpy(out->boot_id, buf + OFF_BOOT_ID, 16);
+    memcpy(out->vehicle_id, buf + OFF_VEHICLE_ID, 16);
+    memcpy(out->assignment_id, buf + OFF_ASSIGNMENT_ID, 16);
+    out->segment_index       = get_u32(buf + OFF_SEGMENT_INDEX);
+    out->first_seq           = get_u32(buf + OFF_FIRST_SEQ);
+    out->opened_monotonic_us = get_u64(buf + OFF_OPENED_US);
+    out->storage_key_version = get_u32(buf + OFF_KEY_VERSION);
+    out->device_counter      = get_u64(buf + OFF_DEVICE_COUNTER);
 
     if (header_len) *header_len = hlen;
 
@@ -246,9 +280,36 @@ cairn_err_t cairn_parse_segment_header(const uint8_t *buf, size_t len,
     return CAIRN_OK;
 }
 
+/* ── the segment cipher ───────────────────────────────────────────────────── */
+
+cairn_err_t cairn_segment_cipher_init(cairn_segment_cipher_t *c,
+                                      const uint8_t key[CAIRN_SEGMENT_KEY_SIZE],
+                                      const uint8_t *header, size_t header_len)
+{
+    if (header_len < CAIRN_SEGMENT_HEADER_SIZE || header_len > CAIRN_MAX_HEADER_LEN) {
+        return CAIRN_ERR_BAD_HEADER_LEN;
+    }
+
+    memcpy(c->key, key, CAIRN_SEGMENT_KEY_SIZE);
+
+    /* Everything but the header CRC. The CRC is a damage detector over bytes
+     * that are already authenticated; binding it too would add nothing. */
+    c->header_aad_len = header_len - 4;
+    memcpy(c->header_aad, header, c->header_aad_len);
+    return CAIRN_OK;
+}
+
+void cairn_segment_cipher_wipe(cairn_segment_cipher_t *c)
+{
+    volatile uint8_t *v = (volatile uint8_t *)c->key;
+    for (size_t i = 0; i < sizeof(c->key); i++) v[i] = 0;
+}
+
 /* ── frames ───────────────────────────────────────────────────────────────── */
 
-cairn_err_t cairn_encode_frame(uint8_t record_type, uint8_t schema_version,
+cairn_err_t cairn_encode_frame(const cairn_segment_cipher_t *c,
+                               const uint8_t nonce[CAIRN_NONCE_SIZE],
+                               uint8_t record_type, uint8_t schema_version,
                                uint16_t flags, uint32_t seq,
                                uint32_t monotonic_ms, uint32_t prev_crc32,
                                const uint8_t *payload, size_t payload_len,
@@ -268,16 +329,54 @@ cairn_err_t cairn_encode_frame(uint8_t record_type, uint8_t schema_version,
     put_u32(out + 8, seq);
     put_u32(out + 12, monotonic_ms);
     put_u32(out + 16, prev_crc32);
-    put_u32(out + 20, 0); /* reserved2, aligns the payload to 4 bytes */
+    put_u32(out + 20, 0); /* reserved2, aligns the sealed payload to 4 bytes */
 
-    if (payload_len > 0) memcpy(out + CAIRN_FRAME_HEADER_SIZE, payload, payload_len);
+    uint8_t *n   = out + CAIRN_FRAME_HEADER_SIZE;
+    uint8_t *ct  = n + CAIRN_NONCE_SIZE;
+    uint8_t *tag = ct + payload_len;
 
-    uint32_t crc = cairn_crc32(out, CAIRN_FRAME_HEADER_SIZE + payload_len);
-    put_u32(out + CAIRN_FRAME_HEADER_SIZE + payload_len, crc);
+    memcpy(n, nonce, CAIRN_NONCE_SIZE);
+
+    /*
+     * The frame header is authenticated exactly as written — frame_len, seq and
+     * prev_crc32 included — so a frame cannot be re-chained, renumbered or
+     * resized without failing its tag. Frame header first, then the segment
+     * header, matching §3.6 byte for byte.
+     */
+    cairn_xchacha20poly1305_seal2(c->key, n, out, CAIRN_FRAME_HEADER_SIZE,
+                                  c->header_aad, c->header_aad_len, payload,
+                                  payload_len, ct, tag);
+
+    /* The CRC covers the sealed frame, so no key is needed to check it. */
+    size_t   crc_span = frame_len - CAIRN_FRAME_TRAILER_SIZE;
+    uint32_t crc      = cairn_crc32(out, crc_span);
+    put_u32(out + crc_span, crc);
 
     if (written) *written = frame_len;
     if (crc_out) *crc_out = crc;
 
+    return CAIRN_OK;
+}
+
+cairn_err_t cairn_open_frame(const cairn_segment_cipher_t *c, uint8_t *frame,
+                             size_t frame_len, const uint8_t **payload,
+                             size_t *payload_len)
+{
+    if (frame_len < CAIRN_MIN_FRAME_LEN) return CAIRN_ERR_AUTH_FAILED;
+
+    size_t   n_len = frame_len - CAIRN_FRAME_OVERHEAD;
+    uint8_t *nonce = frame + CAIRN_FRAME_HEADER_SIZE;
+    uint8_t *ct    = nonce + CAIRN_NONCE_SIZE;
+    uint8_t *tag   = ct + n_len;
+
+    if (!cairn_xchacha20poly1305_open2(c->key, nonce, frame, CAIRN_FRAME_HEADER_SIZE,
+                                       c->header_aad, c->header_aad_len, ct, n_len,
+                                       tag, ct)) {
+        return CAIRN_ERR_AUTH_FAILED;
+    }
+
+    if (payload) *payload = ct;
+    if (payload_len) *payload_len = n_len;
     return CAIRN_OK;
 }
 
@@ -286,34 +385,68 @@ cairn_err_t cairn_encode_frame(uint8_t record_type, uint8_t schema_version,
 cairn_err_t cairn_scan_segment_stream(cairn_read_fn read, void *read_user,
                                       uint64_t len,
                                       cairn_scan_state_t state,
-                                      cairn_scan_result_t *out,
-                                      cairn_frame_cb cb, void *user)
+                                      const cairn_scan_opts_t *opts,
+                                      cairn_scan_result_t *out)
 {
-    size_t  header_len = 0;
-    uint8_t head[CAIRN_SEGMENT_HEADER_SIZE];
+    size_t header_len = 0;
 
     /*
      * One frame is resident at a time. A segment on the card is far larger than
      * ESP32 DRAM, and the recovery scan has to work without PSRAM being
-     * present, so nothing here scales with segment size.
+     * present, so nothing here scales with segment size. The header buffer is
+     * static for the same reason as the stage: a keyed scan holds up to
+     * CAIRN_MAX_HEADER_LEN bytes of it as AAD, and so does the cipher, which is
+     * static too — together they would be a large bite of a task stack.
      */
-    static uint8_t stage[CAIRN_MAX_FRAME_LEN];
+    static uint8_t                stage[CAIRN_MAX_FRAME_LEN];
+    static uint8_t                head[CAIRN_MAX_HEADER_LEN];
+    static cairn_segment_cipher_t cipher;
+
+    cairn_key_fn   key_fn     = (opts != NULL) ? opts->key : NULL;
+    cairn_frame_cb cb         = (opts != NULL) ? opts->on_frame : NULL;
+    void          *cb_user    = (opts != NULL) ? opts->frame_user : NULL;
 
     memset(out, 0, sizeof(*out));
 
     if (len < CAIRN_SEGMENT_HEADER_SIZE) return CAIRN_ERR_SHORT_HEADER;
-    if (!read(read_user, 0, head, sizeof(head))) return CAIRN_ERR_READ_FAILED;
+    if (!read(read_user, 0, head, CAIRN_SEGMENT_HEADER_SIZE)) return CAIRN_ERR_READ_FAILED;
 
-    cairn_err_t err =
-        cairn_parse_segment_header(head, sizeof(head), &out->header, &header_len);
+    cairn_err_t err = cairn_parse_segment_header(head, CAIRN_SEGMENT_HEADER_SIZE,
+                                                 &out->header, &header_len);
     if (err != CAIRN_OK) return err;
+    if (header_len > len) return CAIRN_ERR_BAD_HEADER_LEN;
+    out->header_len = header_len;
+
+    if (key_fn != NULL) {
+        /*
+         * The whole header is the AAD, so a keyed scan needs every byte of it.
+         * A structural scan needs only the fixed 128 and skips the rest.
+         */
+        if (header_len > CAIRN_MAX_HEADER_LEN) return CAIRN_ERR_BAD_HEADER_LEN;
+        if (header_len > CAIRN_SEGMENT_HEADER_SIZE &&
+            !read(read_user, CAIRN_SEGMENT_HEADER_SIZE, head + CAIRN_SEGMENT_HEADER_SIZE,
+                  header_len - CAIRN_SEGMENT_HEADER_SIZE)) {
+            return CAIRN_ERR_READ_FAILED;
+        }
+
+        uint8_t key[CAIRN_SEGMENT_KEY_SIZE];
+        err = key_fn(opts->key_user, &out->header, key);
+        if (err != CAIRN_OK) return err;
+
+        err = cairn_segment_cipher_init(&cipher, key, head, header_len);
+        memset(key, 0, sizeof(key));
+        if (err != CAIRN_OK) return err;
+        out->keyed = true;
+    }
 
     /*
      * For a chain's first segment the caller has no prior state, so the
-     * header's own first_seq establishes the expectation.
+     * header's own first_seq establishes the expectation. The journal is the
+     * first and only segment of its own chain.
      */
     uint32_t expected_seq = state.expected_seq;
-    if (out->header.segment_index == 0 &&
+    if ((out->header.segment_index == 0 ||
+         out->header.segment_index == CAIRN_JOURNAL_SEGMENT_INDEX) &&
         state.expected_seq == 0 && state.expected_prev == 0) {
         expected_seq = out->header.first_seq;
     }
@@ -338,7 +471,8 @@ cairn_err_t cairn_scan_segment_stream(cairn_read_fn read, void *read_user,
          * without trusting anything inside it. */
         uint8_t lenbuf[2];
         if (!read(read_user, offset, lenbuf, sizeof(lenbuf))) {
-            return CAIRN_ERR_READ_FAILED;
+            err = CAIRN_ERR_READ_FAILED;
+            goto done;
         }
 
         size_t frame_len = get_u16(lenbuf);
@@ -352,10 +486,11 @@ cairn_err_t cairn_scan_segment_stream(cairn_read_fn read, void *read_user,
         }
 
         if (!read(read_user, offset, stage, frame_len)) {
-            return CAIRN_ERR_READ_FAILED;
+            err = CAIRN_ERR_READ_FAILED;
+            goto done;
         }
 
-        const uint8_t *body = stage;
+        uint8_t *body = stage;
         uint32_t stored_crc = get_u32(body + frame_len - CAIRN_FRAME_TRAILER_SIZE);
         uint32_t computed   = cairn_crc32(body, frame_len - CAIRN_FRAME_TRAILER_SIZE);
 
@@ -371,8 +506,11 @@ cairn_err_t cairn_scan_segment_stream(cairn_read_fn read, void *read_user,
         f.seq            = get_u32(body + 8);
         f.monotonic_ms   = get_u32(body + 12);
         f.prev_crc32     = get_u32(body + 16);
-        f.payload        = body + CAIRN_FRAME_HEADER_SIZE;
-        f.payload_len    = frame_len - CAIRN_FRAME_OVERHEAD;
+        f.payload        = NULL;
+        f.payload_len    = 0;
+        f.decrypted      = false;
+        f.sealed         = body + CAIRN_FRAME_HEADER_SIZE;
+        f.sealed_len     = frame_len - CAIRN_FRAME_HEADER_SIZE - CAIRN_FRAME_TRAILER_SIZE;
         f.crc32          = stored_crc;
 
         /*
@@ -390,10 +528,32 @@ cairn_err_t cairn_scan_segment_stream(cairn_read_fn read, void *read_user,
         }
 
         /*
+         * Authentication comes after the structural checks, not before: those
+         * need no key and must give the same verdict whether or not one is
+         * held, so a damaged frame reports as damage rather than as an auth
+         * failure. An auth failure stops the scan exactly as corruption does —
+         * a frame whose authenticity is in doubt makes everything after it
+         * equally doubtful — and is never skipped past.
+         */
+        if (out->keyed) {
+            const uint8_t *pt = NULL;
+            size_t         pt_len = 0;
+            if (cairn_open_frame(&cipher, body, frame_len, &pt, &pt_len) != CAIRN_OK) {
+                out->stop = CAIRN_STOP_AUTH_FAILED;
+                break;
+            }
+            f.payload     = pt;
+            f.payload_len = pt_len;
+            f.decrypted   = true;
+            f.sealed      = NULL; /* decrypted in place; the ciphertext is gone */
+            f.sealed_len  = 0;
+        }
+
+        /*
          * An unknown record type is not an error: it is skipped via frame_len,
          * counted and reported. That is how a newer device stays partially
-         * readable by an older decoder, and the frame CRC still applies so the
-         * skipped record remains integrity-checked.
+         * readable by an older decoder, and the frame CRC (and, keyed, the tag)
+         * still applies so the skipped record remains integrity-checked.
          */
         if (!cairn_record_type_known(f.record_type)) out->unknown_type_count++;
         out->record_counts[f.record_type]++;
@@ -405,25 +565,29 @@ cairn_err_t cairn_scan_segment_stream(cairn_read_fn read, void *read_user,
         out->last_seq = f.seq;
         out->frames++;
 
-        if (cb && !cb(&f, user)) {
-            out->stop = CAIRN_STOP_EOF;
-            offset += frame_len;
-            expected_seq = f.seq + 1;
-            expected_prev = stored_crc;
-            break;
-        }
-
         expected_seq  = f.seq + 1;
         expected_prev = stored_crc;
         offset       += frame_len;
+
+        if (cb && !cb(&f, cb_user)) {
+            out->stop = CAIRN_STOP_EOF;
+            break;
+        }
     }
 
     out->stop_offset          = (size_t)offset;
     out->discarded_tail_bytes = (uint32_t)(len - offset);
     out->next.expected_seq    = expected_seq;
     out->next.expected_prev   = expected_prev;
+    err = CAIRN_OK;
 
-    return CAIRN_OK;
+done:
+    /* The stage held plaintext after a keyed scan, and the cipher a key. */
+    if (out->keyed) {
+        cairn_segment_cipher_wipe(&cipher);
+        memset(stage, 0, sizeof(stage));
+    }
+    return err;
 }
 
 /* ── the buffer entry point ───────────────────────────────────────────────── */
@@ -445,15 +609,16 @@ static bool mem_read(void *user, uint64_t offset, uint8_t *dst, size_t len)
 /*
  * Thin wrapper over the streaming scan, so the in-memory path the conformance
  * vectors drive and the on-card path the firmware recovers through are the same
- * body of code.
+ * body of code. The buffer is never written: a keyed scan decrypts in the
+ * stream's own stage, not in the caller's bytes.
  */
 cairn_err_t cairn_scan_segment(const uint8_t *buf, size_t len,
                                cairn_scan_state_t state,
-                               cairn_scan_result_t *out,
-                               cairn_frame_cb cb, void *user)
+                               const cairn_scan_opts_t *opts,
+                               cairn_scan_result_t *out)
 {
     mem_reader_t m = { buf, len };
-    return cairn_scan_segment_stream(mem_read, &m, len, state, out, cb, user);
+    return cairn_scan_segment_stream(mem_read, &m, len, state, opts, out);
 }
 
 /* ── payload builders ─────────────────────────────────────────────────────── */

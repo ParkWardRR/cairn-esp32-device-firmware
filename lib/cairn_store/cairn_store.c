@@ -200,6 +200,176 @@ void cairn_new_boot_id(uint8_t boot_id[16])
     cairn_random(boot_id, 16);
 }
 
+/* ── storage identity (format v3) ─────────────────────────────────────────── */
+
+/*
+ * NVS keys. At most 15 characters, the NVS limit. They live in internal flash,
+ * not on the card: a counter or a root kept on the card would travel with a
+ * copied or restored card image, which is exactly what each exists to defeat.
+ */
+#define KV_STORAGE_ROOT    "storage_root"
+#define KV_STORAGE_VERSION "storage_ver"
+#define KV_DEVICE_COUNTER  "dev_counter"
+#define KV_VEHICLE_ID      "vehicle_id"
+#define KV_ASSIGNMENT_ID   "assignment_id"
+
+/* The version a freshly generated root is. The server escrows it as version 1
+ * at enrolment; a rotation would issue the next. */
+#define STORAGE_KEY_VERSION_INITIAL 1u
+
+static bool kv_counter_read(uint64_t *out)
+{
+    uint8_t b[8];
+    if (!cairn_kv_get_blob(KV_DEVICE_COUNTER, b, sizeof(b))) {
+        *out = 0;
+        return false;
+    }
+    uint64_t v = 0;
+    for (int i = 7; i >= 0; i--) v = (v << 8) | b[i];
+    *out = v;
+    return true;
+}
+
+/*
+ * Write the counter and read it back. NVS commits on every put, but "the write
+ * call returned" and "the value is what a reboot will see" are different
+ * claims, and only the second one protects a counter.
+ */
+static bool kv_counter_write(uint64_t v)
+{
+    uint8_t b[8];
+    for (int i = 0; i < 8; i++) b[i] = (uint8_t)(v >> (8 * i));
+    if (!cairn_kv_set_blob(KV_DEVICE_COUNTER, b, sizeof(b))) return false;
+
+    uint64_t back = 0;
+    return kv_counter_read(&back) && back == v;
+}
+
+static bool kv_counter_reserve(void *ctx, uint64_t *out)
+{
+    (void)ctx;
+    if (!cairn_kv_begin()) return false;
+
+    uint64_t high = 0;
+    (void)kv_counter_read(&high); /* absent: no bundle yet, counters start at 1 */
+
+    if (!kv_counter_write(high + 1)) {
+        CAIRN_LOGE(TAG, "cannot persist device counter %llu",
+                   (unsigned long long)(high + 1));
+        return false;
+    }
+    *out = high + 1;
+    return true;
+}
+
+static bool kv_counter_commit(void *ctx, uint64_t counter)
+{
+    (void)ctx;
+    if (!cairn_kv_begin()) return false;
+
+    uint64_t high = 0;
+    (void)kv_counter_read(&high);
+    if (high >= counter) return true;
+
+    /*
+     * The high-water mark is behind a counter already written into a bundle's
+     * headers: NVS was erased or restored after the capture opened. Raise it
+     * before the manifest is signed, or the next bundle would reuse this one's
+     * counter for different content — which the server must quarantine.
+     */
+    CAIRN_LOGW(TAG, "device counter high-water %llu is behind bundle counter %llu; "
+                    "raising it before signing",
+               (unsigned long long)high, (unsigned long long)counter);
+    return kv_counter_write(counter);
+}
+
+uint64_t cairn_storage_counter_high_water(void)
+{
+    uint64_t v = 0;
+    if (cairn_kv_begin()) (void)kv_counter_read(&v);
+    return v;
+}
+
+static bool all_zero(const uint8_t *b, size_t n)
+{
+    uint8_t acc = 0;
+    for (size_t i = 0; i < n; i++) acc |= b[i];
+    return acc == 0;
+}
+
+bool cairn_storage_identity_load(cairn_storage_identity_t *out)
+{
+    memset(out, 0, sizeof(*out));
+
+    if (!cairn_kv_begin()) {
+        CAIRN_LOGE(TAG, "identity store unavailable; no storage key");
+        return false;
+    }
+
+    /*
+     * K_root is generated once, on the device, from the hardware RNG, and never
+     * leaves it in the clear. Losing it makes every bundle sealed under it
+     * unreadable to anyone but the server's escrowed copy — so a regeneration
+     * is logged as the event it is, not silently papered over.
+     *
+     * Until flash encryption is enabled (docs/esp32-hardening.md) this root is
+     * plaintext in on-chip flash: it protects the card against someone who has
+     * the card, not against someone who dumps the chip.
+     */
+    if (!cairn_kv_get_blob(KV_STORAGE_ROOT, out->root_key, CAIRN_ROOT_KEY_SIZE)) {
+        cairn_rng_fill(out->root_key, CAIRN_ROOT_KEY_SIZE);
+        if (!cairn_kv_set_blob(KV_STORAGE_ROOT, out->root_key, CAIRN_ROOT_KEY_SIZE) ||
+            !cairn_kv_set_u32(KV_STORAGE_VERSION, STORAGE_KEY_VERSION_INITIAL)) {
+            CAIRN_LOGE(TAG, "cannot persist a new storage root; refusing to seal "
+                            "anything under a key that would not survive a reboot");
+            memset(out->root_key, 0, sizeof(out->root_key));
+            return false;
+        }
+        CAIRN_LOGW(TAG, "generated a new storage root (version %u); the server must "
+                        "escrow it at enrolment before it can decode this device's "
+                        "bundles", (unsigned)STORAGE_KEY_VERSION_INITIAL);
+    }
+    out->storage_key_version =
+        cairn_kv_get_u32(KV_STORAGE_VERSION, STORAGE_KEY_VERSION_INITIAL);
+
+    bool have_vehicle = cairn_kv_get_blob(KV_VEHICLE_ID, out->vehicle_id, 16);
+    bool have_assign  = cairn_kv_get_blob(KV_ASSIGNMENT_ID, out->assignment_id, 16);
+
+    /*
+     * Both or neither: a vehicle without an assignment, or the reverse, is not
+     * a binding the server can check, so it is treated as no assignment.
+     */
+    out->assigned = have_vehicle && have_assign && !all_zero(out->vehicle_id, 16) &&
+                    !all_zero(out->assignment_id, 16);
+    if (!out->assigned) {
+        memset(out->vehicle_id, 0, 16);
+        memset(out->assignment_id, 0, 16);
+        CAIRN_LOGW(TAG, "UNASSIGNED: no vehicle assignment is provisioned. Capture "
+                        "continues, but bundles carry an all-zero vehicle_id and "
+                        "assignment_id and the server will refuse them until this "
+                        "device is assigned (cairn-admin assign)");
+    }
+
+    out->counter_reserve = kv_counter_reserve;
+    out->counter_commit  = kv_counter_commit;
+    out->counter_ctx     = NULL;
+
+    uint64_t high = 0;
+    (void)kv_counter_read(&high);
+    CAIRN_LOGI(TAG, "storage: key version %u, counter high-water %llu, %s",
+               (unsigned)out->storage_key_version, (unsigned long long)high,
+               out->assigned ? "assigned" : "UNASSIGNED");
+    return true;
+}
+
+bool cairn_storage_set_assignment(const uint8_t vehicle_id[16],
+                                  const uint8_t assignment_id[16])
+{
+    if (!cairn_kv_begin()) return false;
+    return cairn_kv_set_blob(KV_VEHICLE_ID, vehicle_id, 16) &&
+           cairn_kv_set_blob(KV_ASSIGNMENT_ID, assignment_id, 16);
+}
+
 /* ── paths ────────────────────────────────────────────────────────────────── */
 
 static void segment_path(const cairn_capture_t *cap, uint32_t index, char *out,
@@ -231,8 +401,49 @@ bool cairn_store_init(void)
 
 /* ── segment creation ─────────────────────────────────────────────────────── */
 
+/*
+ * Bind a cipher to a segment: derive K_seg from the root and the header's own
+ * identity fields, and take the header bytes as the AAD suffix. The header,
+ * not the caller, decides the key — the same rule the server applies when it
+ * derives the key from the escrowed root.
+ */
+static bool cipher_for_header(const cairn_capture_t *cap, const uint8_t *header_bytes,
+                              size_t header_len, cairn_segment_cipher_t *out)
+{
+    /* This store writes only 128-byte headers, and holds no more than that. */
+    if (cap->identity == NULL || header_len != CAIRN_SEGMENT_HEADER_SIZE) return false;
+
+    cairn_segment_header_t h;
+    if (cairn_parse_segment_header(header_bytes, header_len, &h, NULL) != CAIRN_OK) {
+        return false;
+    }
+
+    /*
+     * A root of a different version cannot seal for this segment: the server
+     * would derive from the version the header names and every frame would
+     * fail. Refusing here is what turns that into "this bundle is sealed as
+     * is" instead of a bundle of frames nobody can open.
+     */
+    if (h.storage_key_version != cap->identity->storage_key_version) return false;
+
+    uint8_t key[CAIRN_SEGMENT_KEY_SIZE];
+    cairn_derive_segment_key(cap->identity->root_key, &h, key);
+    cairn_err_t err = cairn_segment_cipher_init(out, key, header_bytes, header_len);
+    memset(key, 0, sizeof(key));
+    return err == CAIRN_OK;
+}
+
+/*
+ * Create a segment file holding only its header, and bind `cipher` to it.
+ *
+ * Every header of a bundle carries the same device, boot, vehicle, assignment,
+ * key version and counter (§5.4) — taken from the capture, never from the
+ * current identity, so a capture resumed after a reassignment stays one
+ * consistent bundle.
+ */
 static bool write_segment_header(const cairn_capture_t *cap, const char *path,
-                                 uint32_t segment_index, uint32_t first_seq)
+                                 uint32_t segment_index, uint32_t first_seq,
+                                 cairn_segment_cipher_t *cipher)
 {
     cairn_segment_header_t h;
     memset(&h, 0, sizeof(h));
@@ -240,14 +451,23 @@ static bool write_segment_header(const cairn_capture_t *cap, const char *path,
     h.format_version = CAIRN_FORMAT_VERSION;
     memcpy(h.device_id, cap->device_id, 16);
     memcpy(h.boot_id, cap->boot_id, 16);
+    memcpy(h.vehicle_id, cap->vehicle_id, 16);
+    memcpy(h.assignment_id, cap->assignment_id, 16);
     h.segment_index       = segment_index;
     h.first_seq           = first_seq;
     h.opened_monotonic_us = cairn_micros();
+    h.storage_key_version = cap->storage_key_version;
+    h.device_counter      = cap->device_counter;
 
     uint8_t     buf[CAIRN_SEGMENT_HEADER_SIZE];
     cairn_err_t err = cairn_encode_segment_header(&h, buf, sizeof(buf));
     if (err != CAIRN_OK) {
         CAIRN_LOGE(TAG, "encode segment header: %s", cairn_strerror(err));
+        return false;
+    }
+
+    if (!cipher_for_header(cap, buf, sizeof(buf), cipher)) {
+        CAIRN_LOGE(TAG, "no usable storage key for %s", path);
         return false;
     }
 
@@ -341,9 +561,33 @@ static bool truncate_segment(const char *path, uint32_t keep)
     return true;
 }
 
+/* What a recovery pass learned about one segment. */
+typedef struct {
+    uint8_t  header_bytes[CAIRN_SEGMENT_HEADER_SIZE];
+    size_t   header_len;
+    uint32_t bytes;          /* the segment's length once any tail is gone */
+    uint32_t last_frame_len; /* 0 when no frame was retained */
+} recovered_t;
+
+/* The structural scan's callback: remember the length of the last frame, so
+ * the frame itself can be found again as [bytes - last_frame_len, bytes). */
+static bool note_last_frame(const cairn_frame_t *f, void *user)
+{
+    recovered_t *r = (recovered_t *)user;
+    r->last_frame_len =
+        (uint32_t)(CAIRN_FRAME_HEADER_SIZE + f->sealed_len + CAIRN_FRAME_TRAILER_SIZE);
+    return true;
+}
+
 /*
  * Scan one segment, truncate any torn tail, and fold its tallies into the
  * capture state.
+ *
+ * The scan is structural: it needs no key, so a device that has lost its root
+ * still recovers exactly what a device holding it would, and never discards a
+ * byte because it could not decrypt it. Whether the segment can also be
+ * *extended* under the current key is a separate question, answered by
+ * can_extend() for the one segment of each chain that will be appended to.
  *
  * `chain` is carried in and out so capture segments continue one sequence
  * across rotations. A header error leaves the file untouched: the segment is
@@ -352,8 +596,10 @@ static bool truncate_segment(const char *path, uint32_t keep)
  */
 static bool recover_segment(cairn_capture_t *cap, const char *path,
                             cairn_chain_t *chain, bool fold_counts,
-                            uint32_t *bytes_out)
+                            recovered_t *rec)
 {
+    memset(rec, 0, sizeof(*rec));
+
     cairn_file_t *f = cairn_fs_open(path, CAIRN_FS_READ);
     if (f == NULL) return false;
 
@@ -363,16 +609,21 @@ static bool recover_segment(cairn_capture_t *cap, const char *path,
     state.expected_seq  = chain->next_seq;
     state.expected_prev = chain->prev_crc32;
 
+    cairn_scan_opts_t   opts = { NULL, NULL, note_last_frame, rec };
     cairn_scan_result_t res;
-    cairn_err_t err =
-        cairn_scan_segment_stream(fs_read_at, f, size, state, &res, NULL, NULL);
+    cairn_err_t err = cairn_scan_segment_stream(fs_read_at, f, size, state, &opts, &res);
+
+    /* Keep the header bytes: they are the AAD for anything appended later. */
+    bool have_header = (err == CAIRN_OK) &&
+                       fs_read_at(f, 0, rec->header_bytes, sizeof(rec->header_bytes));
     cairn_fs_close(f);
 
-    if (err != CAIRN_OK) {
+    if (err != CAIRN_OK || !have_header) {
         CAIRN_LOGE(TAG, "%s is unusable (%s); leaving it in place for the server",
                    path, cairn_strerror(err));
         return false;
     }
+    rec->header_len = res.header_len;
 
     CAIRN_LOGI(TAG, "%s: %s, %u frames, seq %u..%u, %u byte tail discarded",
                path, cairn_stop_reason_name(res.stop), (unsigned)res.frames,
@@ -428,9 +679,54 @@ static bool recover_segment(cairn_capture_t *cap, const char *path,
 
     chain->next_seq   = res.next.expected_seq;
     chain->prev_crc32 = res.next.expected_prev;
-    *bytes_out        = (uint32_t)res.stop_offset;
+    rec->bytes        = (uint32_t)res.stop_offset;
 
     return true;
+}
+
+/*
+ * May this segment be appended to under the key the device holds now?
+ *
+ * Builds the segment's cipher from its own header and, if the segment already
+ * holds frames, authenticates the last one. One frame is enough for the
+ * question being asked: it proves the root, the derived key and the header
+ * binding are the ones the existing frames were sealed under, and the last
+ * frame is the one the next frame chains from. Tampering further back is not a
+ * reason to stop appending — it is the server's to find, with a full keyed
+ * scan, and it can.
+ *
+ * Refusing is not losing anything: the bundle is sealed as it stands, which
+ * needs no key at all.
+ */
+static bool can_extend(cairn_capture_t *cap, const char *path, const recovered_t *rec,
+                       cairn_segment_cipher_t *cipher)
+{
+    if (!cipher_for_header(cap, rec->header_bytes, rec->header_len, cipher)) {
+        CAIRN_LOGW(TAG, "%s was sealed under key version %u, which this device does "
+                        "not hold; it will not be extended", path,
+                   (unsigned)cap->storage_key_version);
+        return false;
+    }
+    if (rec->last_frame_len == 0) return true;
+
+    uint8_t frame[CAIRN_MAX_FRAME_LEN];
+    bool    ok = false;
+
+    cairn_file_t *f = cairn_fs_open(path, CAIRN_FS_READ);
+    if (f != NULL) {
+        ok = fs_read_at(f, rec->bytes - rec->last_frame_len, frame, rec->last_frame_len) &&
+             cairn_open_frame(cipher, frame, rec->last_frame_len, NULL, NULL) == CAIRN_OK;
+        cairn_fs_close(f);
+    }
+    memset(frame, 0, sizeof(frame)); /* it held plaintext */
+
+    if (!ok) {
+        CAIRN_LOGE(TAG, "%s does not authenticate under this device's storage key "
+                        "(a different root, or an edited card); it will be sealed "
+                        "as it stands rather than extended", path);
+        cairn_segment_cipher_wipe(cipher);
+    }
+    return ok;
 }
 
 /* ── open or resume ───────────────────────────────────────────────────────── */
@@ -458,15 +754,87 @@ static bool find_open_capture(char *out, size_t cap_len)
     return found;
 }
 
+/*
+ * Take a resumed bundle's binding from the first of its headers that parses —
+ * segment 0, else the journal. The headers are the authority: they are what
+ * every existing frame authenticates, and what the manifest must agree with.
+ */
+static bool adopt_binding_from_card(cairn_capture_t *cap)
+{
+    char path[PATH_MAX_LEN];
+
+    for (int which = 0; which < 2; which++) {
+        if (which == 0) {
+            segment_path(cap, 0, path, sizeof(path));
+        } else {
+            journal_path(cap, path, sizeof(path));
+        }
+
+        cairn_file_t *f = cairn_fs_open(path, CAIRN_FS_READ);
+        if (f == NULL) continue;
+
+        uint8_t buf[CAIRN_SEGMENT_HEADER_SIZE];
+        bool    got = fs_read_at(f, 0, buf, sizeof(buf));
+        cairn_fs_close(f);
+
+        cairn_segment_header_t h;
+        if (!got || cairn_parse_segment_header(buf, sizeof(buf), &h, NULL) != CAIRN_OK) {
+            continue;
+        }
+
+        memcpy(cap->device_id, h.device_id, 16);
+        memcpy(cap->boot_id, h.boot_id, 16);
+        memcpy(cap->vehicle_id, h.vehicle_id, 16);
+        memcpy(cap->assignment_id, h.assignment_id, 16);
+        cap->storage_key_version = h.storage_key_version;
+        cap->device_counter      = h.device_counter;
+        cap->assigned = !all_zero(h.vehicle_id, 16) && !all_zero(h.assignment_id, 16);
+        return true;
+    }
+    return false;
+}
+
+/* A new bundle's binding: the current identity, and a freshly reserved counter. */
+static bool bind_new_bundle(cairn_capture_t *cap)
+{
+    const cairn_storage_identity_t *id = cap->identity;
+
+    memcpy(cap->vehicle_id, id->vehicle_id, 16);
+    memcpy(cap->assignment_id, id->assignment_id, 16);
+    cap->assigned            = id->assigned;
+    cap->storage_key_version = id->storage_key_version;
+
+    /*
+     * Reserved — durably — before any header naming it exists. Every header
+     * and so every frame's AAD carries this counter, so it cannot be chosen
+     * later; and if it were held only in RAM a power cut before the seal would
+     * let the next boot hand the same counter to a different bundle.
+     */
+    if (id->counter_reserve == NULL ||
+        !id->counter_reserve(id->counter_ctx, &cap->device_counter)) {
+        CAIRN_LOGE(TAG, "cannot reserve a device counter; refusing to open a bundle "
+                        "whose counter a power cut could reuse");
+        return false;
+    }
+    return true;
+}
+
 bool cairn_capture_open_or_resume(cairn_capture_t *cap,
                                   const uint8_t device_id[16],
-                                  const uint8_t boot_id[16])
+                                  const uint8_t boot_id[16],
+                                  const cairn_storage_identity_t *identity)
 {
     memset(cap, 0, sizeof(*cap));
     memcpy(cap->device_id, device_id, 16);
     memcpy(cap->boot_id, boot_id, 16);
+    cap->identity = identity;
     cap->capture_started_monotonic_us = cairn_micros();
     cap->last_flush_ms = cairn_millis();
+
+    if (identity == NULL) {
+        CAIRN_LOGE(TAG, "no storage identity; a v3 capture cannot be opened without one");
+        return false;
+    }
 
     char id_text[27];
     char path[PATH_MAX_LEN];
@@ -478,41 +846,61 @@ bool cairn_capture_open_or_resume(cairn_capture_t *cap,
         CAIRN_LOGW(TAG, "resuming interrupted capture %s", id_text);
 
         /*
+         * The bundle keeps the binding it was opened under. With no readable
+         * header at all there is nothing to agree with, so it gets a fresh
+         * counter like any new bundle — its unreadable segments are left for
+         * the server's salvage tool either way.
+         */
+        if (!adopt_binding_from_card(cap)) {
+            CAIRN_LOGW(TAG, "capture %s has no readable segment header", id_text);
+            if (!bind_new_bundle(cap)) return false;
+        }
+
+        /*
          * Capture segments are walked in index order. A single chain spans
          * them, so out-of-order scanning would make the continuity check
          * meaningless.
          */
-        uint32_t index = 0;
-        uint32_t last_bytes = CAIRN_SEGMENT_HEADER_SIZE;
-        bool     chain_intact = true;
+        uint32_t    index = 0;
+        bool        chain_intact = true;
+        recovered_t last;
+        memset(&last, 0, sizeof(last));
 
         for (; index < CAIRN_MAX_MEMBERS; index++) {
             segment_path(cap, index, path, sizeof(path));
             if (!cairn_fs_exists(path)) break;
 
-            uint32_t bytes = 0;
-            if (!recover_segment(cap, path, &cap->capture_chain, true, &bytes)) {
+            recovered_t rec;
+            if (!recover_segment(cap, path, &cap->capture_chain, true, &rec)) {
                 chain_intact = false;
                 break;
             }
-            last_bytes = bytes;
+            last = rec;
         }
+
+        bool extendable = chain_intact;
 
         if (index == 0) {
             CAIRN_LOGW(TAG, "capture %s had no segments; starting segment 0",
                        id_text);
             segment_path(cap, 0, path, sizeof(path));
-            if (!write_segment_header(cap, path, 0, 0)) return false;
+            if (!write_segment_header(cap, path, 0, 0, &cap->segment_cipher)) {
+                extendable = false;
+            }
             cap->segment_index = 0;
             cap->segment_bytes = CAIRN_SEGMENT_HEADER_SIZE;
         } else {
             cap->segment_index = index - 1;
-            cap->segment_bytes = last_bytes;
+            cap->segment_bytes = last.bytes;
+            if (chain_intact) {
+                segment_path(cap, cap->segment_index, path, sizeof(path));
+                extendable = can_extend(cap, path, &last, &cap->segment_cipher);
+            }
         }
 
         journal_path(cap, path, sizeof(path));
         if (cairn_fs_exists(path)) {
-            uint32_t jbytes = 0;
+            recovered_t jrec;
             /*
              * Fold the journal's counts too, exactly as the capture segments
              * above do.
@@ -532,13 +920,20 @@ bool cairn_capture_open_or_resume(cairn_capture_t *cap,
              * self-description that was wrong, which is worse than it sounds
              * for a format whose whole purpose is being checkable later.
              */
-            if (recover_segment(cap, path, &cap->journal_chain, true, &jbytes)) {
-                cap->journal_bytes = jbytes;
+            if (recover_segment(cap, path, &cap->journal_chain, true, &jrec)) {
+                cap->journal_bytes = jrec.bytes;
+                if (!can_extend(cap, path, &jrec, &cap->journal_cipher)) {
+                    extendable = false;
+                }
             } else {
                 chain_intact = false;
+                extendable = false;
             }
         } else {
-            if (!write_segment_header(cap, path, 0, 0)) return false;
+            if (!write_segment_header(cap, path, CAIRN_JOURNAL_SEGMENT_INDEX, 0,
+                                      &cap->journal_cipher)) {
+                extendable = false;
+            }
             cap->journal_bytes = CAIRN_SEGMENT_HEADER_SIZE;
         }
 
@@ -546,25 +941,41 @@ bool cairn_capture_open_or_resume(cairn_capture_t *cap,
          * If any segment could not be made appendable, the chain cannot be
          * continued without fabricating continuity. Seal what exists instead:
          * an honestly short bundle is worth more than a plausible-looking one.
+         *
+         * A key that cannot extend the bundle is the same outcome for a
+         * different reason, and is kept distinct in the recovery state: the
+         * bytes on the card are intact, so the bundle is not salvaged.
          */
         if (!chain_intact) {
             cap->needs_seal = true;
             cap->recovery_state = CAIRN_RECOVERY_SALVAGED;
             CAIRN_LOGW(TAG, "capture %s cannot be safely extended; it will be "
                             "sealed at the next opportunity", id_text);
+        } else if (!extendable) {
+            cap->needs_seal = true;
+            CAIRN_LOGW(TAG, "capture %s cannot be extended under this device's key; "
+                            "it will be sealed at the next opportunity", id_text);
+        }
+        cap->can_encrypt = extendable;
+        if (!extendable) {
+            cairn_segment_cipher_wipe(&cap->segment_cipher);
+            cairn_segment_cipher_wipe(&cap->journal_cipher);
         }
 
         cap->active = true;
         CAIRN_LOGI(TAG, "resumed: segment %u at %u bytes, next seq %u, "
-                        "%u bytes discarded, recovery_state %u",
+                        "%u bytes discarded, recovery_state %u, counter %llu",
                    (unsigned)cap->segment_index, (unsigned)cap->segment_bytes,
                    (unsigned)cap->capture_chain.next_seq,
                    (unsigned)cap->discarded_tail_bytes,
-                   (unsigned)cap->recovery_state);
+                   (unsigned)cap->recovery_state,
+                   (unsigned long long)cap->device_counter);
         return true;
     }
 
     /* Nothing open: start a fresh capture. */
+    if (!bind_new_bundle(cap)) return false;
+
     ulid_generate(cap->bundle_id, 0);
     cairn_ulid_encode(cap->bundle_id, id_text);
     snprintf(cap->dir, sizeof(cap->dir), "%s/%s", CAIRN_DIR_CAPTURE, id_text);
@@ -575,15 +986,21 @@ bool cairn_capture_open_or_resume(cairn_capture_t *cap,
     }
 
     segment_path(cap, 0, path, sizeof(path));
-    if (!write_segment_header(cap, path, 0, 0)) return false;
+    if (!write_segment_header(cap, path, 0, 0, &cap->segment_cipher)) return false;
     cap->segment_bytes = CAIRN_SEGMENT_HEADER_SIZE;
 
     journal_path(cap, path, sizeof(path));
-    if (!write_segment_header(cap, path, 0, 0)) return false;
+    if (!write_segment_header(cap, path, CAIRN_JOURNAL_SEGMENT_INDEX, 0,
+                              &cap->journal_cipher)) {
+        return false;
+    }
     cap->journal_bytes = CAIRN_SEGMENT_HEADER_SIZE;
 
+    cap->can_encrypt = true;
     cap->active = true;
-    CAIRN_LOGI(TAG, "opened capture %s", id_text);
+    CAIRN_LOGI(TAG, "opened capture %s, counter %llu%s", id_text,
+               (unsigned long long)cap->device_counter,
+               cap->assigned ? "" : " (UNASSIGNED: the server will refuse it)");
     return true;
 }
 
@@ -607,10 +1024,16 @@ static bool rotate_segment(cairn_capture_t *cap)
     char     path[PATH_MAX_LEN];
     segment_path(cap, next, path, sizeof(path));
 
-    if (!write_segment_header(cap, path, next, cap->capture_chain.next_seq)) {
+    /* Build into a scratch cipher so a failed rotation leaves the current
+     * segment's cipher intact for the frame that triggered it. */
+    cairn_segment_cipher_t fresh;
+    if (!write_segment_header(cap, path, next, cap->capture_chain.next_seq, &fresh)) {
         return false;
     }
 
+    cairn_segment_cipher_wipe(&cap->segment_cipher);
+    cap->segment_cipher    = fresh;
+    cairn_segment_cipher_wipe(&fresh);
     cap->segment_index     = next;
     cap->segment_bytes     = CAIRN_SEGMENT_HEADER_SIZE;
     cap->segment_first_seq = cap->capture_chain.next_seq;
@@ -625,15 +1048,54 @@ bool cairn_capture_append(cairn_capture_t *cap, cairn_chain_id_t chain_id,
 {
     if (!cap->active) return false;
 
+    /*
+     * No key that matches this bundle means no append. Writing plaintext, or
+     * sealing under a key the bundle's headers do not name, would put bytes on
+     * the card nobody can authenticate; the capture is marked for sealing
+     * instead, and the next bundle opens under the current key.
+     */
+    if (!cap->can_encrypt) {
+        cap->needs_seal = true;
+        return false;
+    }
+    if (payload_len > CAIRN_MAX_PAYLOAD_SIZE) {
+        CAIRN_LOGE(TAG, "payload of %u bytes exceeds the %u-byte maximum", (unsigned)payload_len,
+                   (unsigned)CAIRN_MAX_PAYLOAD_SIZE);
+        return false;
+    }
+
     cairn_chain_t *chain = (chain_id == CAIRN_CHAIN_JOURNAL) ? &cap->journal_chain
                                                              : &cap->capture_chain;
+
+    /* Rotate first, so the frame is sealed under the segment it lands in: the
+     * segment header is part of every frame's AAD. */
+    size_t frame_len = CAIRN_FRAME_OVERHEAD + payload_len;
+    if (chain_id != CAIRN_CHAIN_JOURNAL &&
+        cap->segment_bytes + frame_len > CAIRN_SEGMENT_MAX_BYTES) {
+        if (!rotate_segment(cap)) return false;
+    }
+
+    const cairn_segment_cipher_t *cipher = (chain_id == CAIRN_CHAIN_JOURNAL)
+                                               ? &cap->journal_cipher
+                                               : &cap->segment_cipher;
+
+    /*
+     * A fresh random nonce for every frame, from the hardware RNG — never from
+     * seq. After a torn tail is truncated this same seq is written again with
+     * different plaintext, and a seq-derived nonce would then reuse a
+     * (key, nonce) pair: for a stream cipher that leaks the XOR of the two
+     * plaintexts, and for Poly1305 the authenticator key. A 192-bit random
+     * nonce makes a collision negligible with no state a power cut could lose.
+     */
+    uint8_t nonce[CAIRN_NONCE_SIZE];
+    cairn_rng_fill(nonce, sizeof(nonce));
 
     uint8_t  stage[CAIRN_STAGE_BYTES];
     size_t   written = 0;
     uint32_t crc = 0;
 
-    cairn_err_t err = cairn_encode_frame(record_type, schema_version, flags,
-                                         chain->next_seq, monotonic_ms,
+    cairn_err_t err = cairn_encode_frame(cipher, nonce, record_type, schema_version,
+                                         flags, chain->next_seq, monotonic_ms,
                                          chain->prev_crc32, payload, payload_len,
                                          stage, sizeof(stage), &written, &crc);
     if (err != CAIRN_OK) {
@@ -646,9 +1108,6 @@ bool cairn_capture_append(cairn_capture_t *cap, cairn_chain_id_t chain_id,
     if (chain_id == CAIRN_CHAIN_JOURNAL) {
         journal_path(cap, path, sizeof(path));
     } else {
-        if (cap->segment_bytes + written > CAIRN_SEGMENT_MAX_BYTES) {
-            if (!rotate_segment(cap)) return false;
-        }
         segment_path(cap, cap->segment_index, path, sizeof(path));
     }
 
@@ -947,6 +1406,23 @@ bool cairn_capture_seal(cairn_capture_t *cap, const uint8_t seed[32],
     m.has_trip_seq = true;
     m.trip_seq     = trip_seq;
 
+    /*
+     * The binding, exactly as the segment headers carry it — §5.4 rejects a
+     * manifest that disagrees with any of them, journal included.
+     */
+    memcpy(m.vehicle_id, cap->vehicle_id, 16);
+    memcpy(m.assignment_id, cap->assignment_id, 16);
+    m.device_counter      = cap->device_counter;
+    m.storage_key_version = cap->storage_key_version;
+    snprintf(m.encryption_suite, sizeof(m.encryption_suite), "%s",
+             CAIRN_ENCRYPTION_SUITE_V1);
+
+    if (!cap->assigned) {
+        CAIRN_LOGW(TAG, "sealing an UNASSIGNED bundle (all-zero vehicle and "
+                        "assignment); the server will refuse it until this device "
+                        "is assigned, and it stays on the card meanwhile");
+    }
+
     m.member_count = collect_members(cap->dir, m.members, CAIRN_MAX_MEMBERS);
     if (m.member_count == 0) {
         CAIRN_LOGE(TAG, "no members in %s; nothing to seal", cap->dir);
@@ -961,6 +1437,25 @@ bool cairn_capture_seal(cairn_capture_t *cap, const uint8_t seed[32],
     cairn_err_t err = cairn_content_root(m.members, m.member_count, m.content_root);
     if (err != CAIRN_OK) {
         CAIRN_LOGE(TAG, "content_root: %s", cairn_strerror(err));
+        return false;
+    }
+
+    /*
+     * The counter is made durable before the signature exists, never after.
+     *
+     * It was reserved when the bundle opened, but NVS may have been erased or
+     * restored since; signing first and committing second would leave a window
+     * in which a power cut produces a signed manifest under a counter the
+     * device has forgotten — and the next bundle would be handed the same
+     * counter for different content, which the server must quarantine. A
+     * failure here aborts the seal: the capture stays intact and the seal is
+     * retried, which costs nothing.
+     */
+    const cairn_storage_identity_t *id = cap->identity;
+    if (id == NULL || id->counter_commit == NULL ||
+        !id->counter_commit(id->counter_ctx, cap->device_counter)) {
+        CAIRN_LOGE(TAG, "cannot make device counter %llu durable; not signing",
+                   (unsigned long long)cap->device_counter);
         return false;
     }
 
@@ -1017,6 +1512,12 @@ bool cairn_capture_seal(cairn_capture_t *cap, const uint8_t seed[32],
     if (!finish_seal(cap->dir, id_text)) return false;
 
     if (out_bundle_id != NULL) memcpy(out_bundle_id, cap->bundle_id, 16);
+
+    /* A sealed bundle is never appended to again, so its keys have no further
+     * use in RAM. */
+    cairn_segment_cipher_wipe(&cap->segment_cipher);
+    cairn_segment_cipher_wipe(&cap->journal_cipher);
+    cap->can_encrypt = false;
 
     cap->active = false;
     return true;
