@@ -85,8 +85,22 @@ esptool chip_id        # prints "Chip is ESP32-D0WD-V3 (revision v3.x)"
 esptool flash_id
 ```
 
-Record the revision here once known: **TBD — measure on the car's unit and the
-spare.**
+**Measured 2026-10-05 on the car's unit** (MAC ending 7f:f8, 16 MB flash):
+`ESP32-D0WDQ6`, **revision v1.0**. That is the oldest silicon, and it settles two things:
+
+- **Secure boot V2 is not available on this unit.** V2 needs revision v3.0 or
+  later. Only the V1 scheme is possible here, which is the weaker one and comes
+  with its own constraints (bootloader size and layout, a one-time key burn).
+  Re-read the ESP-IDF "Secure Boot (V1)" page for the exact limits against this
+  repo's bootloader and partition table **before** planning the sacrificial-unit
+  run, and decide whether V1's protection is worth the irreversibility for this
+  hardware, or whether the right answer is a newer ONE+ for the car.
+- Flash encryption is available on every revision, but on v1.0 silicon the
+  number of plaintext re-flashes in development mode is the tightly limited
+  7-bit counter; do not spend it casually.
+
+The spare unit's revision is still **unmeasured**; a revision v3.0+ part would
+make the whole V2 path available.
 
 ## Device identity and what still protects a *running* device
 
