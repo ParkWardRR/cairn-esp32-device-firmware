@@ -9,15 +9,16 @@ use super::{
     FormatError, Result,
     cbor::{Decoder, Encoder},
     frame::RecordType,
+    keys::ENCRYPTION_SUITE_V1,
     merkle::{content_root, sort_members},
 };
 
 pub use super::merkle::Member;
 
 /// The manifest schema version this implementation handles.
-pub const MANIFEST_VERSION: u8 = 2;
+pub const MANIFEST_VERSION: u8 = 3;
 
-/// The only algorithm v2 defines. "SHA-256 sign" conflates a digest with a
+/// The only algorithm v3 defines. "SHA-256 sign" conflates a digest with a
 /// signature; these are separate operations and the manifest names the
 /// signature algorithm explicitly.
 pub const SIGNATURE_ALGORITHM_ED25519: &str = "ed25519";
@@ -95,7 +96,7 @@ pub struct Manifest {
 
     pub content_root: [u8; 32],
 
-    /// Chains bundle history. Populated but not enforced in v2: detecting
+    /// Chains bundle history. Populated but not enforced in v3: detecting
     /// deleted historical bundles is a different threat model from detecting
     /// corruption within one bundle.
     pub previous_bundle_root: Option<[u8; 32]>,
@@ -104,6 +105,28 @@ pub struct Manifest {
     pub recovery_state: RecoveryState,
     pub discarded_tail_bytes: u32,
     pub signature_algorithm: String,
+
+    /// Ties the capture to the sequence of drives, not just the boot. Optional:
+    /// when absent, key 23 is omitted from the encoding entirely rather than
+    /// written as null, so a manifest has 27 or 28 fields.
+    pub trip_seq: Option<u32>,
+
+    // ── v3 binding (keys 24–28, mandatory) ──────────────────────────────────
+    // The first four must each equal the corresponding field of every segment
+    // header in the bundle, journal included (§5.4). The signature makes them
+    // the device's claim; the binding check makes the segments agree with it.
+    /// The vehicle the bundle was captured in.
+    pub vehicle_id: [u8; 16],
+    /// The device→vehicle assignment it was captured under.
+    pub assignment_id: [u8; 16],
+    /// The device's monotonic bundle counter. Starts at 1. Kept in NVS off the
+    /// card, so a restored card cannot rewind it.
+    pub device_counter: u64,
+    /// Which escrowed `K_root` the segments were sealed under.
+    pub storage_key_version: u32,
+    /// The AEAD and KDF, [`ENCRYPTION_SUITE_V1`]. Named in the signed bytes so
+    /// a future suite is an explicit, detectable change.
+    pub encryption_suite: String,
 }
 
 // Manifest CBOR keys. Integer keys keep the encoding compact and unambiguous.
@@ -129,8 +152,18 @@ const KEY_POLICY_VERSION: u64 = 19;
 const KEY_RECOVERY_STATE: u64 = 20;
 const KEY_DISCARDED_TAIL: u64 = 21;
 const KEY_SIGNATURE_ALGO: u64 = 22;
+const KEY_TRIP_SEQ: u64 = 23; // optional
+// Keys 24-28 are mandatory. They sit after the optional trip_seq so the encoder
+// emits keys in ascending order with a single conditional.
+const KEY_VEHICLE_ID: u64 = 24;
+const KEY_ASSIGNMENT_ID: u64 = 25;
+const KEY_DEVICE_COUNTER: u64 = 26;
+const KEY_STORAGE_KEY_VERSION: u64 = 27;
+const KEY_ENCRYPTION_SUITE: u64 = 28;
 
-const MANIFEST_FIELD_COUNT: usize = 22;
+/// Without and with the optional trip_seq.
+const MANIFEST_FIELD_COUNT_BASE: usize = 27;
+const MANIFEST_FIELD_COUNT_MAX: usize = 28;
 
 /// Derive the 8-byte key identifier from a public key: truncated SHA-256.
 pub fn device_key_id(pub_key: &VerifyingKey) -> [u8; 8] {
@@ -154,8 +187,19 @@ impl Manifest {
             )));
         }
 
+        if self.encryption_suite != ENCRYPTION_SUITE_V1 {
+            return Err(FormatError::Malformed(format!(
+                "unsupported encryption suite {:?}",
+                self.encryption_suite
+            )));
+        }
+
         let mut e = Encoder::new();
-        e.map_header(MANIFEST_FIELD_COUNT);
+        e.map_header(if self.trip_seq.is_some() {
+            MANIFEST_FIELD_COUNT_MAX
+        } else {
+            MANIFEST_FIELD_COUNT_BASE
+        });
 
         e.key(KEY_MANIFEST_VERSION);
         e.uint(self.manifest_version as u64);
@@ -234,6 +278,22 @@ impl Manifest {
         e.key(KEY_SIGNATURE_ALGO);
         e.text(&self.signature_algorithm);
 
+        if let Some(t) = self.trip_seq {
+            e.key(KEY_TRIP_SEQ);
+            e.uint(t as u64);
+        }
+
+        e.key(KEY_VEHICLE_ID);
+        e.bytes(&self.vehicle_id);
+        e.key(KEY_ASSIGNMENT_ID);
+        e.bytes(&self.assignment_id);
+        e.key(KEY_DEVICE_COUNTER);
+        e.uint(self.device_counter);
+        e.key(KEY_STORAGE_KEY_VERSION);
+        e.uint(self.storage_key_version as u64);
+        e.key(KEY_ENCRYPTION_SUITE);
+        e.text(&self.encryption_suite);
+
         Ok(e.into_bytes())
     }
 
@@ -260,9 +320,9 @@ impl Manifest {
         let mut d = Decoder::new(b);
 
         let n = d.map_header()?;
-        if n != MANIFEST_FIELD_COUNT {
+        if n != MANIFEST_FIELD_COUNT_BASE && n != MANIFEST_FIELD_COUNT_MAX {
             return Err(FormatError::Malformed(format!(
-                "manifest has {n} fields, expected {MANIFEST_FIELD_COUNT}"
+                "manifest has {n} fields, expected {MANIFEST_FIELD_COUNT_BASE} or {MANIFEST_FIELD_COUNT_MAX}"
             )));
         }
 
@@ -289,12 +349,31 @@ impl Manifest {
             recovery_state: RecoveryState::Clean,
             discarded_tail_bytes: 0,
             signature_algorithm: String::new(),
+            trip_seq: None,
+            vehicle_id: [0; 16],
+            assignment_id: [0; 16],
+            device_counter: 0,
+            storage_key_version: 0,
+            encryption_suite: String::new(),
         };
 
+        let mut seen: u64 = 0;
         for i in 0..n {
             let key = d
                 .uint()
                 .map_err(|e| FormatError::Malformed(format!("manifest key {i}: {e}")))?;
+
+            // Duplicates are refused here rather than left to the round-trip
+            // check, so the error names the problem instead of reporting a
+            // generic non-canonical encoding.
+            if (KEY_MANIFEST_VERSION..=KEY_ENCRYPTION_SUITE).contains(&key) {
+                if seen & (1 << key) != 0 {
+                    return Err(FormatError::Malformed(format!(
+                        "manifest key {key} appears twice"
+                    )));
+                }
+                seen |= 1 << key;
+            }
 
             match key {
                 KEY_MANIFEST_VERSION => {
@@ -403,11 +482,37 @@ impl Manifest {
                         )));
                     }
                 }
+                KEY_TRIP_SEQ => m.trip_seq = Some(d.u32()?),
+                KEY_VEHICLE_ID => m.vehicle_id = d.bytes_n()?,
+                KEY_ASSIGNMENT_ID => m.assignment_id = d.bytes_n()?,
+                KEY_DEVICE_COUNTER => m.device_counter = d.uint()?,
+                KEY_STORAGE_KEY_VERSION => m.storage_key_version = d.u32()?,
+                KEY_ENCRYPTION_SUITE => {
+                    m.encryption_suite = d.text()?;
+                    if m.encryption_suite != ENCRYPTION_SUITE_V1 {
+                        return Err(FormatError::Malformed(format!(
+                            "unsupported encryption suite {:?}",
+                            m.encryption_suite
+                        )));
+                    }
+                }
                 other => {
                     return Err(FormatError::Malformed(format!(
                         "unknown manifest key {other}"
                     )));
                 }
+            }
+        }
+
+        // Every key but trip_seq is mandatory. With a 27- or 28-field count and
+        // duplicates refused, a missing key could only hide behind the optional
+        // one; name it, rather than letting a zero-valued field reach the
+        // binding check, where an all-zero vehicle_id would read as a claim.
+        for key in (KEY_MANIFEST_VERSION..=KEY_ENCRYPTION_SUITE).filter(|&k| k != KEY_TRIP_SEQ) {
+            if seen & (1 << key) == 0 {
+                return Err(FormatError::Malformed(format!(
+                    "manifest is missing mandatory key {key}"
+                )));
             }
         }
 

@@ -1,8 +1,10 @@
-//! The v2 device model.
+//! The v2 device model, writing bundle format v3.
 //!
-//! Models what the firmware must do — framed capture, atomic sealing, boot
-//! recovery, manifest-first sync, local receipt verification, transactional
+//! Models what the firmware must do — framed, encrypted capture under an
+//! off-card storage root; an NVS bundle counter; atomic sealing; keyless boot
+//! recovery; manifest-first sync; local receipt verification; transactional
 //! pruning — so each step can be interrupted and the surviving state asserted.
+//! ("v2" names the device architecture, not the bundle format.)
 //!
 //! The point is not to simulate a car. It is to establish that the orderings
 //! the specification makes normative actually hold under the failures a car

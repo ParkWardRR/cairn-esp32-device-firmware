@@ -1,4 +1,4 @@
-//! The recovery scan.
+//! The recovery scan (spec §3.3).
 //!
 //! This is the algorithm that decides what survives a power cut, so it is
 //! specified normatively and implemented identically in all three languages.
@@ -6,16 +6,25 @@
 //! is valid and retained, everything from there to end-of-segment is discarded
 //! as an incomplete tail, and both the byte count and the reason are always
 //! reported rather than silently swallowed.
+//!
+//! It runs in two modes. Without a key it is *structural*: torn tails, frame
+//! CRCs, the `prev_crc32` chain and the sequence are all computed over the
+//! stored ciphertext, so anyone holding the bytes gets the same verdict — the
+//! device at boot, intake before it has fetched a root, or a thief. With a key
+//! it additionally authenticates every frame, and adds exactly one stop reason:
+//! `AUTH_FAILED`. Nothing structural depends on the key.
 
 use std::collections::BTreeMap;
 
 use super::{
     Result,
+    aead::SegmentCipher,
     crc::crc32,
     frame::{
         FRAME_HEADER_SIZE, FRAME_TRAILER_SIZE, Frame, MAX_FRAME_LEN, MIN_FRAME_LEN, RecordType,
         decode_frame_header,
     },
+    keys::KeyProvider,
     segment::{SegmentHeader, parse_segment_header},
 };
 
@@ -34,6 +43,14 @@ pub enum StopReason {
     ChainBreak,
     /// The sequence number skipped a value.
     SeqGap,
+    /// Keyed scans only. CRC, chain and sequence all held but the
+    /// authentication tag did not: tampering with a repaired CRC, a frame moved
+    /// from another segment, or the wrong key. Never the result of a power cut,
+    /// which is why it is distinct from `CorruptFrame` and always worth an
+    /// operator's attention. Like every other stop it is never skipped past: a
+    /// frame whose authenticity is in doubt makes everything after it equally
+    /// doubtful.
+    AuthFailed,
 }
 
 impl StopReason {
@@ -45,6 +62,7 @@ impl StopReason {
             Self::CorruptFrame => "CORRUPT_FRAME",
             Self::ChainBreak => "CHAIN_BREAK",
             Self::SeqGap => "SEQ_GAP",
+            Self::AuthFailed => "AUTH_FAILED",
         }
     }
 
@@ -76,8 +94,13 @@ pub struct ScanResult {
     pub header: SegmentHeader,
 
     /// The valid frames, in file order. Every frame here passed its CRC, chain
-    /// and sequence checks.
+    /// and sequence checks, and — when `decrypted` — its authentication tag.
     pub frames: Vec<Frame>,
+
+    /// Whether the scan was keyed: every retained frame authenticated and
+    /// carries its plaintext. `false` means a structural scan, whose verdicts
+    /// are real but say nothing about authenticity.
+    pub decrypted: bool,
 
     pub stop: StopReason,
 
@@ -108,15 +131,37 @@ pub struct ScanResult {
 /// Pass [`ScanState::default`] for a chain's first segment; for later segments
 /// pass the preceding segment's `next`.
 ///
-/// A header error is returned as `Err`: the segment is unusable. The caller must
-/// still not delete it — unreadable is not the same as worthless, and the
-/// offline salvage tool may yet recover records from it.
-pub fn scan_segment(b: &[u8], state: ScanState) -> Result<ScanResult> {
+/// `keys` selects the mode: `None` for the structural scan, a provider for the
+/// keyed one.
+///
+/// A header error is returned as `Err`: the segment is unusable. So is a key
+/// error ([`super::FormatError::NoKey`],
+/// [`super::FormatError::KeyVersionMismatch`]): the segment is intact but cannot
+/// be read with what the caller holds. The caller must still delete neither —
+/// unreadable is not the same as worthless, and the offline salvage tool, or a
+/// caller with the right key, may yet recover records from it.
+pub fn scan_segment(
+    b: &[u8],
+    state: ScanState,
+    keys: Option<&dyn KeyProvider>,
+) -> Result<ScanResult> {
     let (header, header_len) = parse_segment_header(b)?;
+
+    // The key comes from the header, before any frame is read, so a version
+    // mismatch is a refusal of the whole segment rather than a tag failure on
+    // its first frame.
+    let cipher = match keys {
+        None => None,
+        Some(k) => {
+            let key = k.segment_key(&header)?;
+            Some(SegmentCipher::new(&b[..header_len], &key)?)
+        }
+    };
 
     let mut res = ScanResult {
         header: header.clone(),
         frames: Vec::new(),
+        decrypted: cipher.is_some(),
         stop: StopReason::Eof,
         stop_detail: String::new(),
         stop_offset: 0,
@@ -127,9 +172,13 @@ pub fn scan_segment(b: &[u8], state: ScanState) -> Result<ScanResult> {
     };
 
     // For a chain's first segment the caller has no prior state, so the
-    // header's own first_seq establishes the expectation.
+    // header's own first_seq establishes the expectation. The journal is the
+    // first and only segment of its own chain.
     let mut expected_seq = state.expected_seq;
-    if header.segment_index == 0 && state.expected_seq == 0 && state.expected_prev == 0 {
+    if (header.segment_index == 0 || header.is_journal())
+        && state.expected_seq == 0
+        && state.expected_prev == 0
+    {
         expected_seq = header.first_seq;
     }
     let mut expected_prev = state.expected_prev;
@@ -190,12 +239,7 @@ pub fn scan_segment(b: &[u8], state: ScanState) -> Result<ScanResult> {
         }
 
         let body = &b[offset..offset + frame_len];
-        let stored_crc = u32::from_le_bytes([
-            body[frame_len - 4],
-            body[frame_len - 3],
-            body[frame_len - 2],
-            body[frame_len - 1],
-        ]);
+        let stored_crc = u32::from_le_bytes(body[frame_len - 4..].try_into().unwrap());
         let computed = crc32(&body[..frame_len - FRAME_TRAILER_SIZE]);
         if computed != stored_crc {
             stop!(
@@ -208,7 +252,7 @@ pub fn scan_segment(b: &[u8], state: ScanState) -> Result<ScanResult> {
 
         let mut f = decode_frame_header(body);
         f.crc32 = stored_crc;
-        f.payload = body[FRAME_HEADER_SIZE..frame_len - FRAME_TRAILER_SIZE].to_vec();
+        f.sealed = body[FRAME_HEADER_SIZE..frame_len - FRAME_TRAILER_SIZE].to_vec();
 
         if f.prev_crc32 != expected_prev {
             stop!(
@@ -230,12 +274,30 @@ pub fn scan_segment(b: &[u8], state: ScanState) -> Result<ScanResult> {
             );
         }
 
+        // Authentication comes after the structural checks, not before: those
+        // need no key and must give the same verdict whether or not one is
+        // held, so a damaged frame reports as damage rather than as an auth
+        // failure.
+        if let Some(c) = &cipher {
+            match c.open(&body[..FRAME_HEADER_SIZE], &f.sealed) {
+                Ok(pt) => f.payload = Some(pt),
+                Err(e) => stop!(
+                    StopReason::AuthFailed,
+                    format!(
+                        "frame at offset {} (seq {}): {e} — the ciphertext, frame header or \
+                         segment binding was altered, or the key is wrong",
+                        offset, f.seq
+                    )
+                ),
+            }
+        }
+
         if !f.record_type.known() {
             res.unknown_type_count += 1;
         }
         *res.record_counts.entry(f.record_type).or_insert(0) += 1;
 
-        expected_seq = f.seq + 1;
+        expected_seq = f.seq.wrapping_add(1);
         expected_prev = stored_crc;
         offset += frame_len;
 
@@ -244,17 +306,21 @@ pub fn scan_segment(b: &[u8], state: ScanState) -> Result<ScanResult> {
 }
 
 /// Scan an ordered list of segments in one chain, threading continuity between
-/// them. Segments must be supplied in ascending `segment_index` order.
+/// them. Segments must be supplied in ascending `segment_index` order. `keys`
+/// is as for [`scan_segment`].
 ///
 /// Scanning stops at the first segment that does not end cleanly: a damaged
 /// segment makes every later segment's chain expectation unknowable, so
 /// continuing would produce misleading verdicts rather than more data.
-pub fn scan_bundle(segments: &[Vec<u8>]) -> Result<Vec<ScanResult>> {
+pub fn scan_bundle(
+    segments: &[Vec<u8>],
+    keys: Option<&dyn KeyProvider>,
+) -> Result<Vec<ScanResult>> {
     let mut results = Vec::with_capacity(segments.len());
     let mut state = ScanState::default();
 
     for seg in segments {
-        let res = scan_segment(seg, state)?;
+        let res = scan_segment(seg, state, keys)?;
         let clean = res.stop.clean();
         state = res.next;
         results.push(res);

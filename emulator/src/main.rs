@@ -1,7 +1,7 @@
 //! Cairn device emulator.
 //!
-//! The v2 rebuild is in progress. `conformance` checks this crate's
-//! independent implementation of bundle format v2 against the committed
+//! The v2 device rebuild is in progress. `conformance` checks this crate's
+//! independent implementation of bundle format v3 against the committed
 //! vectors; `scenario` still drives the legacy v1 capture path, which is
 //! retired as the v2 device lands.
 
@@ -53,7 +53,7 @@ struct Cli {
 
 #[derive(clap::Subcommand)]
 enum Command {
-    /// Check this implementation of bundle format v2 against the committed
+    /// Check this implementation of bundle format v3 against the committed
     /// conformance vectors.
     ///
     /// The vectors are bytes and expected verdicts, not code, so neither
@@ -61,7 +61,7 @@ enum Command {
     /// single byte fails the run.
     Conformance {
         /// Directory holding the vectors.
-        #[arg(long, default_value = "../fixtures/format-v2")]
+        #[arg(long, default_value = "../fixtures/format-v3")]
         vectors: PathBuf,
 
         /// Print every vector, not only failures.
@@ -93,10 +93,59 @@ enum Command {
 
         #[arg(long)]
         verbose: bool,
+
+        #[command(flatten)]
+        identity: IdentityArgs,
     },
 
     /// Run a legacy v1 capture scenario.
     Scenario(ScenarioArgs),
+}
+
+/// The simulated device's provisioning. Defaults are public test values that
+/// protect nothing; the protocol rows need the values a server actually holds,
+/// because intake refuses a device whose storage root it has not escrowed and
+/// an assignment it did not issue.
+#[derive(clap::Args)]
+struct IdentityArgs {
+    /// Storage root K_root, 64 hex characters. Default: the hex of
+    /// "cairn-emulator-public-test-root!" — escrow it with
+    /// `cairn-server -enroll-root`.
+    #[arg(long)]
+    root_key: Option<String>,
+
+    /// storage_key_version of --root-key.
+    #[arg(long, default_value_t = 1)]
+    key_version: u32,
+
+    /// Vehicle id, 32 hex characters, as issued by the server.
+    #[arg(long)]
+    vehicle_id: Option<String>,
+
+    /// Assignment id, 32 hex characters, as issued by `cairn-admin assign`.
+    #[arg(long)]
+    assignment_id: Option<String>,
+}
+
+impl IdentityArgs {
+    fn resolve(&self) -> Result<v2::matrix::IdentityConfig, String> {
+        let mut id = v2::matrix::IdentityConfig {
+            storage_key_version: self.key_version,
+            ..Default::default()
+        };
+        if let Some(h) = &self.root_key {
+            id.root_key = format::unhex_array(h).ok_or("--root-key must be 64 hex characters")?;
+        }
+        if let Some(h) = &self.vehicle_id {
+            id.vehicle_id =
+                format::unhex_array(h).ok_or("--vehicle-id must be 32 hex characters")?;
+        }
+        if let Some(h) = &self.assignment_id {
+            id.assignment_id =
+                format::unhex_array(h).ok_or("--assignment-id must be 32 hex characters")?;
+        }
+        Ok(id)
+    }
 }
 
 #[derive(clap::Args)]
@@ -202,7 +251,14 @@ fn main() {
             seed,
             chunk_size,
             verbose,
-        } => run_fault_matrix(work_dir, server, seed, chunk_size, verbose),
+            identity,
+        } => {
+            let identity = identity.resolve().unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(2);
+            });
+            run_fault_matrix(work_dir, server, seed, chunk_size, verbose, identity)
+        }
         Command::Scenario(args) => run_scenarios(args),
     }
 }
@@ -214,38 +270,30 @@ fn run_conformance(vectors: &PathBuf, verbose: bool) {
         Err(e) => {
             eprintln!("cannot read vectors at {}: {e}", vectors.display());
             eprintln!(
-                "generate them with: cd ../server && go run ./cmd/mkvectors -out ../fixtures/format-v2"
+                "generate them with: cd ../server && go run ./cmd/mkvectors -out ../fixtures/format-v3"
             );
             std::process::exit(2);
         }
     };
 
-    // Always listed, not only when verbose. A skipped vector is not a passing
-    // vector, and hiding the difference on a clean run is how a gap goes
-    // unnoticed.
-    for name in &report.skipped {
-        eprintln!("  skip  {name}");
+    if verbose {
+        for line in &report.passes {
+            eprintln!("  pass  {line}");
+        }
     }
+    // There is no skip list: the runner fails a vector it does not recognise,
+    // because a skipped vector looks exactly like a passing one on a clean run.
     for failure in &report.failures {
         eprintln!("  FAIL  {failure}");
     }
 
     eprintln!();
     if report.ok() {
-        if report.skipped.is_empty() {
-            eprintln!(
-                "conformance: {}/{} vectors pass — this implementation agrees with the specification",
-                report.passed, report.checked
-            );
-        } else {
-            eprintln!(
-                "conformance: {}/{} vectors pass, {} skipped — this implementation \
-                 agrees with the specification on everything it implements",
-                report.passed,
-                report.checked,
-                report.skipped.len()
-            );
-        }
+        eprintln!(
+            "conformance: {}/{} vectors pass ({} structural and {} keyed segment verdicts) \
+             — this implementation agrees with the specification",
+            report.passed, report.checked, report.structural_verdicts, report.keyed_verdicts
+        );
         std::process::exit(0);
     }
 
@@ -268,6 +316,7 @@ fn run_fault_matrix(
     seed: u64,
     chunk_size: usize,
     verbose: bool,
+    identity: v2::matrix::IdentityConfig,
 ) {
     if let Err(e) = v2::matrix::prepare(&work_dir) {
         eprintln!("cannot prepare {}: {e}", work_dir.display());
@@ -280,6 +329,7 @@ fn run_fault_matrix(
         seed,
         chunk_size,
         verbose,
+        identity,
     };
 
     let report = match v2::matrix::run(&cfg) {
