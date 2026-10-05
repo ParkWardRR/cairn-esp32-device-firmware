@@ -1,5 +1,10 @@
 # Freematics ONE+ Model B -- Emulation Reference
 
+> Hardware reference. The Rust emulator no longer simulates drives (its legacy v1
+> capture path was removed on 2026-10-05; it now only runs `conformance` and
+> `fault-matrix`), so the values below are kept as a description of the real
+> device and sensor behaviour, not as a simulator spec.
+
 Sources: Freematics product pages, u-blox datasheets, TDK InvenSense docs,
 Freematics firmware (github.com/stanleyhuangyc/Freematics), automotive research.
 
@@ -287,15 +292,13 @@ Full cold boot: 300-500 ms. Deep sleep current: ~10 mA (vendor claim).
 
 ---
 
-## 8. Emulator Design Notes
+## 8. Axis Orientation and Typical Trips
 
 **Axis orientation** (device plugged into OBD-II port under dashboard):
 X = longitudinal (+ forward), Y = lateral (+ left), Z = vertical (+ up, reads +1g at rest).
 
-**Encoding** (per trip-file-format.md):
-GNSS: lat/lon int32 deg x 10^7, altitude int32 cm, speed uint16 cm/s, heading uint16 cdeg.
-IMU: accel int16 milli-g, gyro int16 deg/s x 10, window uint16 ms.
-
 **Trip patterns** (Santa Monica / West LA): 10-30 min, 5-15 km, city 30-50 km/h
 with stops every 1-3 min, highway 80-110 km/h. GNSS generally good; degrades
 near overpasses and tall buildings on Wilshire corridor.
+
+The on-wire encoding is specified in [bundle-format-v3.md](bundle-format-v3.md).

@@ -124,7 +124,7 @@ self-test actuation running continuously.
 
 Fix: Changed `writeByte(SELF_TEST_CONFIG_REG, 0x07)` to
 `writeByte(SELF_TEST_CONFIG_REG, 0x00)` in
-`lib/FreematicsPlus/FreematicsMEMS.cpp:742`.
+`firmware/freematics-base/lib/FreematicsPlus/FreematicsMEMS.cpp:742` (vendored; still used by `firmware/cairn-v2` through `lib_extra_dirs`).
 
 The bias calibration step masked this bug (it subtracted the ~108 dps offset),
 but running in self-test mode wastes power and reduces gyro dynamic range.
@@ -155,45 +155,29 @@ python3 -m venv ~/cairn-flash/venv
 
 ### Build (on dev machine)
 
-```bash
-cd firmware/freematics-base
-pio run -e freematics
-```
-
-Build artifacts:
-- `.pio/build/freematics/bootloader.bin` (19 KB)
-- `.pio/build/freematics/partitions.bin` (3 KB)
-- `.pio/build/freematics/firmware.bin` (845 KB)
-- `boot_app0.bin` from `~/.platformio/packages/framework-arduinoespressif32/tools/partitions/`
-
-### Transfer and flash
+The firmware is `firmware/cairn-v2` (the v1 firmware that used to live in
+`firmware/freematics-base` is gone; only its vendored `lib/` drivers remain and
+are pulled in by `lib_extra_dirs`).
 
 ```bash
-# Full flash (first time or after partition changes)
-scp firmware/freematics-base/.pio/build/freematics/{bootloader,partitions,firmware}.bin \
-    ~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin \
-    alfa@flash-station.example.lan:~/cairn-flash/
-
-ssh alfa@flash-station.example.lan "cd ~/cairn-flash && \
-  ~/cairn-flash/venv/bin/esptool \
-    --chip esp32 --port /dev/ttyUSB0 --baud 460800 \
-    --before default-reset --after hard-reset \
-    write_flash -z --flash-mode dio --flash-freq 40m --flash-size 4MB \
-    0x1000 bootloader.bin 0x8000 partitions.bin \
-    0xe000 boot_app0.bin 0x10000 firmware.bin"
-
-# Firmware-only flash (faster, reuses existing bootloader/partitions)
-scp firmware/freematics-base/.pio/build/freematics/firmware.bin \
-    alfa@flash-station.example.lan:~/cairn-flash/
-ssh alfa@flash-station.example.lan "cd ~/cairn-flash && \
-  ~/cairn-flash/venv/bin/esptool \
-    --chip esp32 --port /dev/ttyUSB0 --baud 460800 \
-    --before default-reset --after hard-reset \
-    write_flash -z --flash-mode dio --flash-freq 40m --flash-size 4MB \
-    0x10000 firmware.bin"
+cd firmware/cairn-v2
+pio run -e cairn            # production capture image
+pio run -e cairn-selftest   # bench self-test image (see v2-firmware-testing.md)
 ```
 
-Full flash: ~15s. Firmware-only: ~15s.
+Other environments in `platformio.ini`: `cairn-ble`, `cairn-pidtest`,
+`cairn-mtprobe`, `cairn-mtprobe-sniff`.
+
+### Flash
+
+Use PlatformIO's own upload, from the Mac or from the flash station; the exact
+procedure, baud-rate trap (use 460800) and image order are in
+[v2-firmware-testing.md](v2-firmware-testing.md#flashing).
+
+```bash
+pio run -e cairn-selftest -t upload --upload-port /dev/ttyUSB0          # Linux / Pi
+pio run -e cairn-selftest -t upload --upload-port /dev/cu.usbserial-<n> # macOS
+```
 
 ### Serial monitor
 
@@ -217,6 +201,11 @@ ser.rts = False; time.sleep(0.1); ser.close()
 ---
 
 ## Test Results
+
+Results below were recorded on the v1 firmware (then "Cairn v0.2") and are kept
+as a record of the hardware bring-up. For v2/v3 firmware results see
+[v2-firmware-testing.md](v2-firmware-testing.md) and
+[hardware-roundtrip.md](hardware-roundtrip.md).
 
 ### First boot (2026-09-29)
 
@@ -245,71 +234,48 @@ Two consecutive boots both report `[SD] Mounted: 15177 MB total, 1 MB used`.
 
 ### Credentials
 
-WiFi credentials live in `firmware/freematics-base/src/secrets.h`, which is
-gitignored — this repo is public, so nothing real belongs in a tracked file.
-`config.h` pulls it in with `__has_include`, so a fresh clone builds fine
-without it (SSID and password just default to empty).
+`firmware/cairn-v2/include/secrets.h` is gitignored — this repo is public, so
+nothing real belongs in a tracked file. `config.h` includes it when present and
+falls back to placeholders otherwise, so a fresh clone builds without it (it just
+cannot reach a server).
 
 ```bash
-cp firmware/freematics-base/src/secrets.h.example \
-   firmware/freematics-base/src/secrets.h
-# then edit secrets.h with the real SSID and password
+cd firmware/cairn-v2
+cp include/secrets.h.example include/secrets.h
+# then edit secrets.h: server host/port, pinned receipt key, enrolment key, CA
 ```
 
-Because it is a compile-time define, changing credentials means rebuild and
-reflash. Verify the build actually picked them up:
+Production Wi-Fi credentials and the mTLS client key are not compiled in: they
+are provisioned into NVS over USB with `cairn-provision`
+(see [device-provisioning.md](device-provisioning.md)). The `CAIRN_WIFI_*`
+defines in `secrets.h` are only a development fallback, active with
+`-DCAIRN_COMPILED_WIFI_FALLBACK=1`. A missing or placeholder `secrets.h` fails
+open to an unconfigured device that uploads but never prunes, so check the boot
+log after flashing rather than assuming.
 
-```bash
-strings .pio/build/freematics/firmware.bin | grep -c "<your-ssid>"   # expect 1
-```
+### Network self-test
 
-That check matters — a missing `secrets.h` fails open to an empty SSID and the
-firmware builds clean, so the only symptom would be a silent WiFi failure in the
-field. `-DWIFI_SSID=...` build flags and BLE-provisioned NVS values both
-override the header.
+`env:cairn-selftest` is the bench build: it runs the known-answer checks, writes
+and seals a bundle, joins Wi-Fi and syncs it, printing each step over serial.
+Flash it to validate the card and the network path, then flash `env:cairn`
+before driving. What each line means is in
+[v2-firmware-testing.md](v2-firmware-testing.md#reading-the-self-test).
 
-### Network self-test (2026-09-30)
-
-`env:freematics-selftest` is a bench-only build that joins WiFi, resolves
-`SERVER_HOSTNAME`, and fetches `/api/v1/health` at boot, printing each step over
-serial. Flash it to validate connectivity, then reflash `env:freematics` before
-driving — the production binary contains none of this code.
-
-```bash
-pio run -e freematics-selftest
-# flash, then watch serial for [SELFTEST] lines
-```
-
-It caught two real problems on first run:
+Two problems the original (v1) network self-test caught on first run, both still
+worth checking when association fails:
 
 | Problem | Symptom | Fix |
 |---------|---------|-----|
-| SSID misspelled (one letter off) | `FAIL: "<ssid>" not visible on 2.4 GHz` | Corrected in `src/secrets.h` |
-| Server host was `cairn.local` | mDNS not available to the ESP32 resolver | `SERVER_HOSTNAME` → `cairn.example.lan` |
+| SSID misspelled (one letter off) | SSID not visible on 2.4 GHz | Correct it; the ESP32 has no 5 GHz radio, so a 5 GHz-only SSID looks the same |
+| Server host was `cairn.local` | mDNS not available to the ESP32 resolver | Use a DNS name (`CAIRN_SERVER_HOST`), not a `.local` name |
 
-On failure the self-test dumps every SSID the 2.4 GHz radio can see with
-channel, RSSI and encryption type, which is what identified the misspelling.
-
-Passing run:
-
-```
-[SELFTEST] DNS server 172.16.1.69
-[SELFTEST] cairn.example.lan -> 172.16.6.80
-[SELFTEST] response:
-HTTP/1.1 200 OK
-{"database":true,"service":"ingestd","status":"ok",...}
-[SELFTEST] PASS: server reachable end to end
-```
-
-Note the server is reached by DNS name, not a hardcoded IP — it holds a DHCP
-lease (172.16.6.80 at time of writing, previously .101), so the name is the
-only stable handle.
+The server is reached by DNS name, not a hardcoded IP: it holds a DHCP lease, so
+the name is the only stable handle.
 
 ### Pending tests
 
 1. GNSS fix acquisition outdoors
 2. Full car test: OBD + battery + trip recording
-3. WiFi home sync — device-to-server path verified by the self-test above;
-   still needs a real trip bundle uploaded from the device
+3. WiFi home sync — see [hardware-roundtrip.md](hardware-roundtrip.md)
 4. Standby current measurement
 5. Power-loss recovery
