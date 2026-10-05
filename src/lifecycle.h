@@ -21,7 +21,6 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "cairn_ota.h"
 #include "cairn_power.h"
 #include "cairn_store.h"
 #include "policy.h"
@@ -124,9 +123,9 @@ struct Lifecycle {
      * instead. It costs co-processor link traffic, which is internal to the
      * dongle, and puts nothing on the vehicle bus.
      */
-    /* Sync retry pacing, kept separate from idle_since_ms so that uploading
-     * cannot reset the standby dwell. */
-    uint32_t next_sync_ms = 0;
+    /* Pending-bundle recount pacing, kept separate from idle_since_ms so that
+     * counting cannot reset the standby dwell. */
+    uint32_t next_pending_check_ms = 0;
 
     /* Set on a periodic-health wake: hold off standby until this passes, so the
      * co-processor has time to answer and the heartbeat records a real supply
@@ -187,9 +186,6 @@ struct Lifecycle {
      * at confirmation — writing it per trip-resume would bloat the journal
      * without adding information. */
     bool policy_written = false;
-
-    /* Next OTA check. Hourly while parked; see docs/ota.md. */
-    uint32_t next_ota_check_ms = 0;
 
     /* Cumulative standby, for the health record. A parked week should be
      * visible in the data rather than inferred from a gap. */

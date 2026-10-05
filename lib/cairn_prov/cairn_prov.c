@@ -181,8 +181,6 @@ static void note(const cairn_prov_t *p, const char *msg)
 
 static void staged_free(cairn_prov_staged_t *st)
 {
-    if (st->cert) { scrub(st->cert, st->cert_len); free(st->cert); }
-    if (st->key)  { scrub(st->key, st->key_len);  free(st->key); }
     scrub(st, sizeof(*st));
     memset(st, 0, sizeof(*st));
 }
@@ -230,78 +228,12 @@ static bool is_hex32(const char *s, uint8_t out[16])
     return true;
 }
 
-static bool printable_pem(const char *s, size_t n)
-{
-    for (size_t i = 0; i < n; i++) {
-        unsigned char c = (unsigned char)s[i];
-        if (!(c == '\n' || (c >= 0x20 && c < 0x7f))) return false;
-    }
-    return true;
-}
-
-/* Decode a base64 argument into a freshly allocated buffer, NUL-terminated. */
-static uint8_t *decode_arg(const char *b64, size_t max, size_t *len)
-{
-    size_t n = strlen(b64);
-    if (n == 0) return NULL;
-    uint8_t *buf = (uint8_t *)malloc(n / 4 * 3 + 1);
-    if (buf == NULL) return NULL;
-    int got = cairn_b64_decode(b64, n, buf, n / 4 * 3);
-    if (got < 0 || (size_t)got > max) {
-        scrub(buf, n / 4 * 3 + 1);
-        free(buf);
-        return NULL;
-    }
-    buf[got] = '\0';
-    *len = (size_t)got;
-    return buf;
-}
-
 static void set_field(cairn_prov_t *p, char *field, char *a1, char *a2)
 {
     cairn_prov_staged_t *st = &p->st;
     char msg[96];
 
-    if (strcmp(field, "wifi_ssid") == 0 && a1 && !a2) {
-        size_t n;
-        uint8_t *v = decode_arg(a1, CAIRN_PROV_SSID_MAX, &n);
-        if (v == NULL || n == 0) { free(v); say(p, "ERR wifi_ssid must be 1..32 bytes of base64"); return; }
-        memcpy(st->ssid, v, n); st->ssid[n] = 0; st->ssid_len = n; st->have_ssid = true;
-        scrub(v, n); free(v);
-    } else if (strcmp(field, "wifi_pass") == 0 && a1 && !a2) {
-        if (strcmp(a1, "-") == 0) {            /* "-" is an open network */
-            st->pass[0] = 0; st->pass_len = 0; st->have_pass = true;
-        } else {
-            size_t n;
-            uint8_t *v = decode_arg(a1, CAIRN_PROV_PASS_MAX, &n);
-            if (v == NULL || n < 8) { if (v) { scrub(v, n); free(v); } say(p, "ERR wifi_pass must be 8..63 bytes (or - for an open network)"); return; }
-            memcpy(st->pass, v, n); st->pass[n] = 0; st->pass_len = n; st->have_pass = true;
-            scrub(v, n); free(v);
-        }
-    } else if (strcmp(field, "client_cert") == 0 && a1 && !a2) {
-        size_t n;
-        uint8_t *v = decode_arg(a1, CAIRN_PROV_CERT_MAX, &n);
-        if (v == NULL || !printable_pem((char *)v, n) ||
-            strncmp((char *)v, "-----BEGIN CERTIFICATE-----", 27) != 0 ||
-            strstr((char *)v, "-----END CERTIFICATE-----") == NULL) {
-            if (v) free(v);
-            say(p, "ERR client_cert must be a PEM certificate of at most 2048 bytes");
-            return;
-        }
-        free(st->cert); st->cert = (char *)v; st->cert_len = n;
-    } else if (strcmp(field, "client_key") == 0 && a1 && !a2) {
-        size_t n;
-        uint8_t *v = decode_arg(a1, CAIRN_PROV_KEY_MAX, &n);
-        if (v == NULL || !printable_pem((char *)v, n) ||
-            strncmp((char *)v, "-----BEGIN ", 11) != 0 ||
-            strstr((char *)v, "PRIVATE KEY-----") == NULL) {
-            if (v) { scrub(v, n); free(v); }
-            say(p, "ERR client_key must be a PEM private key of at most 1536 bytes");
-            return;
-        }
-        if (st->key) { scrub(st->key, st->key_len); free(st->key); }
-        st->key = (char *)v; st->key_len = n;
-    } else if (strcmp(field, "assignment") == 0 && a1 && a2) {
+    if (strcmp(field, "assignment") == 0 && a1 && a2) {
         uint8_t veh[16], asg[16];
         if (!is_hex32(a1, veh) || !is_hex32(a2, asg) || all_zero(veh, 16) || all_zero(asg, 16)) {
             say(p, "ERR assignment needs two non-zero 32-hex ids: <vehicle> <assignment>");
@@ -426,13 +358,9 @@ void cairn_prov_line(cairn_prov_t *p, const char *line, const cairn_prov_env_t *
         set_field(p, tok[1], tok[2], nt >= 4 ? tok[3] : NULL);
     } else if (strcmp(tok[0], "COMMIT") == 0 && nt == 1) {
         cairn_prov_staged_t *st = &p->st;
-        bool any = st->have_ssid || st->have_pass || st->cert || st->key || st->have_assignment || st->have_floor;
+        bool any = st->have_assignment || st->have_floor;
         if (!any) {
             say(p, "ERR nothing staged");
-        } else if ((st->cert == NULL) != (st->key == NULL)) {
-            say(p, "ERR client_cert and client_key must be provisioned together");
-        } else if (st->have_ssid != st->have_pass) {
-            say(p, "ERR wifi_ssid and wifi_pass must be provisioned together");
         } else {
             const char *why = p->ops->apply(p->ops->ctx, st);
             if (why == NULL) {

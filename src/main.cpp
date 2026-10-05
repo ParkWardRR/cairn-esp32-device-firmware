@@ -28,7 +28,6 @@
 #include "cairn_log.h"
 #include "cairn_prune.h"
 #include "cairn_store.h"
-#include "cairn_sync.h"
 #include "config.h"
 #include "lifecycle.h"
 #include "prov_console.h"
@@ -290,25 +289,18 @@ static void run_selftest(void)
     }
 
     /*
-     * 5. Network and the pinned key. Offline is a valid steady state for this
-     * device, so this reports rather than fails.
+     * 5. Hand-off. There is no network to test: sealed bundles leave over BLE,
+     * pulled by the app. What the device can prove alone is that the bundle it
+     * just sealed is visible to the hand-off path as awaiting a receipt.
      */
-    if (cairn_sync_connect(CAIRN_SYNC_CONNECT_TIMEOUT_MS)) {
-        CAIRN_LOGI(TAG, "[PASS] associated, rssi %d dBm", cairn_sync_rssi());
+    uint32_t pending = 0;
+    uint64_t pending_bytes = 0;
+    bool pend_ok = cairn_store_pending_stats(&pending, &pending_bytes) && pending >= 1;
+    CAIRN_LOGI(TAG, "[%s] %u sealed bundle(s) awaiting hand-off, %llu bytes",
+               pend_ok ? "PASS" : "FAIL", (unsigned)pending,
+               (unsigned long long)pending_bytes);
 
-        cairn_sync_stats_t stats;
-        cairn_sync_result_t r = cairn_sync_run(&stats);
-        CAIRN_LOGI(TAG, "[INFO] sync: %s (%u offered, %u receipted, %u pruned)",
-                   cairn_sync_result_name(r), (unsigned)stats.bundles_offered,
-                   (unsigned)stats.bundles_receipted,
-                   (unsigned)stats.bundles_pruned);
-        cairn_sync_disconnect();
-    } else {
-        CAIRN_LOGW(TAG, "[INFO] no network; this device is offline-first, so "
-                        "that is not a failure");
-    }
-
-    bool all = crc_ok && sha_ok && sig_ok && neg_ok && (appended == 8) && seal_ok;
+    bool all = crc_ok && sha_ok && sig_ok && neg_ok && (appended == 8) && seal_ok && pend_ok;
     CAIRN_LOGI(TAG, "=== self-test %s ===", all ? "PASSED" : "FAILED");
 
     cairn_log_flush();
@@ -395,13 +387,6 @@ static bool bring_up_after_mount(void)
     if (have_identity) {
         cairn_identity_print_enrolment(probe_device, probe_pub);
     }
-
-    /*
-     * TLS credentials live on the card, so they are loaded once it is mounted
-     * and before anything tries to upload. Failure here is not fatal — it
-     * downgrades the transport and says so.
-     */
-    cairn_sync_load_credentials();
 
     /*
      * Before anything is written: confirm this build's primitives agree with the

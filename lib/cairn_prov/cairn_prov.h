@@ -11,10 +11,11 @@
  *      (cairn_enroll_build). The blob is byte-identical to the Go reference in
  *      server/internal/enroll; fixtures/enroll-v1 pins that.
  *   2. Speak a small line protocol over the USB console so an operator's
- *      workstation can fetch that blob and install the credentials the device
- *      needs (cairn_prov_line).
- *   3. Keep those credentials in NVS in two slots flipped by one write, so a
- *      power cut mid-provisioning leaves the old set intact (cairn_prov_creds_*).
+ *      workstation can fetch that blob and install the vehicle assignment and
+ *      counter floor (cairn_prov_line).
+ *   3. Erase credentials left in NVS by firmware that still had Wi-Fi
+ *      (cairn_prov_erase_legacy_credentials). This firmware holds no network
+ *      credential of any kind, so there is nothing to provision beyond the above.
  *
  * What this does NOT do is protect the console from someone with the USB cable:
  * physical access is the trust boundary here until flash encryption and secure
@@ -70,24 +71,9 @@ void cairn_enroll_fingerprint(const uint8_t pub[32], char out[9]);
 
 /* ── staged provisioning values ───────────────────────────────────────────── */
 
-#define CAIRN_PROV_SSID_MAX  32
-#define CAIRN_PROV_PASS_MAX  63
-#define CAIRN_PROV_CERT_MAX  2048
-#define CAIRN_PROV_KEY_MAX   1536
 #define CAIRN_PROV_LINE_MAX  4096
 
 typedef struct {
-    bool     have_ssid, have_pass;
-    uint8_t  ssid[CAIRN_PROV_SSID_MAX + 1];
-    size_t   ssid_len;
-    char     pass[CAIRN_PROV_PASS_MAX + 1];
-    size_t   pass_len;
-
-    char    *cert;                /* NUL-terminated PEM, heap, or NULL */
-    size_t   cert_len;
-    char    *key;
-    size_t   key_len;
-
     bool     have_assignment;
     uint8_t  vehicle_id[16];
     uint8_t  assignment_id[16];
@@ -101,7 +87,7 @@ typedef struct {
 typedef struct {
     uint32_t uptime_ms;      /* since boot */
     bool     trip_active;
-    bool     provisioned;    /* credentials already installed */
+    bool     provisioned;    /* an assignment is already installed */
 } cairn_prov_env_t;
 
 /* How long after boot a provisioned device accepts provisioning. */
@@ -121,9 +107,8 @@ typedef struct {
 
     /*
      * Install the staged values. Returns NULL on success or a short, secret-free
-     * reason. The credential set is replaced atomically; the assignment and the
-     * counter floor are idempotent (the floor only ever rises), so a COMMIT that
-     * reports failure is safe to simply send again.
+     * reason. The assignment and the counter floor are idempotent (the floor only
+     * ever rises), so a COMMIT that reports failure is safe to simply send again.
      */
     const char *(*apply)(void *ctx, const cairn_prov_staged_t *staged);
 
@@ -152,32 +137,15 @@ void cairn_prov_tick(cairn_prov_t *p, const cairn_prov_env_t *env);
 /* Scrub and release everything staged. */
 void cairn_prov_abort(cairn_prov_t *p);
 
-/* ── credential slots in NVS ──────────────────────────────────────────────── */
-
-typedef struct {
-    uint8_t ssid[CAIRN_PROV_SSID_MAX + 1];
-    size_t  ssid_len;
-    char    pass[CAIRN_PROV_PASS_MAX + 1];
-    size_t  pass_len;
-    char   *cert;   /* heap, NUL-terminated, or NULL */
-    char   *key;
-    bool    have_wifi;
-    bool    have_tls;
-} cairn_prov_creds_t;
-
-/* Load the live slot. Returns false when nothing is provisioned. */
-bool cairn_prov_creds_load(cairn_prov_creds_t *out);
-void cairn_prov_creds_free(cairn_prov_creds_t *c);
+/* ── legacy credential slots in NVS ───────────────────────────────────────── */
 
 /*
- * Replace the credential set with `staged` merged over what is live: a value not
- * staged is carried over. Written to the inactive slot, read back, and only then
- * made live by a single u32 write; the old slot is erased afterwards. A power
- * cut at any point leaves either the complete old set or the complete new one.
+ * Earlier firmware kept a Wi-Fi password and a client certificate and private key
+ * in two NVS slots. This firmware has no use for them and a private key in flash
+ * is a liability, so they are erased at boot. Idempotent; returns true when
+ * anything was there to erase.
  */
-bool cairn_prov_creds_apply(const cairn_prov_staged_t *staged);
-
-bool cairn_prov_has_credentials(void);
+bool cairn_prov_erase_legacy_credentials(void);
 
 #ifdef __cplusplus
 }

@@ -13,48 +13,13 @@
 #include "secrets.h"
 #endif
 
-#ifndef CAIRN_WIFI_SSID
-#define CAIRN_WIFI_SSID "unconfigured"
-#endif
-
-#ifndef CAIRN_WIFI_PASSWORD
-#define CAIRN_WIFI_PASSWORD ""
-#endif
-
-#ifndef CAIRN_SERVER_HOST
-#define CAIRN_SERVER_HOST "cairn.example.lan"
-#endif
-
-#ifndef CAIRN_SERVER_PORT
-#define CAIRN_SERVER_PORT 8080
-#endif
-
-#ifndef CAIRN_SERVER_TLS_PORT
-#define CAIRN_SERVER_TLS_PORT 8443
-#endif
-
 /*
- * mTLS is active only when a CA is pinned at build time. There is no runtime
- * switch: a transport that could be downgraded by editing a file on the card
- * would not be worth verifying.
- */
-#ifdef CAIRN_SERVER_CA_PEM
-#define CAIRN_TLS_AVAILABLE 1
-#else
-#define CAIRN_TLS_AVAILABLE 0
-#endif
-
-/*
- * The device's own certificate and private key, and the Wi-Fi credentials, are
- * NOT in this file and NOT on the SD card. They are provisioned over the USB
- * console into NVS (docs/device-provisioning.md): a private key on a removable
- * card is extractable and cloneable, which contradicts the rule that the card is
- * never the security boundary. They can be reissued without a reflash, which is
- * the reason they used to live on the card — the certificate's CommonName must
- * be the device id, and that is not known until the hardware has booted once.
- */
-
-/*
+ * There is no Wi-Fi, no server address and no TLS client in this
+ * firmware. The dongle talks to exactly one thing over the air: the enrolled
+ * phone app, over BLE (docs/ble-offload.md). The app is the only component that
+ * talks to the server, so the device holds no network credentials of any kind:
+ * no SSID, no password, no client certificate, no private key for a transport.
+ *
  * Pinned server enrolment public key (X25519, 32 bytes, hex). The device seals
  * its storage root to this key, so the all-zero placeholder makes it REFUSE to
  * produce an enrolment blob rather than seal to a key nobody holds. Get the real
@@ -66,19 +31,8 @@
 #endif
 
 /*
- * Fall back to the compiled-in CAIRN_WIFI_SSID / CAIRN_WIFI_PASSWORD when no
- * Wi-Fi credentials are provisioned. OFF in every production environment: with
- * it on, the home Wi-Fi password sits in the firmware image, readable from an
- * extracted chip until flash encryption exists. A development build may enable
- * it with -DCAIRN_COMPILED_WIFI_FALLBACK=1.
- */
-#ifndef CAIRN_COMPILED_WIFI_FALLBACK
-#define CAIRN_COMPILED_WIFI_FALLBACK 0
-#endif
-
-/*
- * An all-zero key verifies nothing, so an unconfigured device uploads but never
- * prunes. That is the correct failure direction: a full card loses nothing,
+ * An all-zero key verifies nothing, so an unconfigured device hands bundles
+ * off but never prunes. That is the correct failure direction: a full card loses nothing,
  * while a wrongly authorized prune loses a trip permanently.
  */
 #ifndef CAIRN_SERVER_RECEIPT_KEY_HEX
@@ -93,16 +47,14 @@
 /*
  * OTA is enabled only when an update key is pinned at build time. A device that
  * cannot verify an update has no business installing one, so undefined means
- * off — it will not even fetch.
+ * off. Images arrive from the app over BLE, never from a network the device
+ * joins itself.
  */
 #ifdef CAIRN_UPDATE_KEY_HEX
 #define CAIRN_OTA_AVAILABLE 1
 #else
 #define CAIRN_OTA_AVAILABLE 0
 #endif
-
-/* Checked while parked; see docs/ota.md for why it is not more frequent. */
-#define CAIRN_OTA_CHECK_INTERVAL_MS 3600000
 
 /* ── capture policy ───────────────────────────────────────────────────────── */
 
@@ -342,23 +294,18 @@
 #define CAIRN_PHONE_GNSS_STALE_MS 3000
 #endif
 
-/* ── sync policy ──────────────────────────────────────────────────────────── */
-
-#define CAIRN_SYNC_CONNECT_TIMEOUT_MS 20000
-#define CAIRN_SYNC_HTTP_TIMEOUT_MS    15000
+/* ── hand-off policy ──────────────────────────────────────────────────────── */
 
 /*
- * Sync only while stopped. Uploading during a drive competes with capture for
- * both CPU and the SPI bus, and the data is not time-critical.
+ * Recount sealed-but-unreceipted bundles only while stopped. It is cheap, but
+ * the card is shared with capture and nothing about this is time-critical.
  */
-#define CAIRN_SYNC_MIN_IDLE_MS 10000
+#define CAIRN_PENDING_MIN_IDLE_MS 10000
 
 /*
- * How long to wait before retrying a failed sync.
- *
- * Its own timer, not idle_since_ms. Sharing that one meant every upload reset
- * the standby dwell and the device never slept.
+ * Its own timer, not idle_since_ms. Sharing that one would let every recount
+ * reset the standby dwell and the device would never sleep.
  */
-#define CAIRN_SYNC_RETRY_MS 60000
+#define CAIRN_PENDING_REFRESH_MS 60000
 
 #endif /* CAIRN_CONFIG_H */

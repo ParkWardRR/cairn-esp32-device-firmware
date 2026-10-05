@@ -12,12 +12,10 @@ const char *cairn_ota_result_name(cairn_ota_result_t r)
     switch (r) {
     case CAIRN_OTA_OK:                 return "OK";
     case CAIRN_OTA_DISABLED:           return "DISABLED";
-    case CAIRN_OTA_NO_NETWORK:         return "NO_NETWORK";
     case CAIRN_OTA_UP_TO_DATE:         return "UP_TO_DATE";
     case CAIRN_OTA_BLOCKED:            return "BLOCKED";
     case CAIRN_OTA_DESCRIPTOR_FAILED:  return "DESCRIPTOR_FAILED";
     case CAIRN_OTA_REFUSED:            return "REFUSED";
-    case CAIRN_OTA_DOWNLOAD_FAILED:    return "DOWNLOAD_FAILED";
     case CAIRN_OTA_IMAGE_MISMATCH:     return "IMAGE_MISMATCH";
     case CAIRN_OTA_FLASH_FAILED:       return "FLASH_FAILED";
     default:                           return "UNKNOWN";

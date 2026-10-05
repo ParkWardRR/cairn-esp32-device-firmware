@@ -1,6 +1,6 @@
 /*
  * Host tests for lib/cairn_prov: X25519, the sealed enrolment blob, the
- * provisioning protocol and the credential slots.
+ * provisioning protocol and the erasure of legacy credential slots.
  *
  * Three kinds of check, and the distinction is the point:
  *
@@ -193,6 +193,11 @@ static bool row_blob_matches_go(void)
 
 /* ── the protocol ─────────────────────────────────────────────────────────── */
 
+/*
+ * This firmware holds no network credential, so the console accepts none. The
+ * canaries below are what an out-of-date host tool would send; the device must
+ * refuse them, stage nothing, and never echo or log them.
+ */
 #define CANARY_PASS "SECRET-WIFI-PASSWORD-CANARY"
 #define CANARY_KEY  "SECRET-KEY-CANARY-DO-NOT-LEAK"
 
@@ -219,8 +224,7 @@ static const char *m_apply(void *c, const cairn_prov_staged_t *st)
     (void)c;
     s_applies++;
     if (s_apply_fails) return "storage write failed";
-    s_last = *st;                 /* shallow copy: pointers are valid only now */
-    s_last.cert = s_last.key = NULL;
+    s_last = *st;
     return NULL;
 }
 static void m_log(void *c, const char *m) { (void)c; strncat(s_log, m, sizeof(s_log) - strlen(s_log) - 2); strcat(s_log, "\n"); }
@@ -250,13 +254,12 @@ static void send_set(cairn_prov_t *p, const cairn_prov_env_t *env, const char *f
     free(e);
 }
 
-static const char *PEM_CERT = "-----BEGIN CERTIFICATE-----\nMIIBabc\n-----END CERTIFICATE-----\n";
 static const char *PEM_KEY  = "-----BEGIN EC PRIVATE KEY-----\n" CANARY_KEY "\n-----END EC PRIVATE KEY-----\n";
+static const char *ASSIGN   = "SET assignment 606162636465666768696a6b6c6d6e6f 707172737475767778797a7b7c7d7e7f";
 
 static bool row_window_rules(void)
 {
     cairn_prov_t p;
-    cairn_prov_env_t fresh = { 1000, false, false };
 
     /* Unprovisioned: always open, whatever the uptime. */
     reset_io(); cairn_prov_init(&p, &OPS);
@@ -283,7 +286,6 @@ static bool row_window_rules(void)
         send(&p, &trip, "CAIRN-PROV BEGIN");
         CHECK(strstr(s_out, "ERR refused") && !p.active, "opened a session during a trip (provisioned=%d)", prov);
     }
-    (void)fresh;
     return true;
 }
 
@@ -293,22 +295,22 @@ static bool row_trip_aborts_session(void)
     reset_io(); cairn_prov_init(&p, &OPS);
     cairn_prov_env_t env = { 1000, false, false };
     send(&p, &env, "CAIRN-PROV BEGIN");
-    send_set(&p, &env, "client_key", PEM_KEY);
-    CHECK(p.st.key != NULL, "key not staged");
+    send(&p, &env, ASSIGN);
+    CHECK(p.st.have_assignment, "assignment not staged");
 
     env.uptime_ms = 2000; env.trip_active = true;
     send(&p, &env, "SET counter_floor 5");
-    CHECK(!p.active && p.st.key == NULL, "a trip starting did not abort and scrub the session");
+    CHECK(!p.active && !p.st.have_assignment, "a trip starting did not abort and scrub the session");
     CHECK(strstr(s_out, "ERR aborted"), "no abort reply: %s", s_out);
 
     /* tick() alone also drops it. */
     reset_io(); cairn_prov_init(&p, &OPS);
     env.trip_active = false;
     send(&p, &env, "CAIRN-PROV BEGIN");
-    send_set(&p, &env, "client_key", PEM_KEY);
+    send(&p, &env, ASSIGN);
     env.trip_active = true;
     cairn_prov_tick(&p, &env);
-    CHECK(!p.active && p.st.key == NULL, "tick did not abort on a trip");
+    CHECK(!p.active && !p.st.have_assignment, "tick did not abort on a trip");
     return true;
 }
 
@@ -318,11 +320,11 @@ static bool row_idle_timeout(void)
     reset_io(); cairn_prov_init(&p, &OPS);
     cairn_prov_env_t env = { 1000, false, false };
     send(&p, &env, "CAIRN-PROV BEGIN");
-    send_set(&p, &env, "client_key", PEM_KEY);
+    send(&p, &env, ASSIGN);
     env.uptime_ms += CAIRN_PROV_IDLE_TIMEOUT_MS + 1;
     reset_io();
     send(&p, &env, "SET counter_floor 5");
-    CHECK(strstr(s_out, "ERR session expired") && !p.active && p.st.key == NULL, "idle session survived: %s", s_out);
+    CHECK(strstr(s_out, "ERR session expired") && !p.active && !p.st.have_assignment, "idle session survived: %s", s_out);
     return true;
 }
 
@@ -334,16 +336,13 @@ static bool row_validation(void)
     send(&p, &env, "CAIRN-PROV BEGIN");
 
     struct { const char *line; } bad[] = {
-        { "SET wifi_ssid !!!notbase64" },
-        { "SET wifi_ssid " },                       /* missing argument */
-        { "SET wifi_pass c2hvcnQ=" },               /* "short": under 8 bytes */
-        { "SET client_cert Zm9v" },                 /* not a PEM certificate */
-        { "SET client_key Zm9v" },                  /* not a PEM key */
         { "SET assignment 00 00" },
         { "SET assignment 00000000000000000000000000000000 11111111111111111111111111111111" }, /* zero vehicle */
+        { "SET assignment 11111111111111111111111111111111 00000000000000000000000000000000" }, /* zero assignment */
         { "SET counter_floor 18446744073709551616" },    /* 2^64 */
         { "SET counter_floor -1" },
         { "SET counter_floor 12x" },
+        { "SET counter_floor " },                        /* missing argument */
         { "SET nosuchfield AAAA" },
         { "FROBNICATE" },
     };
@@ -352,30 +351,17 @@ static bool row_validation(void)
         send(&p, &env, bad[i].line);
         CHECK(strstr(s_out, "ERR"), "accepted: %s -> %s", bad[i].line, s_out);
     }
-    CHECK(!p.st.have_ssid && !p.st.have_pass && !p.st.cert && !p.st.key && !p.st.have_assignment && !p.st.have_floor,
-          "a rejected line left something staged");
+    CHECK(!p.st.have_assignment && !p.st.have_floor, "a rejected line left something staged");
 
     /* A line that is too long is refused whole. */
     char *big = (char *)malloc(CAIRN_PROV_LINE_MAX + 64);
     memset(big, 'A', CAIRN_PROV_LINE_MAX + 32);
-    memcpy(big, "SET wifi_ssid ", 14);
+    memcpy(big, "SET counter_floor ", 18);
     big[CAIRN_PROV_LINE_MAX + 32] = 0;
     reset_io();
     send(&p, &env, big);
-    CHECK(strstr(s_out, "ERR line too long"), "oversized line not refused: %.60s", s_out);
+    CHECK(strstr(s_out, "ERR"), "oversized line not refused: %.60s", s_out);
     free(big);
-
-    /* Oversized credentials are refused by their own limit. */
-    char *huge = (char *)malloc(CAIRN_PROV_CERT_MAX + 400);
-    strcpy(huge, "-----BEGIN CERTIFICATE-----\n");
-    size_t hl = strlen(huge);
-    memset(huge + hl, 'A', CAIRN_PROV_CERT_MAX + 50);
-    huge[hl + CAIRN_PROV_CERT_MAX + 50] = '\0';
-    strcpy(huge + strlen(huge), "\n-----END CERTIFICATE-----\n");
-    reset_io();
-    send_set(&p, &env, "client_cert", huge);
-    CHECK(strstr(s_out, "ERR") && !p.st.cert, "a >2048 byte certificate was accepted");
-    free(huge);
 
     /* Lines outside a session are ignored silently. */
     cairn_prov_abort(&p);
@@ -383,6 +369,34 @@ static bool row_validation(void)
     send(&p, &env, "SET counter_floor 5");
     send(&p, &env, "COMMIT");
     CHECK(s_out[0] == 0, "a device answered lines outside a session: %s", s_out);
+    return true;
+}
+
+/*
+ * The fields this firmware used to accept. A host tool from before the Wi-Fi
+ * removal must be refused rather than obeyed: a private key written to NVS by a
+ * stale script is exactly the material this change exists to keep off the chip.
+ */
+static bool row_legacy_credential_fields_are_refused(void)
+{
+    cairn_prov_t p;
+    reset_io(); cairn_prov_init(&p, &OPS);
+    cairn_prov_env_t env = { 1000, false, false };
+    send(&p, &env, "CAIRN-PROV BEGIN");
+
+    static const char *const fields[] = { "wifi_ssid", "wifi_pass", "client_cert", "client_key" };
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
+        reset_io();
+        send_set(&p, &env, fields[i], PEM_KEY);
+        CHECK(strstr(s_out, "ERR unknown field"), "legacy field %s was not refused: %s", fields[i], s_out);
+    }
+    reset_io();
+    send(&p, &env, "SET wifi_pass -");
+    CHECK(strstr(s_out, "ERR"), "legacy open-network marker was accepted: %s", s_out);
+
+    reset_io();
+    send(&p, &env, "COMMIT");
+    CHECK(strstr(s_out, "ERR nothing staged") && s_applies == 0, "COMMIT after refused credentials applied something: %s", s_out);
     return true;
 }
 
@@ -397,33 +411,19 @@ static bool row_commit_rules(void)
     send(&p, &env, "COMMIT");
     CHECK(strstr(s_out, "ERR nothing staged") && s_applies == 0, "empty COMMIT: %s", s_out);
 
-    send_set(&p, &env, "client_cert", PEM_CERT);
-    reset_io();
-    send(&p, &env, "COMMIT");
-    CHECK(strstr(s_out, "together") && s_applies == 0, "cert without key committed: %s", s_out);
-
-    send_set(&p, &env, "client_key", PEM_KEY);
-    send_set(&p, &env, "wifi_ssid", "HomeNet");
-    reset_io();
-    send(&p, &env, "COMMIT");
-    CHECK(strstr(s_out, "together") && s_applies == 0, "ssid without password committed: %s", s_out);
-
-    send_set(&p, &env, "wifi_pass", CANARY_PASS);
-    send(&p, &env, "SET assignment 606162636465666768696a6b6c6d6e6f 707172737475767778797a7b7c7d7e7f");
+    send(&p, &env, ASSIGN);
     send(&p, &env, "SET counter_floor 7");
     reset_io();
     send(&p, &env, "COMMIT");
     CHECK(strstr(s_out, "OK") && s_applies == 1, "valid COMMIT failed: %s", s_out);
-    CHECK(s_last.have_ssid && s_last.ssid_len == 7 && memcmp(s_last.ssid, "HomeNet", 7) == 0, "ssid not delivered");
     CHECK(s_last.have_floor && s_last.counter_floor == 7, "floor not delivered");
     CHECK(s_last.have_assignment && s_last.vehicle_id[0] == 0x60 && s_last.assignment_id[0] == 0x70, "assignment not delivered");
-    CHECK(!p.active && p.st.key == NULL && p.st.cert == NULL, "committed session was not scrubbed and closed");
+    CHECK(!p.active && !p.st.have_assignment && !p.st.have_floor, "committed session was not scrubbed and closed");
 
     /* A failed apply keeps the staged values so COMMIT can simply be re-sent. */
     reset_io(); cairn_prov_init(&p, &OPS);
     send(&p, &env, "CAIRN-PROV BEGIN");
     send(&p, &env, "SET counter_floor 9");
-    s_apply_fails = true;
     reset_io(); s_apply_fails = true;
     send(&p, &env, "COMMIT");
     CHECK(strstr(s_out, "ERR storage write failed") && p.active && p.st.have_floor, "failed apply dropped the session: %s", s_out);
@@ -442,11 +442,10 @@ static bool row_no_secret_leaks(void)
     send(&p, &env, "CAIRN-PROV BEGIN");
     send_set(&p, &env, "wifi_ssid", "HomeNet");
     send_set(&p, &env, "wifi_pass", CANARY_PASS);
-    send_set(&p, &env, "client_cert", PEM_CERT);
     send_set(&p, &env, "client_key", PEM_KEY);
     send(&p, &env, "GET enroll_blob");
+    send(&p, &env, ASSIGN);
     send(&p, &env, "COMMIT");
-    send(&p, &env, "SET wifi_pass Zm9v");           /* a rejected secret line */
     send(&p, &env, "CAIRN-PROV END");
 
     /* Every string the device produced, replies and log together. Encoded forms
@@ -456,62 +455,48 @@ static bool row_no_secret_leaks(void)
     CHECK(!strstr(s_out, CANARY_KEY) && !strstr(s_log, CANARY_KEY), "the private key was echoed or logged");
     CHECK(!strstr(s_out, enc_pass) && !strstr(s_log, enc_pass), "the Wi-Fi password was echoed or logged (base64)");
     CHECK(!strstr(s_out, enc_key) && !strstr(s_log, enc_key), "the private key was echoed or logged (base64)");
-    CHECK(strstr(s_log, "staged wifi_pass") && strstr(s_log, "committed"), "the log does not record the events at all: %s", s_log);
+    CHECK(strstr(s_log, "committed"), "the log does not record the events at all: %s", s_log);
+    CHECK(s_applies == 1 && s_last.have_assignment, "the legitimate part of the session did not apply");
     free(enc_pass); free(enc_key);
     return true;
 }
 
-/* ── the credential slots ─────────────────────────────────────────────────── */
+/* ── legacy credential slots ──────────────────────────────────────────────── */
 
-static bool row_slots_atomic_and_merged(void)
+static bool kv_has(const char *key)
+{
+    uint8_t probe; size_t n = 0;
+    return cairn_kv_get_blob_var(key, &probe, 0, &n) && n > 0;
+}
+
+static bool row_legacy_slots_are_erased(void)
 {
     remove("/tmp/cairn-prov-kv.bin");
     cairn_kv_host_set_path("/tmp/cairn-prov-kv.bin");
     CHECK(cairn_kv_begin(), "kv");
 
-    CHECK(!cairn_prov_has_credentials(), "credentials present on a fresh store");
+    /* A fresh store has nothing to erase. */
+    CHECK(!cairn_prov_erase_legacy_credentials(), "reported erasing something on a fresh store");
 
-    cairn_prov_staged_t st;
-    memset(&st, 0, sizeof(st));
-    memcpy(st.ssid, "HomeNet", 7); st.ssid_len = 7; st.have_ssid = true;
-    memcpy(st.pass, CANARY_PASS, strlen(CANARY_PASS)); st.pass_len = strlen(CANARY_PASS); st.have_pass = true;
-    st.cert = strdup(PEM_CERT); st.cert_len = strlen(PEM_CERT);
-    st.key = strdup(PEM_KEY);   st.key_len = strlen(PEM_KEY);
-    CHECK(cairn_prov_creds_apply(&st), "first apply failed");
-    free(st.cert); free(st.key);
+    /* What earlier firmware left behind: both slots, and the selector. */
+    static const char *const names[] = { "pv0_ssid", "pv0_pass", "pv0_crt", "pv0_key",
+                                         "pv1_ssid", "pv1_pass", "pv1_crt", "pv1_key" };
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        CHECK(cairn_kv_set_blob(names[i], PEM_KEY, strlen(PEM_KEY)), "seeding %s", names[i]);
+    }
+    CHECK(cairn_kv_set_u32("pv_slot", 1), "seeding the slot selector");
+    /* Something that is not ours to touch. */
+    CHECK(cairn_kv_set_u32("st_counter", 41), "seeding an unrelated key");
 
-    cairn_prov_creds_t c;
-    CHECK(cairn_prov_creds_load(&c) && c.have_wifi && c.have_tls, "load after first apply");
-    CHECK(c.ssid_len == 7 && strcmp(c.pass, CANARY_PASS) == 0, "wifi values differ");
-    CHECK(strcmp(c.cert, PEM_CERT) == 0 && strcmp(c.key, PEM_KEY) == 0, "tls values differ");
-    cairn_prov_creds_free(&c);
-    CHECK(cairn_prov_has_credentials(), "has_credentials false");
+    CHECK(cairn_prov_erase_legacy_credentials(), "did not report erasing the legacy slots");
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        CHECK(!kv_has(names[i]), "%s survived the erase: a private key is still in flash", names[i]);
+    }
+    CHECK(cairn_kv_get_u32("pv_slot", 0xFFFFFFFFu) == 0xFFFFFFFFu, "the slot selector survived");
+    CHECK(cairn_kv_get_u32("st_counter", 0) == 41, "the erase touched an unrelated key");
 
-    /* Stage only a new Wi-Fi password: the certificate and key are carried over. */
-    memset(&st, 0, sizeof(st));
-    memcpy(st.ssid, "OtherNet", 8); st.ssid_len = 8; st.have_ssid = true;
-    memcpy(st.pass, "another-password", 16); st.pass_len = 16; st.have_pass = true;
-    CHECK(cairn_prov_creds_apply(&st), "second apply failed");
-    CHECK(cairn_prov_creds_load(&c) && c.have_wifi && c.have_tls, "load after second apply");
-    CHECK(c.ssid_len == 8 && memcmp(c.ssid, "OtherNet", 8) == 0 && strcmp(c.pass, "another-password") == 0, "new wifi not live");
-    CHECK(strcmp(c.cert, PEM_CERT) == 0 && strcmp(c.key, PEM_KEY) == 0, "unstaged tls values were not carried over");
-    cairn_prov_creds_free(&c);
-
-    /* The previous slot is erased: no stale private key lingers in flash. */
-    uint8_t probe; size_t n = 0;
-    CHECK(!cairn_kv_get_blob_var("pv0_key", &probe, 0, &n) || cairn_kv_get_u32("pv_slot", 9) == 0, "old slot not erased (pv0)");
-    CHECK(!cairn_kv_get_blob_var("pv1_key", &probe, 0, &n) || cairn_kv_get_u32("pv_slot", 9) == 1, "old slot not erased (pv1)");
-
-    /* An apply that fails part-way leaves the live set complete and unchanged.
-     * A value larger than the store accepts makes the write fail. */
-    memset(&st, 0, sizeof(st));
-    size_t huge = 80 * 1024;
-    st.cert = (char *)malloc(huge + 1); memset(st.cert, 'A', huge); st.cert[huge] = 0; st.cert_len = huge;
-    st.key = strdup(PEM_KEY); st.key_len = strlen(PEM_KEY);
-    CHECK(!cairn_prov_creds_apply(&st), "an unwritable credential set claimed success");
-    free(st.cert); free(st.key);
-    CHECK(cairn_prov_creds_load(&c) && c.ssid_len == 8 && strcmp(c.cert, PEM_CERT) == 0, "a failed apply damaged the live set");
-    cairn_prov_creds_free(&c);
+    /* Idempotent: a second boot finds nothing and says so. */
+    CHECK(!cairn_prov_erase_legacy_credentials(), "a second erase claimed to find something");
 
     cairn_kv_end();
     remove("/tmp/cairn-prov-kv.bin");
@@ -531,9 +516,10 @@ int main(void)
         { "a trip starting aborts and scrubs the session", row_trip_aborts_session },
         { "an idle session expires and is scrubbed", row_idle_timeout },
         { "every malformed line is refused and stages nothing", row_validation },
+        { "Wi-Fi and client-certificate fields are refused, not obeyed", row_legacy_credential_fields_are_refused },
         { "COMMIT is all-or-nothing and convergent on retry", row_commit_rules },
         { "no secret is ever echoed or logged (raw or base64)", row_no_secret_leaks },
-        { "credential slots: atomic flip, merge, old slot erased, failure leaves live intact", row_slots_atomic_and_merged },
+        { "legacy Wi-Fi and key slots are erased, idempotently, touching nothing else", row_legacy_slots_are_erased },
     };
     for (size_t i = 0; i < sizeof(ROWS) / sizeof(ROWS[0]); i++) {
         bool ok = ROWS[i].fn();

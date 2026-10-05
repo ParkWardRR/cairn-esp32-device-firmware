@@ -9,7 +9,6 @@
 #include "cairn_log.h"
 #include "cairn_prov.h"
 #include "cairn_store.h"
-#include "cairn_sync.h"
 #include "config.h"
 
 static const char *TAG = "PROV";
@@ -23,6 +22,18 @@ static void scrub(void *p, size_t n)
 {
     volatile uint8_t *v = (volatile uint8_t *)p;
     while (n--) *v++ = 0;
+}
+
+/* Whether an assignment is installed. Read once and after a commit, not on every
+ * 50 ms poll: loading it means reading the storage root out of NVS. */
+static bool         s_provisioned;
+
+static bool load_provisioned(void)
+{
+    cairn_storage_identity_t id;
+    bool ok = cairn_storage_identity_load(&id) && id.assigned;
+    scrub(&id, sizeof(id));
+    return ok;
 }
 
 static bool unhex32(const char *hex, uint8_t out[32])
@@ -107,10 +118,9 @@ static bool op_enroll_text(void *, char *out, size_t cap, const char **err)
 static const char *op_apply(void *, const cairn_prov_staged_t *st)
 {
     /*
-     * Order: the idempotent parts first, the atomic credential flip last, so a
-     * failure part-way leaves a state COMMIT can simply be re-sent against.
-     * The counter floor only ever raises; an assignment change is logged as the
-     * state change it is.
+     * Both parts are idempotent, so a failure part-way leaves a state COMMIT can
+     * simply be re-sent against. The counter floor only ever raises; an
+     * assignment change is logged as the state change it is.
      */
     if (st->have_assignment) {
         if (!cairn_storage_set_assignment(st->vehicle_id, st->assignment_id)) {
@@ -118,6 +128,7 @@ static const char *op_apply(void *, const cairn_prov_staged_t *st)
         }
         CAIRN_LOGW(TAG, "vehicle assignment changed by provisioning (takes effect "
                         "for the next bundle opened)");
+        s_provisioned = true;
     }
     if (st->have_floor) {
         if (!cairn_storage_raise_counter(st->counter_floor)) {
@@ -125,13 +136,6 @@ static const char *op_apply(void *, const cairn_prov_staged_t *st)
         }
         CAIRN_LOGI(TAG, "device counter raised to at least %llu",
                    (unsigned long long)st->counter_floor);
-    }
-    if (st->have_ssid || st->cert != nullptr) {
-        if (!cairn_prov_creds_apply(st)) {
-            return "could not store the credentials; the previous set is unchanged";
-        }
-        /* Pick up a new client certificate for the next upload. */
-        cairn_sync_load_credentials();
     }
     return nullptr;
 }
@@ -163,12 +167,20 @@ void prov_console_begin(void)
     s_len = 0;
     s_overflow = false;
 
-    if (cairn_prov_has_credentials()) {
-        CAIRN_LOGI(TAG, "credentials are provisioned; the console accepts "
+    /* Firmware that still had Wi-Fi left a password and a client private key in
+     * NVS. This one has no use for them, so they go. */
+    if (cairn_prov_erase_legacy_credentials()) {
+        CAIRN_LOGW(TAG, "erased Wi-Fi and client-certificate material left in NVS by "
+                        "earlier firmware; this device holds no network credentials");
+    }
+
+    s_provisioned = load_provisioned();
+    if (s_provisioned) {
+        CAIRN_LOGI(TAG, "an assignment is installed; the console accepts "
                         "provisioning for %u s after boot, never during a trip",
                    (unsigned)(CAIRN_PROV_WINDOW_MS / 1000));
     } else {
-        CAIRN_LOGW(TAG, "NOT PROVISIONED: no Wi-Fi / client credentials. Run "
+        CAIRN_LOGW(TAG, "NOT ASSIGNED: bundles will be refused by the server. Run "
                         "cairn-provision over USB. Capture is unaffected.");
     }
 }
@@ -178,7 +190,7 @@ void prov_console_poll(bool trip_active)
     cairn_prov_env_t env;
     env.uptime_ms = millis();
     env.trip_active = trip_active;
-    env.provisioned = cairn_prov_has_credentials();
+    env.provisioned = s_provisioned;
 
     cairn_prov_tick(&s_prov, &env);
 

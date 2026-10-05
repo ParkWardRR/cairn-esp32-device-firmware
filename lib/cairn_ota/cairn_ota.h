@@ -5,7 +5,9 @@
  * worse than a corrupt bundle, because a bricked device captures nothing and
  * cannot report that it is bricked. So this module is written around what has
  * to be true before a device is allowed to replace itself, not around
- * downloading.
+ * downloading. There is no network on this device, so the image arrives from
+ * the enrolled phone app over BLE (docs/ble-offload.md); the gate below is
+ * independent of how the bytes got here.
  */
 
 #ifndef CAIRN_OTA_H
@@ -22,12 +24,10 @@ extern "C" {
 typedef enum {
     CAIRN_OTA_OK = 0,
     CAIRN_OTA_DISABLED,          /* no update key pinned at build time */
-    CAIRN_OTA_NO_NETWORK,
     CAIRN_OTA_UP_TO_DATE,
     CAIRN_OTA_BLOCKED,           /* a precondition is not met; try later */
-    CAIRN_OTA_DESCRIPTOR_FAILED, /* fetch, parse or signature */
+    CAIRN_OTA_DESCRIPTOR_FAILED, /* parse or signature */
     CAIRN_OTA_REFUSED,           /* older image, or min_firmware_version */
-    CAIRN_OTA_DOWNLOAD_FAILED,
     CAIRN_OTA_IMAGE_MISMATCH,    /* what reached flash is not what was signed */
     CAIRN_OTA_FLASH_FAILED,
 } cairn_ota_result_t;
@@ -54,19 +54,6 @@ bool cairn_ota_preconditions(bool parked, uint16_t battery_mv,
                              cairn_ota_block_t *out);
 
 void cairn_ota_describe_block(const cairn_ota_block_t *b, char *out, size_t cap);
-
-/*
- * Check for an update and install it if one is available and allowed.
- *
- * Returns after setting the boot partition; it does **not** reboot. The caller
- * decides when, because this is called from the controller and finishing the
- * current pass — flushing the log, closing the capture cleanly — is worth the
- * few milliseconds.
- *
- * `*reboot_required` is set when a new image is staged and verified.
- */
-cairn_ota_result_t cairn_ota_check_and_install(bool parked, uint16_t battery_mv,
-                                               bool *reboot_required);
 
 /*
  * Compare two firmware version strings of the form "<name>-v<major>.<minor>.<patch>".

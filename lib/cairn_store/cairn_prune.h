@@ -1,7 +1,7 @@
 /*
  * Receipt-gated pruning.
  *
- * Split out of cairn_sync and kept as portable C for one reason: this is the
+ * Kept as portable C, apart from any transport, for one reason: this is the
  * invariant with the worst failure mode in the whole system. Everything else
  * that goes wrong costs a trip's worth of detail; a wrongly authorized prune
  * deletes data permanently and reports success. So the gate lives here, away

@@ -10,9 +10,8 @@
 #include "ble_companion.h"
 #include "cairn_fs.h"
 #include "cairn_kv.h"
-#include "cairn_ota.h"
 #include "cairn_power.h"
-#include "cairn_sync.h"
+#include "cairn_prune.h"
 #include "config.h"
 #include "policy.h"
 #include "preroll.h"
@@ -269,7 +268,7 @@ bool lifecycle_begin(Lifecycle *lc)
      * only then is a capture opened or resumed.
      */
     cairn_store_resume_interrupted_seals();
-    cairn_sync_resume_interrupted_prunes();
+    cairn_prune_resume_interrupted();
 
     if (!cairn_capture_open_or_resume(&lc->cap, lc->device_id, lc->boot_id,
                                       &lc->storage)) {
@@ -656,8 +655,8 @@ static void on_health(Lifecycle *lc, const fact_t *f)
 
     h.reboot_count = (uint8_t)lc->boot_count;
 
-    int rssi = cairn_sync_rssi();
-    h.rssi_dbm = (rssi != 0) ? (int8_t)rssi : CAIRN_I8_UNKNOWN;
+    /* There is no Wi-Fi radio on this device, so there is no signal strength. */
+    h.rssi_dbm = CAIRN_I8_UNKNOWN;
 
     uint64_t total = 0, used = 0, free_mib = 0;
     if (cairn_fs_space(&total, &used)) {
@@ -871,69 +870,6 @@ static void seal_and_reopen(Lifecycle *lc, uint8_t reason)
 }
 
 /*
- * Check for firmware while parked and connected.
- *
- * Folded into the sync pass because both want the same conditions — idle,
- * associated, nothing urgent happening — and bringing the radio up twice would
- * cost power for no benefit. The preconditions in cairn_ota are checked again
- * inside, so this is a scheduling hint rather than the gate.
- */
-static void maybe_update(Lifecycle *lc)
-{
-#if CAIRN_OTA_AVAILABLE
-    uint32_t now = millis();
-    if ((int32_t)(now - lc->next_ota_check_ms) < 0) return;
-    lc->next_ota_check_ms = now + CAIRN_OTA_CHECK_INTERVAL_MS;
-
-    bool parked = (lc->capture == CaptureState::Idle);
-
-    /*
-     * Read the supply directly rather than gating on a live ECU.
-     *
-     * This gate made OTA unreachable. The preconditions block while driving via
-     * not_parked, and treat an unknown voltage as unhealthy — correctly, since
-     * updating on the strength of a reading the device could not take is the
-     * wrong direction. But a parked car has no ECU answering, so gating here
-     * forced battery_mv to UNKNOWN exactly when parked, and the two conditions
-     * between them rejected every state the device is ever in. The one surviving
-     * window was engine running and vehicle stationary, which is close to the
-     * opposite of the intent recorded in cairn_ota.c.
-     *
-     * sensors_battery_mv reads OBD-port voltage off the coprocessor and is
-     * documented to work with the ignition off; measured at 5440 mV on bench USB
-     * with no ECU present. A resting 12 V battery sits above OTA_MIN_SUPPLY_MV
-     * and a weak one does not, which is the discrimination the threshold was
-     * written for.
-     */
-    uint16_t battery = sensors_battery_mv();
-
-    bool reboot = false;
-    cairn_ota_result_t r = cairn_ota_check_and_install(parked, battery, &reboot);
-
-    if (r != CAIRN_OTA_BLOCKED && r != CAIRN_OTA_UP_TO_DATE) {
-        CAIRN_LOGI(TAG, "update check: %s", cairn_ota_result_name(r));
-    }
-
-    if (reboot) {
-        /*
-         * Seal and flush before restarting. The staged image is already
-         * verified, so there is no hurry — and rebooting with an open capture
-         * would leave a torn tail for the new firmware to recover, which is
-         * recoverable but pointless when it can be avoided.
-         */
-        CAIRN_LOGW(TAG, "rebooting into the staged image");
-        if (lc->cap.active) seal_and_reopen(lc, 2);
-        cairn_log_flush();
-        cairn_log_detach_sd();
-        delay(200);
-        ESP.restart();
-    }
-#else
-    (void)lc;
-#endif
-}
-
-/*
  * Stand by when there is demonstrably nothing to do.
  *
  * Ordering matters more than the saving. Standby stops the radio, so it stops
@@ -1080,7 +1016,6 @@ static void maybe_standby(Lifecycle *lc)
      * letting the first pass after waking fire everything at once.
      */
     uint32_t now = millis();
-    lc->next_ota_check_ms = now + CAIRN_OTA_CHECK_INTERVAL_MS;
     lc->still_since_ms = now;
     lc->motion_since_ms = 0;
     lc->last_wake = r.wake_reason;
@@ -1129,76 +1064,30 @@ static void maybe_standby(Lifecycle *lc)
 }
 
 /*
- * Sync only while idle. Uploading during a drive competes with capture for both
- * the CPU and the SPI bus the card is on, and nothing about this data is
- * time-critical.
+ * Count what is waiting to leave the device.
+ *
+ * There is no network on this device. Sealed bundles leave it over BLE, pulled
+ * by the enrolled phone app (docs/ble-offload.md), and a bundle is only deleted
+ * from the card once the app hands back a server receipt that verifies against
+ * the pinned key. All this stage does is keep the pending count honest while the
+ * vehicle is stopped; it starts no radio and moves no data.
  */
-static void maybe_sync(Lifecycle *lc)
+static void refresh_pending(Lifecycle *lc)
 {
     if (lc->capture != CaptureState::Idle) return;
-
-    /*
-     * idle_since_ms is read here and never written.
-     *
-     * Writing it was a bug that disabled standby entirely. This function used
-     * to rebase idle_since_ms on both a completed sync and a failed connect,
-     * giving one timer two jobs with opposite requirements: "how long has the
-     * vehicle been idle", which maybe_standby needs to grow without
-     * interruption, and "when may sync be retried", which wants resetting.
-     *
-     * The result was a loop with no exit. Idle reached the standby threshold,
-     * maybe_standby sealed the open capture, the seal produced a pending
-     * bundle, sync uploaded it and reset the idle clock to zero — and a GNSS
-     * gap record landed in the fresh capture before the dwell could elapse
-     * again. Measured on the bench: five minutes between seals, and standby
-     * never entered once in seven minutes of a parked device that had nothing
-     * else to do. Retry pacing now has its own timer.
-     */
-    if (millis() - lc->idle_since_ms < CAIRN_SYNC_MIN_IDLE_MS) return;
-    if ((int32_t)(millis() - lc->next_sync_ms) < 0) return;
+    if (millis() - lc->idle_since_ms < CAIRN_PENDING_MIN_IDLE_MS) return;
+    if ((int32_t)(millis() - lc->next_pending_check_ms) < 0) return;
+    lc->next_pending_check_ms = millis() + CAIRN_PENDING_REFRESH_MS;
 
     uint32_t pending = 0;
     uint64_t bytes = 0;
-    bool have_stats = cairn_store_pending_stats(&pending, &bytes);
-    lc->pending_bundles = have_stats ? pending : 0;
-    if (!have_stats || pending == 0) return;
+    if (!cairn_store_pending_stats(&pending, &bytes)) return;
 
-    CAIRN_LOGI(TAG, "%u bundle(s) pending, %llu bytes; attempting sync",
-               (unsigned)pending, (unsigned long long)bytes);
-
-    ble_companion_radio_off();
-
-    set_link_state(lc, LinkState::Associating, 0);
-
-    if (!cairn_sync_connect(CAIRN_SYNC_CONNECT_TIMEOUT_MS)) {
-        set_link_state(lc, LinkState::Offline, 1);
-        lc->next_sync_ms = millis() + CAIRN_SYNC_RETRY_MS;
-        ble_companion_radio_on();
-        return;
+    if (pending != lc->pending_bundles) {
+        CAIRN_LOGI(TAG, "%u bundle(s) awaiting hand-off to the app, %llu bytes",
+                   (unsigned)pending, (unsigned long long)bytes);
     }
-
-    set_link_state(lc, LinkState::Syncing, 0);
-
-    cairn_sync_stats_t stats;
-    cairn_sync_result_t r = cairn_sync_run(&stats);
-
-    CAIRN_LOGI(TAG, "sync result %s", cairn_sync_result_name(r));
-
-    /* While the radio is still up and the device is demonstrably idle. */
-    maybe_update(lc);
-
-    cairn_sync_disconnect();
-    set_link_state(lc, LinkState::Offline, 0);
-
-    ble_companion_radio_on();
-
-    /* Flush the log so the sync outcome is on the card even if power is cut
-     * immediately afterwards. */
-    cairn_log_flush();
-
-    /* Deliberately does not touch idle_since_ms. A completed sync with nothing
-     * left pending is precisely the moment standing by is safe. */
-    lc->next_sync_ms = millis();
+    lc->pending_bundles = pending;
 }
 
 /* ── tick ─────────────────────────────────────────────────────────────────── */
@@ -1437,7 +1326,7 @@ void lifecycle_tick(Lifecycle *lc)
         }
     }
 
-    maybe_sync(lc);
+    refresh_pending(lc);
 
     /*
      * Last, so a sync has already had its chance this pass. Standing by before

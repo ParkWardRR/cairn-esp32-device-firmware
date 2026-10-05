@@ -12,7 +12,7 @@
  *   1. A sealed bundle is never mutated. Sealing moves a directory; it never
  *      rewrites one in place.
  *   2. No byte is deleted without a locally verified signed receipt. This
- *      module therefore never deletes bundle data at all — see cairn_sync.
+ *      module therefore never deletes bundle data at all — see cairn_prune.
  *   3. Ordering truth is (boot_id, seq), never wall-clock UTC. UTC is recorded
  *      as an annotation with its own accuracy and may jump; seq may not.
  *   4. Honest incompleteness beats fabricated continuity. A torn tail is

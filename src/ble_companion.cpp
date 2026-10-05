@@ -250,7 +250,7 @@ void ble_companion_radio_off(void)
         s_server->disconnect(s_conn_handle);
     }
     NimBLEDevice::getAdvertising()->stop();
-    CAIRN_LOGI(TAG, "BLE radio released for WiFi");
+    CAIRN_LOGI(TAG, "BLE radio released");
 }
 
 void ble_companion_radio_on(void)

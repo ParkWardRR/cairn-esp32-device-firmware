@@ -17,7 +17,6 @@
 #include "cairn_power.h"
 
 #include <Arduino.h>
-#include <WiFi.h>
 #include <esp_sleep.h>
 
 #include "cairn_log.h"
@@ -37,15 +36,7 @@ void cairn_power_standby(cairn_power_result_t *out)
     CAIRN_LOGW(TAG, "entering standby");
 
     /*
-     * Radio first and explicitly. WiFi.mode(WIFI_OFF) powers the radio down
-     * rather than merely disassociating, and it is the largest single consumer
-     * on the board.
-     */
-    WiFi.disconnect(true);
-    WiFi.mode(WIFI_OFF);
-
-    /*
-     * GNSS next, with power off. The receiver draws continuously and has
+     * GNSS first, with power off. The receiver draws continuously and has
      * nothing to track while parked; it reacquires in seconds on wake, which a
      * stationary vehicle can afford.
      */
