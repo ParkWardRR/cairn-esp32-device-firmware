@@ -13,6 +13,7 @@
 #include "cairn_format.h"
 #include "cairn_fs.h"
 #include "cairn_log.h"
+#include "cairn_prov.h"
 #include "cairn_prune.h"
 #include "config.h"
 
@@ -88,10 +89,39 @@ bool cairn_sync_connect(uint32_t timeout_ms)
 {
     if (WiFi.status() == WL_CONNECTED) return true;
 
-    CAIRN_LOGI(TAG, "associating with \"%s\"", CAIRN_WIFI_SSID);
+    /*
+     * Credentials come from NVS, where cairn-provision put them. The network
+     * name is deliberately not logged: it identifies where the owner lives, and
+     * this log is a file on a removable card.
+     */
+    cairn_prov_creds_t creds;
+    const char *ssid = nullptr;
+    const char *pass = nullptr;
+    bool        have = cairn_prov_creds_load(&creds) && creds.have_wifi;
+    if (have) {
+        ssid = (const char *)creds.ssid;
+        pass = creds.pass;
+    } else {
+#if CAIRN_COMPILED_WIFI_FALLBACK
+        CAIRN_LOGW(TAG, "no provisioned Wi-Fi credentials; using the compiled-in "
+                        "fallback (a development build)");
+        ssid = CAIRN_WIFI_SSID;
+        pass = CAIRN_WIFI_PASSWORD;
+#else
+        CAIRN_LOGW(TAG, "no Wi-Fi credentials are provisioned, so this device "
+                        "cannot sync. Provision them over USB with cairn-provision; "
+                        "capture is unaffected");
+        cairn_prov_creds_free(&creds);
+        return false;
+#endif
+    }
+
+    CAIRN_LOGI(TAG, "associating with the %s Wi-Fi network",
+               have ? "provisioned" : "compiled-in");
 
     WiFi.mode(WIFI_STA);
-    WiFi.begin(CAIRN_WIFI_SSID, CAIRN_WIFI_PASSWORD);
+    WiFi.begin(ssid, pass);
+    cairn_prov_creds_free(&creds);   /* WiFi.begin copied what it needs */
 
     uint32_t start = millis();
     while (WiFi.status() != WL_CONNECTED) {
@@ -212,8 +242,33 @@ bool cairn_sync_load_credentials(void)
 #else
     free(s_client_cert);
     free(s_client_key);
-    s_client_cert = read_text_file(CAIRN_PATH_CLIENT_CERT);
-    s_client_key  = read_text_file(CAIRN_PATH_CLIENT_KEY);
+    s_client_cert = nullptr;
+    s_client_key  = nullptr;
+
+    /*
+     * From NVS, never from the card. A private key on a removable card is
+     * extractable and cloneable, so the firmware does not read one from there
+     * even if one is present; a leftover pair on an older card is reported so
+     * it can be deleted, and ignored.
+     */
+    {
+        cairn_prov_creds_t creds;
+        if (cairn_prov_creds_load(&creds) && creds.have_tls) {
+            s_client_cert = creds.cert;   /* take ownership of the heap strings */
+            s_client_key  = creds.key;
+            creds.cert = nullptr;
+            creds.key  = nullptr;
+        }
+        cairn_prov_creds_free(&creds);
+
+        cairn_file_t *legacy = cairn_fs_open("/cairn/certs/client.key", CAIRN_FS_READ);
+        if (legacy != nullptr) {
+            cairn_fs_close(legacy);
+            CAIRN_LOGW(TAG, "a private key is still on the SD card at "
+                            "/cairn/certs/client.key. It is IGNORED; delete it, "
+                            "because anyone holding the card can copy it");
+        }
+    }
 
     if (s_client_cert == nullptr || s_client_key == nullptr) {
         /*
@@ -222,11 +277,12 @@ bool cairn_sync_load_credentials(void)
          * has to be — the server rejects a certificate whose CN is not the
          * device id, and that is a confusing failure to debug from a TLS alert.
          */
-        CAIRN_LOGE(TAG, "a CA is pinned but %s / %s are missing, so mTLS cannot "
-                        "be used and uploads fall back to plain HTTP",
-                   CAIRN_PATH_CLIENT_CERT, CAIRN_PATH_CLIENT_KEY);
+        CAIRN_LOGE(TAG, "a CA is pinned but no client certificate and key are "
+                        "provisioned, so mTLS cannot be used and uploads fall back "
+                        "to plain HTTP");
         CAIRN_LOGE(TAG, "issue a certificate whose CommonName is this device's "
-                        "id (printed above as device_id) and copy it to the card");
+                        "id (printed above as device_id) and install it over USB "
+                        "with cairn-provision");
         free(s_client_cert);
         free(s_client_key);
         s_client_cert = nullptr;
@@ -241,7 +297,7 @@ bool cairn_sync_load_credentials(void)
 
     s_tls_ready = true;
     CAIRN_LOGI(TAG, "mTLS ready: CA pinned in firmware, client credentials from "
-                    "the card");
+                    "NVS");
     return true;
 #endif
 }

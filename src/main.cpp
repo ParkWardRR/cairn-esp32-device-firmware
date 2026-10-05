@@ -31,6 +31,7 @@
 #include "cairn_sync.h"
 #include "config.h"
 #include "lifecycle.h"
+#include "prov_console.h"
 #include "pidtest.h"
 #include "sensors.h"
 
@@ -293,8 +294,7 @@ static void run_selftest(void)
      * device, so this reports rather than fails.
      */
     if (cairn_sync_connect(CAIRN_SYNC_CONNECT_TIMEOUT_MS)) {
-        CAIRN_LOGI(TAG, "[PASS] associated with \"%s\", rssi %d dBm",
-                   CAIRN_WIFI_SSID, cairn_sync_rssi());
+        CAIRN_LOGI(TAG, "[PASS] associated, rssi %d dBm", cairn_sync_rssi());
 
         cairn_sync_stats_t stats;
         cairn_sync_result_t r = cairn_sync_run(&stats);
@@ -449,6 +449,7 @@ static bool bring_up_after_mount(void)
 void setup()
 {
     cairn_log_init(115200);
+    prov_console_begin();
 #if CAIRN_SELFTEST || CAIRN_PIDTEST
     delay(300);
 #endif
@@ -491,6 +492,7 @@ void loop()
          * reaches the card, and the LED stays lit as a visible fault.
          */
         cairn_log_tick();
+        prov_console_poll(false);
 
         /* Keep trying to mount. A marginal card contact that fails at boot
          * often succeeds moments later, and giving up permanently turns that
@@ -507,11 +509,23 @@ void loop()
             }
         }
 
-        delay(1000);
+        /*
+         * Sleep a second, but stay responsive: the provisioning console runs in
+         * this state too (a device with no card is exactly when someone is
+         * standing at it with a cable), and a one-second blind spot is long
+         * enough to overrun even a generous receive buffer.
+         */
+        for (int i = 0; i < 20; i++) {
+            prov_console_poll(false);
+            delay(50);
+        }
         return;
     }
 
     lifecycle_tick(&g_lifecycle);
+
+    /* Provisioning is refused whenever the controller is past Idle. */
+    prov_console_poll(g_lifecycle.capture != CaptureState::Idle);
 
 #if CAIRN_PIDTEST
     pidtest_tick();

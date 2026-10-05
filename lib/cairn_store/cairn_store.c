@@ -370,6 +370,17 @@ bool cairn_storage_set_assignment(const uint8_t vehicle_id[16],
            cairn_kv_set_blob(KV_ASSIGNMENT_ID, assignment_id, 16);
 }
 
+bool cairn_storage_raise_counter(uint64_t floor)
+{
+    if (!cairn_kv_begin()) return false;
+
+    uint64_t cur = 0;
+    (void)kv_counter_read(&cur);
+    if (floor <= cur) return true;
+
+    return kv_counter_write(floor);
+}
+
 /* ── paths ────────────────────────────────────────────────────────────────── */
 
 static void segment_path(const cairn_capture_t *cap, uint32_t index, char *out,

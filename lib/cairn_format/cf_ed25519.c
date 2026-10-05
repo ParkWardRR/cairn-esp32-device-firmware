@@ -323,6 +323,92 @@ static void pow2523(gf o, const gf i)
     set25519(o, c);
 }
 
+/* ── X25519 (RFC 7748) ────────────────────────────────────────────────────── */
+
+/*
+ * Diffie-Hellman over Curve25519, by the Montgomery ladder, on the same field
+ * arithmetic as Ed25519 above.
+ *
+ * It exists for one purpose: sealing the device storage root to the server's
+ * enrolment public key (docs/device-provisioning.md). The ephemeral scalar is
+ * secret, so the ladder is written to be constant-time: the scalar bit steers
+ * sel25519(), a masked swap, never a branch or an index. The final inversion is
+ * a fixed-exponent chain and does not depend on the secret either.
+ *
+ * Checked against RFC 7748 §5.2 and §6.1 in the host tests, and — more
+ * importantly — against Go's crypto/ecdh through the enrolment vectors, which
+ * is an independent implementation of the same function.
+ */
+static const gf C121665 = { 0xdb41, 1 };
+
+bool cairn_x25519(uint8_t out[32], const uint8_t scalar[32], const uint8_t point[32])
+{
+    uint8_t z[32];
+    gf x1, a, b, c, d, e, f;
+
+    /* RFC 7748 §5 clamping. */
+    for (int i = 0; i < 32; i++) z[i] = scalar[i];
+    z[0] &= 248;
+    z[31] = (uint8_t)((z[31] & 127) | 64);
+
+    /* unpack25519 masks the top bit of u, as the RFC requires. */
+    unpack25519(x1, point);
+    for (int i = 0; i < 16; i++) {
+        b[i] = x1[i];
+        a[i] = c[i] = d[i] = 0;
+    }
+    a[0] = d[0] = 1;
+
+    for (int i = 254; i >= 0; i--) {
+        int64_t r = (z[i >> 3] >> (i & 7)) & 1;
+        sel25519(a, b, r);
+        sel25519(c, d, r);
+        fadd(e, a, c);
+        fsub(a, a, c);
+        fadd(c, b, d);
+        fsub(b, b, d);
+        fsq(d, e);
+        fsq(f, a);
+        fmul(a, c, a);
+        fmul(c, b, e);
+        fadd(e, a, c);
+        fsub(a, a, c);
+        fsq(b, a);
+        fsub(c, d, f);
+        fmul(a, c, C121665);
+        fadd(a, a, d);
+        fmul(c, c, a);
+        fmul(a, d, f);
+        fmul(d, b, x1);
+        fsq(b, e);
+        sel25519(a, b, r);
+        sel25519(c, d, r);
+    }
+
+    finv(c, c);
+    fmul(a, a, c);
+    pack25519(out, a);
+
+    /* Scrub the clamped scalar: it is the secret. */
+    volatile uint8_t *vz = z;
+    for (int i = 0; i < 32; i++) vz[i] = 0;
+
+    /*
+     * RFC 7748 §6.1: an all-zero result means the peer sent a low-order point,
+     * and a "shared secret" of zero is known to everyone. The caller must treat
+     * it as failure. Folded without branching on the bytes' values.
+     */
+    uint8_t acc = 0;
+    for (int i = 0; i < 32; i++) acc |= out[i];
+    return acc != 0;
+}
+
+bool cairn_x25519_public(uint8_t pub[32], const uint8_t scalar[32])
+{
+    static const uint8_t base[32] = { 9 };
+    return cairn_x25519(pub, scalar, base);
+}
+
 /* ── group operations on the twisted Edwards curve ────────────────────────── */
 
 static void ge_add(gf p[4], gf q[4])

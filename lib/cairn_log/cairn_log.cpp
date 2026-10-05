@@ -257,6 +257,14 @@ void cairn_log_init(uint32_t baud)
 
     s_mutex = xSemaphoreCreateMutex();
 
+    /*
+     * The console carries provisioning lines of up to ~4 KB (a PEM key in
+     * base64). Arduino's default UART receive buffer is 256 bytes, so a long
+     * line arriving while this task is busy elsewhere silently loses bytes and
+     * the base64 no longer decodes — which looks exactly like a bad credential.
+     * The size must be set BEFORE begin().
+     */
+    Serial.setRxBufferSize(8192);
     Serial.begin(baud);
 
     memset(&s_stats, 0, sizeof(s_stats));

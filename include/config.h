@@ -45,13 +45,36 @@
 #endif
 
 /*
- * Where the device's own certificate and key live. On the card rather than in
- * firmware so they can be reissued without a reflash — which matters because
- * the certificate's CommonName must be the device id, and that is not known
- * until the hardware has booted once.
+ * The device's own certificate and private key, and the Wi-Fi credentials, are
+ * NOT in this file and NOT on the SD card. They are provisioned over the USB
+ * console into NVS (docs/device-provisioning.md): a private key on a removable
+ * card is extractable and cloneable, which contradicts the rule that the card is
+ * never the security boundary. They can be reissued without a reflash, which is
+ * the reason they used to live on the card — the certificate's CommonName must
+ * be the device id, and that is not known until the hardware has booted once.
  */
-#define CAIRN_PATH_CLIENT_CERT "/cairn/certs/client.crt"
-#define CAIRN_PATH_CLIENT_KEY  "/cairn/certs/client.key"
+
+/*
+ * Pinned server enrolment public key (X25519, 32 bytes, hex). The device seals
+ * its storage root to this key, so the all-zero placeholder makes it REFUSE to
+ * produce an enrolment blob rather than seal to a key nobody holds. Get the real
+ * value from `cairn-server -print-enroll-key` and put it in secrets.h.
+ */
+#ifndef CAIRN_SERVER_ENROLL_PUBKEY_HEX
+#define CAIRN_SERVER_ENROLL_PUBKEY_HEX \
+    "0000000000000000000000000000000000000000000000000000000000000000"
+#endif
+
+/*
+ * Fall back to the compiled-in CAIRN_WIFI_SSID / CAIRN_WIFI_PASSWORD when no
+ * Wi-Fi credentials are provisioned. OFF in every production environment: with
+ * it on, the home Wi-Fi password sits in the firmware image, readable from an
+ * extracted chip until flash encryption exists. A development build may enable
+ * it with -DCAIRN_COMPILED_WIFI_FALLBACK=1.
+ */
+#ifndef CAIRN_COMPILED_WIFI_FALLBACK
+#define CAIRN_COMPILED_WIFI_FALLBACK 0
+#endif
 
 /*
  * An all-zero key verifies nothing, so an unconfigured device uploads but never

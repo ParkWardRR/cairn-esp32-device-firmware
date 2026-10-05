@@ -25,6 +25,7 @@ STORE_DIR  := ../../lib/cairn_store
 FS_DIR     := ../../lib/cairn_fs
 INCLUDE_DIR := ../../include
 LOG_DIR     := ../../lib/cairn_log
+PROV_DIR    := ../../lib/cairn_prov
 
 FORMAT_SRC := $(wildcard $(FORMAT_DIR)/*.c)
 STORE_SRC  := $(wildcard $(STORE_DIR)/*.c)
@@ -47,6 +48,9 @@ CONFORMANCE_SRC := $(FORMAT_SRC) $(SRC_DIR)/policy.c minijson.c conformance.c
 FAULTS_SRC      := $(FORMAT_SRC) $(STORE_SRC) $(FS_SRC) $(APP_SRC) \
                    log_host.c platform_host.c faults.c
 BLE_VEC_SRC     := $(FORMAT_SRC) minijson.c ble_vectors.c
+# Provisioning needs only the format primitives, its own sources, and the host
+# key-value store (so the credential slots run against the real slot code).
+PROV_SRC        := $(FORMAT_SRC) $(wildcard $(PROV_DIR)/*.c) $(FS_DIR)/cairn_kv_posix.c minijson.c prov_test.c
 
 # -Wconversion is deliberately absent but the rest is strict: this code does a
 # great deal of width narrowing between the wire format and C types, and a
@@ -55,20 +59,20 @@ CFLAGS  ?= -std=c11 -O1 -g \
            -Wall -Wextra -Werror \
            -Wshadow -Wpointer-arith -Wcast-qual -Wstrict-prototypes \
            -Wmissing-prototypes -Wno-unused-parameter \
-           -I$(FORMAT_DIR) -I$(STORE_DIR) -I$(FS_DIR) -I$(LOG_DIR) -I$(INCLUDE_DIR) -I$(SRC_DIR) -I$(OTA_DIR) -I$(POWER_DIR) -I.
+           -I$(FORMAT_DIR) -I$(STORE_DIR) -I$(FS_DIR) -I$(LOG_DIR) -I$(PROV_DIR) -I$(INCLUDE_DIR) -I$(SRC_DIR) -I$(OTA_DIR) -I$(POWER_DIR) -I.
 
 # Every header the sources can include. Without this a change to a shared header
 # (config.h, cairn_platform.h, policy.h) leaves a stale binary in build/ and a
 # result that describes yesterday's code — which already produced one false
 # failure and could as easily produce a false pass.
-HEADERS := $(wildcard $(FORMAT_DIR)/*.h $(STORE_DIR)/*.h $(FS_DIR)/*.h $(LOG_DIR)/*.h \
+HEADERS := $(wildcard $(PROV_DIR)/*.h $(FORMAT_DIR)/*.h $(STORE_DIR)/*.h $(FS_DIR)/*.h $(LOG_DIR)/*.h \
                       $(INCLUDE_DIR)/*.h $(SRC_DIR)/*.h $(OTA_DIR)/*.h $(POWER_DIR)/*.h *.h)
 
 SAN := -fsanitize=address,undefined -fno-omit-frame-pointer
 
 BUILD := build
 
-.PHONY: all run asan clean conformance faults ble-vectors mtprobe
+.PHONY: all run asan clean conformance faults ble-vectors mtprobe prov
 
 all: run
 
@@ -93,13 +97,19 @@ faults: $(BUILD)/faults
 ble-vectors: $(BUILD)/ble-vectors
 	$(BUILD)/ble-vectors $(BLE_VECTORS)
 
+$(BUILD)/prov: $(PROV_SRC) $(HEADERS) | $(BUILD)
+	$(CC) $(CFLAGS) $(PROV_SRC) -o $@
+
+prov: $(BUILD)/prov
+	$(BUILD)/prov
+
 $(BUILD)/mtprobe: $(SRC_DIR)/mtprobe_parse.c $(HEADERS) mtprobe_parse_test.c | $(BUILD)
 	$(CC) $(CFLAGS) $(SRC_DIR)/mtprobe_parse.c mtprobe_parse_test.c -o $@
 
 mtprobe: $(BUILD)/mtprobe
 	$(BUILD)/mtprobe
 
-run: conformance faults ble-vectors mtprobe
+run: conformance faults ble-vectors mtprobe prov
 
 # Undefined behaviour in the scan path would be a parser reading past a torn
 # segment — exactly the case the format exists to handle safely.
@@ -112,6 +122,8 @@ asan: | $(BUILD)
 	$(BUILD)/ble-vectors-asan $(BLE_VECTORS)
 	$(CC) $(CFLAGS) $(SAN) $(SRC_DIR)/mtprobe_parse.c mtprobe_parse_test.c -o $(BUILD)/mtprobe-asan
 	$(BUILD)/mtprobe-asan
+	$(CC) $(CFLAGS) $(SAN) $(PROV_SRC) -o $(BUILD)/prov-asan
+	$(BUILD)/prov-asan
 
 clean:
 	rm -rf $(BUILD)

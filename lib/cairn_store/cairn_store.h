@@ -239,6 +239,17 @@ bool cairn_storage_identity_load(cairn_storage_identity_t *out);
 bool cairn_storage_set_assignment(const uint8_t vehicle_id[16],
                                   const uint8_t assignment_id[16]);
 
+/*
+ * Raise the device counter to at least `floor`. Never lowers it.
+ *
+ * Used when a device is re-enrolled: the server returns the highest counter it
+ * has accepted from this device, and the next bundle must be numbered above it.
+ * A floor below the current value is a no-op, because lowering a counter is
+ * precisely the rollback the counter exists to defeat. Returns false only if the
+ * value could not be made durable.
+ */
+bool cairn_storage_raise_counter(uint64_t floor);
+
 /* The highest device counter ever reserved, 0 if none. For logs and tests. */
 uint64_t cairn_storage_counter_high_water(void);
 

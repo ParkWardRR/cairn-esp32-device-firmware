@@ -757,6 +757,14 @@ void cairn_ed25519_sign(const uint8_t *msg, size_t len,
 bool cairn_ed25519_verify(const uint8_t *msg, size_t len,
                           const uint8_t sig[64], const uint8_t pub[32]);
 
+/*
+ * X25519 (RFC 7748). `scalar` is clamped internally, so it may be raw random
+ * bytes. Returns false when the result is all zero (a low-order peer point);
+ * the caller must then discard it.
+ */
+bool cairn_x25519(uint8_t out[32], const uint8_t scalar[32], const uint8_t point[32]);
+bool cairn_x25519_public(uint8_t pub[32], const uint8_t scalar[32]);
+
 /* The 8-byte key id: truncated SHA-256 of the public key. */
 void cairn_device_key_id(const uint8_t pub[32], uint8_t out[8]);
 

@@ -28,6 +28,17 @@ void cairn_kv_end(void);
 bool cairn_kv_get_blob(const char *key, void *out, size_t len);
 bool cairn_kv_set_blob(const char *key, const void *data, size_t len);
 
+/*
+ * Variable-length read, for values whose size is not fixed (PEM credentials).
+ * Copies at most cap bytes and reports the stored length in *len, which may
+ * exceed cap — the caller then knows the value did not fit and must not treat a
+ * truncated PEM as a credential. Returns false when the key is absent.
+ */
+bool cairn_kv_get_blob_var(const char *key, void *out, size_t cap, size_t *len);
+
+/* Remove a key. Absent is success: the postcondition is "not there". */
+bool cairn_kv_erase(const char *key);
+
 uint32_t cairn_kv_get_u32(const char *key, uint32_t fallback);
 bool     cairn_kv_set_u32(const char *key, uint32_t value);
 
