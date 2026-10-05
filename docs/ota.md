@@ -151,4 +151,7 @@ chunks are: a hash cannot be ambiguous about which bytes it names.
   property for hardware already in a car — the same reasoning that keeps flash
   encryption off.
 - **No delta updates.** Images are small enough that the whole thing fits
-  comfortably in a slot and transfers in seconds on Wi-Fi.
+  comfortably in a slot. (Amended 2026-10-05: the dongle has no Wi-Fi and its HTTP
+  fetch path is removed. The gate described here, a signed descriptor, version
+  ordering and preconditions, is transport-independent and stays; delivery will be
+  through the enrolled phone over BLE, a later phase.)

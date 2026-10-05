@@ -29,8 +29,8 @@ flash it lives in; it does not *derive* it.
 ```text
 eFuse flash-encryption key  (hardware only; never visible to software)
   └─ encrypts all of internal flash, including:
-       NVS (encrypted via nvs_keys): K_root, Ed25519 seed, mTLS client key,
-                                     Wi-Fi credentials, device counter
+       NVS (encrypted via nvs_keys): K_root, Ed25519 seed, device counter
+                                     (no network credential: the dongle has none)
             └─ K_seg = HKDF-SHA256(K_root, salt = vehicle_id,
                                    info = "cairn/segment/v3" ‖ ids ‖ segment_index)
                   └─ per-frame XChaCha20-Poly1305, random 24-byte nonce
@@ -53,8 +53,9 @@ eFuse flash-encryption key  (hardware only; never visible to software)
 3. **Application-layer encryption (format v3)** — independent of the above and
    done first because it protects the card regardless of how the chip is
    configured.
-4. **Move the mTLS client key and Wi-Fi credentials off the card / out of the
-   image** into encrypted NVS.
+4. ~~Move the mTLS client key and Wi-Fi credentials off the card~~ — **done by
+   removal (2026-10-05).** The dongle has no Wi-Fi and no network client, so there
+   is no such key to protect; earlier firmware's copies are erased from NVS at boot.
 5. **Sacrificial unit.** Enable secure boot + flash encryption on a *spare* ONE+
    in **development mode** first (re-flashable a limited number of times).
    Confirm: boot, OTA install + rollback, NVS reads, SD encryption, standby and
