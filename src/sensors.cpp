@@ -1076,3 +1076,36 @@ int sensors_obd_raw_pid(uint8_t pid, char *out, size_t cap)
     out[n] = '\0';
     return bytes;
 }
+
+#if CAIRN_MTPROBE
+/*
+ * Link access for the manual-transmission probe.
+ *
+ * Kept as three narrow calls rather than a handle to the link, so the probe can
+ * neither hold a reference across a reconnect nor reach anything but the OBD
+ * conversation. All of it runs on the sensing task, the only task that talks to
+ * the coprocessor, so these never interleave with another request.
+ */
+int sensors_obd_command(const char *cmd, char *buf, size_t cap, uint32_t timeout_ms)
+{
+    if (s_obd.link == nullptr || buf == nullptr || cap == 0) return 0;
+    buf[0] = '\0';
+    return s_obd.link->sendCommand(cmd, buf, (int)cap, timeout_ms);
+}
+
+/* Reads whatever the coprocessor is streaming, without sending anything. The UART
+ * link's counter is a single byte, so callers keep cap at or under 255. */
+int sensors_obd_receive(char *buf, size_t cap, uint32_t timeout_ms)
+{
+    if (s_obd.link == nullptr || buf == nullptr || cap == 0) return 0;
+    buf[0] = '\0';
+    return s_obd.link->receive(buf, (int)cap, timeout_ms);
+}
+
+/* Full re-initialisation of the ECU session. Slow when the ECU is silent; used
+ * only to leave sniff mode when a plain request no longer works. */
+bool sensors_obd_recover(void)
+{
+    return s_obd.init();
+}
+#endif /* CAIRN_MTPROBE */

@@ -4,6 +4,7 @@
 
 #include "cairn_log.h"
 #include "config.h"
+#include "mtprobe.h"
 
 static const char *TAG = "SENSE";
 
@@ -245,6 +246,15 @@ static void sensor_task(void *arg)
                 }
             }
         }
+
+#if CAIRN_MTPROBE
+        /*
+         * Discovery probe. After the production OBD work so it only takes bus
+         * time the capture path has left, and behind the same silence gate: a
+         * parked car is never asked anything.
+         */
+        if (!s_bus_silent && s_status->obd) mtprobe_tick();
+#endif
 
         if ((int32_t)(now - next_health) >= 0) {
             next_health = now + CAIRN_HEALTH_PERIOD_MS;

@@ -154,6 +154,17 @@ int     sensors_obd_raw_pid(uint8_t pid, char *out, size_t cap);
 int     sensors_obd_multi_probe(const uint8_t *pids, int n, char *out, size_t cap);
 #endif
 
+#if CAIRN_MTPROBE
+/*
+ * Narrow link access for the manual-transmission probe; see sensors.cpp.
+ * Sensing-task only.
+ */
+bool sensors_obd_ready(void);
+int  sensors_obd_command(const char *cmd, char *buf, size_t cap, uint32_t timeout_ms);
+int  sensors_obd_receive(char *buf, size_t cap, uint32_t timeout_ms);
+bool sensors_obd_recover(void);
+#endif
+
 /* Battery voltage in millivolts, read through the coprocessor. */
 uint16_t sensors_battery_mv(void);
 

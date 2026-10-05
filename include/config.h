@@ -149,6 +149,43 @@
 #define CAIRN_PIDTEST 0
 #endif
 #define CAIRN_PIDTEST_PERIOD_MS 5000
+
+/*
+ * Manual-transmission probe. A discovery build, not a capture format: it asks
+ * the car for everything that might describe a gearbox and logs the raw answers
+ * to the SD log tree, so a drive says what this DME will and will not tell us
+ * before anything is built on an assumption. See src/mtprobe.cpp.
+ *
+ * Capture is unchanged; the probe rides on the bus time the production polling
+ * leaves free, and only runs while the controller has the bus open.
+ */
+#ifndef CAIRN_MTPROBE
+#define CAIRN_MTPROBE 0
+#endif
+
+/* Gap between probe requests. The production batch already runs every 200 ms,
+ * so this is what is added on top of it. */
+#define CAIRN_MTPROBE_PERIOD_MS        300
+
+/* Rounds in which every candidate is asked regardless of what the support
+ * bitmaps claim, because the bitmaps are the ECU's word and this exists to test
+ * that. After this, a PID that never answered is retried only occasionally. */
+#define CAIRN_MTPROBE_DISCOVERY_TRIES  2
+#define CAIRN_MTPROBE_RETRY_MS         300000
+
+/*
+ * Passive CAN sniff windows. Compiled in only when CAIRN_MTPROBE_SNIFF is set,
+ * because it takes the OBD link out of request mode for the window and the
+ * recovery path has not met this adapter yet. The window stays under the GNSS
+ * staleness limit so it cannot manufacture a gap by itself.
+ */
+#ifndef CAIRN_MTPROBE_SNIFF
+#define CAIRN_MTPROBE_SNIFF 0
+#endif
+#define CAIRN_MTPROBE_SNIFF_FIRST_MS   20000
+#define CAIRN_MTPROBE_SNIFF_EVERY_MS   90000
+#define CAIRN_MTPROBE_SNIFF_WINDOW_MS  2000
+#define CAIRN_MTPROBE_SNIFF_MAX_CHUNKS 80
 #define CAIRN_HEALTH_PERIOD_MS    30000
 
 /*
