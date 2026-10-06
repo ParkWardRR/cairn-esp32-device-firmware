@@ -1,0 +1,124 @@
+# Expression-language vectors, cairn.engine/v1-draft. DRAFT, PROVISIONAL.
+#
+# Meant to move into contracts/engine/v1/vectors when that contract is released; the
+# format is described in tools/enginegen/src/vectors.rs and engines/SPEC.draft.md.
+#
+#   E ; nbytes ; expression ; A B C D ; expected ; bytecode-hex   (regenerate the last column with
+#                                                                  `enginegen vectors --file ... --update`)
+#   X ; nbytes ; expression ; text the rejection must mention
+#   B ; bytecode-hex ; A B C D ; expected | ERR_*
+#
+# ── the formulas the N20 profile uses ──
+E ; 2 ; (A*256+B)/4 ; 0 0 ; 0 ; 10020001221120010423
+E ; 2 ; (A*256+B)/4 ; 1 2 ; 64 ; 10020001221120010423
+E ; 2 ; (A*256+B)/4 ; 255 255 ; 16383 ; 10020001221120010423
+E ; 2 ; (A*256+B)/4 ; 0 3 ; 0 ; 10020001221120010423
+E ; 1 ; A ; 200 ; 200 ; 10
+E ; 1 ; A*100/255 ; 255 ; 100 ; 1001642201ff23
+E ; 1 ; A*100/255 ; 128 ; 50 ; 1001642201ff23
+E ; 1 ; A*100/255 ; 2 ; 0 ; 1001642201ff23
+E ; 1 ; clamp(A/2-64, -127, 127) ; 0 ; -64 ; 100102230140210481017f32
+E ; 1 ; clamp(A/2-64, -127, 127) ; 255 ; 63 ; 100102230140210481017f32
+E ; 1 ; clamp(A/2-64, -127, 127) ; 129 ; 0 ; 100102230140210481017f32
+E ; 1 ; clamp(A-40, -127, 127) ; 0 ; -40 ; 100128210481017f32
+E ; 1 ; clamp(A-40, -127, 127) ; 255 ; 127 ; 100128210481017f32
+E ; 1 ; clamp(A-40, -127, 127) ; 167 ; 127 ; 100128210481017f32
+E ; 1 ; clamp(A-40, -127, 127) ; 168 ; 127 ; 100128210481017f32
+E ; 1 ; (A-128)*100/128 ; 0 ; -100 ; 10018021016422018023
+E ; 1 ; (A-128)*100/128 ; 127 ; 0 ; 10018021016422018023
+E ; 1 ; (A-128)*100/128 ; 128 ; 0 ; 10018021016422018023
+E ; 1 ; (A-128)*100/128 ; 255 ; 99 ; 10018021016422018023
+E ; 1 ; min(A, 254) ; 255 ; 254 ; 1001fe30
+E ; 1 ; min(A, 254) ; 100 ; 100 ; 1001fe30
+E ; 2 ; clamp((A*256+B)*10000/32768, 0, 65534) ; 128 0 ; 10000 ; 100200012211200210272202008023010002feff32
+E ; 2 ; clamp((A*256+B)*10000/32768, 0, 65534) ; 255 255 ; 19999 ; 100200012211200210272202008023010002feff32
+E ; 2 ; ((A*256+B)/100)*100 ; 255 255 ; 65500 ; 10020001221120016423016422
+E ; 2 ; ((A*256+B)/100)*100 ; 0 99 ; 0 ; 10020001221120016423016422
+E ; 2 ; A*256+B ; 171 205 ; 43981 ; 10020001221120
+#
+# ── semantics every implementation must share ──
+# Division and modulo truncate toward zero; the remainder takes the dividend's sign.
+E ; 1 ; (A-10)/4 ; 1 ; -2 ; 10010a21010423
+E ; 1 ; (A-10)%4 ; 1 ; -1 ; 10010a21010424
+E ; 1 ; -A/3 ; 10 ; -3 ; 1025010323
+# Precedence follows C: * / % above + -, those above << >>, then &, then |.
+E ; 1 ; 1+2*3 ; 0 ; 7 ; 0101010201032220
+E ; 1 ; 8>>1+1 ; 0 ; 2 ; 0108010101012029
+E ; 1 ; 6&3|8 ; 0 ; 10 ; 0106010326010827
+E ; 1 ; 1|6&3 ; 0 ; 3 ; 0101010601032627
+# Right shift is arithmetic (floors); left shift is a multiplication.
+E ; 1 ; (A-9)>>1 ; 0 ; -5 ; 10010921010129
+E ; 1 ; A<<4 ; 15 ; 240 ; 10010428
+E ; 1 ; (A&15)|(A&240) ; 171 ; 171 ; 10010f261001f02627
+E ; 1 ; A%7 ; 200 ; 4 ; 10010724
+E ; 1 ; max(A, 100) ; 7 ; 100 ; 10016431
+E ; 1 ; clamp(A, 10, 20) ; 5 ; 10 ; 10010a011432
+E ; 1 ; clamp(A, 10, 20) ; 15 ; 15 ; 10010a011432
+E ; 1 ; clamp(A, 10, 20) ; 25 ; 20 ; 10010a011432
+E ; 4 ; A+B+C+D ; 1 2 3 4 ; 10 ; 10112012201320
+E ; 3 ; (A*256+B)*256+C ; 1 0 7 ; 65543 ; 10020001221120020001221220
+E ; 3 ; (A<<16)|(B<<8)|C ; 1 2 3 ; 66051 ; 1001102811010828271227
+E ; 1 ; 0x7F ; 0 ; 127 ; 017f
+E ; 1 ; 2147483647 ; 0 ; 2147483647 ; 03ffffff7f
+E ; 1 ; -2147483647 ; 0 ; -2147483647 ; 0301000080
+E ; 1 ; 70000 ; 0 ; 70000 ; 0370110100
+E ; 1 ; -300 ; 0 ; -300 ; 03d4feffff
+E ; 1 ; -5 ; 0 ; -5 ; 04fb
+# Values are int32; the compiler refuses what could leave it.
+X ; 1 ; A*A*A*A ; int32
+X ; 1 ; 2147483647+A ; int32
+X ; 1 ; A<<24 ; int32
+X ; 2 ; A/B ; zero
+X ; 1 ; A/0 ; zero
+X ; 1 ; A%0 ; zero
+X ; 2 ; A<<B ; shift
+X ; 1 ; A<<32 ; shift
+X ; 1 ; A>>-1 ; shift
+X ; 1 ; B ; data byte
+X ; 2 ; C ; data byte
+X ; 1 ; A==1 ; unexpected character
+X ; 1 ; A ? 1 : 0 ; unexpected
+X ; 1 ; A/1.5 ; malformed
+X ; 1 ; 2147483648 ; exceeds int32
+X ; 1 ; sqrt(A) ; unknown name
+X ; 1 ; E ; unknown name
+X ; 1 ; clamp(A, 1) ; takes 3
+X ; 1 ; min(A) ; takes 2
+X ; 1 ; A+ ; ends early
+X ; 1 ; (A ; expected
+X ; 1 ; A B ; trailing
+X ; 1 ;  ; empty
+# ── raw bytecode: what an evaluator must do with an image it cannot trust ──
+# 01 07 = push 7;  10 = load A;  20 = add
+B ; 0107 ; 0 ; 7
+B ; 1020 ; 5 ; ERR_STACK
+B ; 0107 0108 20 ; 0 ; 15
+B ; 01 ; 0 ; ERR_TRUNC
+B ; 0201 ; 0 ; ERR_TRUNC
+B ; 03ffffff ; 0 ; ERR_TRUNC
+B ; 0200 01 ; 0 ; 256
+B ; 03ffffff7f ; 0 ; 2147483647
+B ; 04ff ; 0 ; -1
+B ; 04ff 25 ; 0 ; 1
+B ; 03ffffff7f 0102 22 ; 0 ; ERR_OVERFLOW
+B ; 03ffffff7f 0101 20 ; 0 ; ERR_OVERFLOW
+B ; 03ffffff7f 0102 28 ; 0 ; ERR_OVERFLOW
+B ; 0101 011f 28 ; 0 ; ERR_OVERFLOW
+B ; 0107 0100 23 ; 0 ; ERR_DIV_ZERO
+B ; 0107 0100 24 ; 0 ; ERR_DIV_ZERO
+B ; 0107 0100 22 ; 0 ; 0
+B ; 0101 0120 28 ; 0 ; ERR_SHIFT
+B ; 0101 0120 29 ; 0 ; ERR_SHIFT
+B ; 0101 04ff 29 ; 0 ; ERR_SHIFT
+B ; 04f6 0101 29 ; 0 ; -5
+B ; ee ; 0 ; ERR_BAD_OP
+B ; 00 ; 0 ; ERR_BAD_OP
+B ; 14 ; 0 ; ERR_BAD_OP
+B ; ; 0 ; ERR_RESULT
+B ; 0101 0102 ; 0 ; ERR_RESULT
+B ; 0105 0103 0109 32 ; 0 ; 5
+B ; 0100 0101 0105 32 ; 0 ; 1
+B ; 0107 0103 30 ; 0 ; 3
+B ; 0107 0103 31 ; 0 ; 7
+B ; 10 11 20 ; 200 100 ; 300
+B ; 12 13 22 ; 0 0 15 20 ; 300
