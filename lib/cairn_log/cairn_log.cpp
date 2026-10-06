@@ -154,6 +154,14 @@ static void enforce_log_budget(void)
             return;
         }
 
+        /* What is on the card, once per call, in the console only (the SD sink is not
+         * attached yet at boot): a card that has accumulated thousands of tiny files shows
+         * up here rather than as an unexplained slow boot. */
+        if (pass == 0) {
+            Serial.printf("[LOG ] %d log file(s), %u bytes in %s (budget %u)\n", scan.files,
+                          (unsigned)scan.total, CAIRN_DIR_LOGS, (unsigned)CAIRN_LOG_TOTAL_BUDGET_BYTES);
+        }
+
         /* Keep at least one file: deleting the only log to satisfy a budget
          * would destroy the very thing the budget exists to preserve. */
         if (scan.total <= CAIRN_LOG_TOTAL_BUDGET_BYTES || scan.files <= 1) return;
