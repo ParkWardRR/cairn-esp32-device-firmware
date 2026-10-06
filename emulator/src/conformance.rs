@@ -120,6 +120,9 @@ struct BindingExpectation {
 
 #[derive(Debug, Deserialize)]
 struct ReceiptExpectation {
+    /// Set when the receipt bytes themselves must be refused, before any signature.
+    #[serde(default)]
+    parse_error: String,
     signature_valid: bool,
     acknowledges_uploaded_root: bool,
     uploaded_content_root_hex: String,
@@ -657,24 +660,23 @@ fn check_header(dir: &Path, h: &HeaderExpectation, keys: &RootKeyProvider, t: &m
     // derived, so a corrupt header can never be reported as an auth failure.
     for keyed in [false, true] {
         let k: Option<&dyn KeyProvider> = if keyed { Some(keys) } else { None };
-        match scan_segment(&bytes, ScanState::default(), k) {
-            Err(FormatError::BadHeaderCrc { .. }) if h.parse_error == "bad_header_crc" => {}
-            Err(e) if h.parse_error != "bad_header_crc" => {
-                return Err(format!(
-                    "unrecognised parse_error {:?} (got {e})",
-                    h.parse_error
-                ));
-            }
-            Err(e) => {
-                return Err(format!(
-                    "keyed={keyed}: header error {e}, want bad_header_crc"
-                ));
-            }
-            Ok(_) => {
-                return Err(format!(
-                    "keyed={keyed}: expected a header parse error, got none"
-                ));
-            }
+        let res = scan_segment(&bytes, ScanState::default(), k);
+        let ok = matches!(
+            (&res, h.parse_error.as_str()),
+            (Err(FormatError::BadHeaderCrc { .. }), "bad_header_crc")
+                | (Err(FormatError::BadMagic), "bad_magic")
+                | (Err(FormatError::ShortHeader), "short_header")
+                | (
+                    Err(FormatError::UnsupportedFormatVersion(_)),
+                    "unsupported_format_version"
+                )
+        );
+        if !ok {
+            return Err(format!(
+                "keyed={keyed}: expected header error {}, got {:?}",
+                h.parse_error,
+                res.err()
+            ));
         }
     }
     t.structural += 1;
@@ -800,6 +802,27 @@ fn check_receipt(dir: &Path, r_exp: &ReceiptExpectation, t: &mut Tally) -> Check
     let encoded = read(dir, "receipt.cbor")?;
     let key = verifying_key(&r_exp.server_public_key_hex, "server_public_key_hex")?;
 
+    if !r_exp.parse_error.is_empty() {
+        let refused = match (Receipt::from_cbor(&encoded), r_exp.parse_error.as_str()) {
+            (Ok(_), _) => return Err("receipt parsed but the vector expects it refused".into()),
+            (Err(FormatError::Malformed(m)), "unsupported_version") => {
+                m.contains("unsupported receipt_version")
+            }
+            (Err(FormatError::Malformed(m)), "trailing_bytes") => m.contains("trailing"),
+            (Err(FormatError::NonCanonicalCbor(_)), "non_canonical") => true,
+            (Err(FormatError::TruncatedCbor), "truncated") => true,
+            _ => false,
+        };
+        if !refused {
+            return Err(format!(
+                "refused, but not as {}: {:?}",
+                r_exp.parse_error,
+                Receipt::from_cbor(&encoded).err()
+            ));
+        }
+        t.what.push("receipt refused at parse");
+        return Ok(());
+    }
     let r = Receipt::from_cbor(&encoded).map_err(|e| format!("from_cbor: {e}"))?;
 
     let want_root = format::unhex_array::<32>(&r_exp.receipt_content_root_hex)

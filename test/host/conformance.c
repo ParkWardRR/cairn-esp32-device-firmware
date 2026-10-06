@@ -673,6 +673,7 @@ static bool check_header(const char *dir, const char *vector, const mj_doc_t *do
         { "bad_header_crc", CAIRN_ERR_BAD_HEADER_CRC },
         { "bad_magic",      CAIRN_ERR_BAD_MAGIC },
         { "short_header",   CAIRN_ERR_SHORT_HEADER },
+        { "unsupported_format_version", CAIRN_ERR_UNSUPPORTED_VERSION },
     };
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
         if (strcmp(want, names[i].name) == 0 && err != names[i].err) {
@@ -727,6 +728,17 @@ static bool check_manifest(const char *dir, const char *vector,
     if (want_valid && derr != CAIRN_OK) {
         record_failure(vector, "cairn_manifest_decode: %s", cairn_strerror(derr));
         goto fail;
+    }
+
+    if (!want_valid) {
+        /* Refused as a whole: the signature verdict is not asserted (C verifies the
+         * signature over the raw bytes, which is genuine here; the refusal is the
+         * parse). */
+        if (derr == CAIRN_OK) {
+            record_failure(vector, "manifest decoded but the vector says it is invalid");
+            goto fail;
+        }
+        goto done;
     }
 
     cairn_err_t verr = cairn_manifest_verify(encoded, enc_len, sig, pub);
@@ -973,6 +985,21 @@ static bool check_receipt(const char *dir, const char *vector,
     cairn_err_t derr = cairn_receipt_decode(encoded, len, &r, scratch,
                                             sizeof(scratch));
     free(encoded);
+
+    const char *want_parse = mj_str_or(mj_get(doc, exp, "parse_error"), "");
+    if (want_parse[0] != '\0') {
+        cairn_err_t want_err = CAIRN_OK;
+        if (strcmp(want_parse, "non_canonical") == 0) want_err = CAIRN_ERR_NON_CANONICAL;
+        else if (strcmp(want_parse, "truncated") == 0) want_err = CAIRN_ERR_TRUNCATED;
+        else if (strcmp(want_parse, "unsupported_version") == 0 ||
+                 strcmp(want_parse, "trailing_bytes") == 0) want_err = CAIRN_ERR_MALFORMED;
+        if (want_err == CAIRN_OK || derr != want_err) {
+            record_failure(vector, "receipt refused as %s, want %s", cairn_strerror(derr),
+                           want_parse);
+            return false;
+        }
+        return true;
+    }
 
     if (derr != CAIRN_OK) {
         record_failure(vector, "cairn_receipt_decode: %s", cairn_strerror(derr));
