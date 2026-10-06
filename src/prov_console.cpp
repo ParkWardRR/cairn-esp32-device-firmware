@@ -5,6 +5,7 @@
 
 #include "cairn_format.h"
 #include "cairn_fs.h"
+#include "cairn_kv.h"
 #include "cairn_platform.h"
 #include "cairn_log.h"
 #include "cairn_prov.h"
@@ -173,6 +174,18 @@ void prov_console_begin(void)
         CAIRN_LOGW(TAG, "removed any Wi-Fi and client-certificate material earlier firmware "
                         "left in NVS and overwrote the flash that held it; this device "
                         "holds no network credentials");
+    }
+
+    /* Deleting an NVS entry only marks it; the bytes stay readable in flash until the page
+     * is collected, which the churn above cannot guarantee for a page that also holds live
+     * entries (the Wi-Fi stack's saved password survived it on the car's dongle). Zero
+     * them in place. Cheap when there is nothing to do, so it runs every boot. */
+    int zeroed = cairn_kv_zero_erased();
+    if (zeroed > 0) {
+        CAIRN_LOGI(TAG, "zeroed %d deleted NVS entr%s whose bytes were still readable in flash",
+                   zeroed, zeroed == 1 ? "y" : "ies");
+    } else if (zeroed < 0) {
+        CAIRN_LOGW(TAG, "could not check the NVS partition for deleted entries still readable in flash");
     }
 
     s_provisioned = load_provisioned();

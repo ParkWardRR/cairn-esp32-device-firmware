@@ -70,6 +70,23 @@ bool cairn_kv_scrub_freed(void);
  */
 bool cairn_kv_erase_platform_wifi(void);
 
+/*
+ * Zero every deleted NVS entry whose bytes are still readable in flash, in place.
+ *
+ * Unlike cairn_kv_scrub_freed() this does not depend on garbage collection choosing a page,
+ * so it is a guarantee, not best effort: after it returns, no deleted entry's key or value
+ * is left in the NVS partition (cairn_nvs_wipe.h says how, and why NVS does not notice).
+ * Live entries are untouched and no page is erased. It reads 20 KB and writes only where
+ * something is found, so it is cheap to call on every boot; call it after anything that
+ * deletes a credential. Returns the number of 32-byte slots zeroed, or -1 if the partition
+ * could not be read or written (deleted values may then still be recoverable). A host build
+ * has no NVS partition and returns 0.
+ *
+ * It does not make the chip's other copies safe: only flash encryption does that
+ * (ROADMAP Phase 24), and a USB cable still reads the live entries.
+ */
+int cairn_kv_zero_erased(void);
+
 uint32_t cairn_kv_get_u32(const char *key, uint32_t fallback);
 bool     cairn_kv_set_u32(const char *key, uint32_t value);
 

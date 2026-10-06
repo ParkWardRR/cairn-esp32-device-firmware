@@ -7,6 +7,9 @@
 #include <Preferences.h>
 #include <string.h>
 #include <nvs.h>
+#include <esp_partition.h>
+
+#include "cairn_nvs_wipe.h"
 
 static Preferences s_prefs;
 static bool        s_open = false;
@@ -96,6 +99,37 @@ bool cairn_kv_scrub_freed(void)
     }
     if (s_prefs.isKey("scrubtmp")) s_prefs.remove("scrubtmp");
     return ok;
+}
+
+int cairn_kv_zero_erased(void)
+{
+    const esp_partition_t *p =
+        esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_NVS, nullptr);
+    if (p == nullptr) return -1;
+
+    static uint8_t  page[CAIRN_NVS_PAGE_SIZE];
+    static uint8_t  zeros[CAIRN_NVS_PAGE_SIZE];   /* zero-initialised, never written */
+    uint16_t        slots[CAIRN_NVS_ENTRY_COUNT];
+    int             zeroed = 0;
+
+    for (size_t base = 0; base + CAIRN_NVS_PAGE_SIZE <= p->size; base += CAIRN_NVS_PAGE_SIZE) {
+        if (esp_partition_read(p, base, page, sizeof page) != ESP_OK) return -1;
+
+        size_t n = cairn_nvs_dirty_erased_slots(page, slots, CAIRN_NVS_ENTRY_COUNT);
+
+        /* One write per run of adjacent slots (the offsets come back in ascending order):
+         * fewer program operations on the same flash page, which already took one per
+         * entry when NVS wrote it. Only bits going 1 -> 0, so no erase is needed. */
+        for (size_t i = 0; i < n;) {
+            size_t j = i + 1;
+            while (j < n && slots[j] == slots[j - 1] + CAIRN_NVS_SLOT_SIZE) j++;
+            size_t len = (j - i) * CAIRN_NVS_SLOT_SIZE;
+            if (esp_partition_write(p, base + slots[i], zeros, len) != ESP_OK) return -1;
+            zeroed += (int)(j - i);
+            i = j;
+        }
+    }
+    return zeroed;
 }
 
 uint32_t cairn_kv_get_u32(const char *key, uint32_t fallback)

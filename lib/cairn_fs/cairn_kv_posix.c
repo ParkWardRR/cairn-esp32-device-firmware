@@ -177,6 +177,9 @@ int cairn_kv_host_scrub_count(void) { return s_scrubs; }
 
 bool cairn_kv_erase_platform_wifi(void) { return false; }
 
+/* A file has no NVS pages. */
+int cairn_kv_zero_erased(void) { return 0; }
+
 bool cairn_kv_scrub_freed(void)
 {
     s_scrubs++;

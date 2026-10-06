@@ -148,7 +148,9 @@ void cairn_prov_abort(cairn_prov_t *p);
  * readable in flash until a page is garbage-collected. So this also forces every
  * page to be recycled, **once** per device (a marker records that it was done),
  * which is also what cleans a unit whose entries were already marked deleted.
- * Returns true when it removed or scrubbed anything this call.
+ * Returns true when it removed or scrubbed anything this call. The page recycling is best
+ * effort (see cairn_kv_scrub_freed); cairn_kv_zero_erased() is the guaranteed wipe and is
+ * called after this at boot.
  */
 bool cairn_prov_erase_legacy_credentials(void);
 

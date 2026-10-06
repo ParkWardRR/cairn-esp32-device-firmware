@@ -108,7 +108,7 @@ BUILD := build
 # Engine profiles (lib/cairn_engine): see engine.mk.
 include engine.mk
 
-.PHONY: all run asan clean conformance faults ble-vectors mtprobe prov offload offload-sim boottime uplink config devinfo
+.PHONY: all run asan clean conformance faults ble-vectors mtprobe prov offload offload-sim boottime uplink config devinfo nvswipe
 
 all: run
 
@@ -149,6 +149,12 @@ $(BUILD)/offload-sim: $(OFFLOAD_SIM_SRC) $(HEADERS) | $(BUILD)
 	$(CC) $(CFLAGS) $(OFFLOAD_SIM_SRC) -o $@
 
 offload-sim: $(BUILD)/offload-sim
+
+$(BUILD)/nvswipe: $(FS_DIR)/cairn_nvs_wipe.c nvs_wipe_test.c $(HEADERS) | $(BUILD)
+	$(CC) $(CFLAGS) $(FS_DIR)/cairn_nvs_wipe.c nvs_wipe_test.c -o $@
+
+nvswipe: $(BUILD)/nvswipe
+	$(BUILD)/nvswipe
 
 $(BUILD)/mtprobe: $(SRC_DIR)/mtprobe_parse.c $(HEADERS) mtprobe_parse_test.c | $(BUILD)
 	$(CC) $(CFLAGS) $(SRC_DIR)/mtprobe_parse.c mtprobe_parse_test.c -o $@
@@ -207,7 +213,7 @@ else
 $(info device-info vectors not in this contracts pin (needs contracts-v0.2.0): devinfo row skipped)
 endif
 
-run: conformance faults ble-vectors mtprobe prov offload boottime uplink config
+run: conformance faults ble-vectors mtprobe prov offload boottime uplink config nvswipe
 
 # Undefined behaviour in the scan path would be a parser reading past a torn
 # segment — exactly the case the format exists to handle safely.
@@ -228,6 +234,8 @@ asan: | $(BUILD)
 	$(BUILD)/boottime-asan
 	$(CC) $(CFLAGS) $(SAN) $(UPLINK_DIR)/cairn_uplink.c uplink_test.c -o $(BUILD)/uplink-asan
 	$(BUILD)/uplink-asan
+	$(CC) $(CFLAGS) $(SAN) $(FS_DIR)/cairn_nvs_wipe.c nvs_wipe_test.c -o $(BUILD)/nvswipe-asan
+	$(BUILD)/nvswipe-asan
 	$(CC) $(CFLAGS) $(SAN) $(CONFIG_SRC) -o $(BUILD)/config-asan
 	$(BUILD)/config-asan
 	$(if $(wildcard $(DEVINFO_VECTORS)),$(CC) $(DEVINFO_CFLAGS) $(SAN) $(DEVINFO_SRC) -o $(BUILD)/devinfo-asan && $(BUILD)/devinfo-asan $(DEVINFO_VECTORS))
