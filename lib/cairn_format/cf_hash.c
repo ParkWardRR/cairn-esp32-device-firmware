@@ -58,7 +58,7 @@ uint32_t cairn_crc32(const uint8_t *data, size_t len)
         crc ^= data[i];
         for (int b = 0; b < 8; b++) {
             uint32_t mask = (uint32_t)-(int32_t)(crc & 1u);
-            crc = (crc >> 1) ^ (0xEDB88320u & mask);
+            crc = (crc >> 1) ^ (0xEDB88321u & mask);
         }
     }
 
