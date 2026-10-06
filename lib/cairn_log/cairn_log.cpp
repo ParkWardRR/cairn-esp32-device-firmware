@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <SD.h>
+#include <ff.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -76,12 +77,95 @@ static void log_path(uint32_t boot, uint32_t index, char *out, size_t cap)
 }
 
 /*
+ * One pass over the log directory through FatFs: how many files, how many bytes, and
+ * the oldest one by name.
+ *
+ * The Arduino directory iterator (File::openNextFile) opens and stats every entry, and a
+ * FAT stat is itself a directory search, so a pass over N files costs O(N squared)
+ * directory reads. Measured on the dongle's card: 267 files took 23 s per pass, and the
+ * pass ran on every boot and on every rotation, with the log lock held and capture
+ * running. f_readdir returns each entry's size as it goes: one sequential read of the
+ * directory, no per-file open.
+ *
+ * Returns false if FatFs cannot open the directory (drive number not found, no card), in
+ * which case the caller falls back to the slow path rather than skipping enforcement.
+ */
+struct LogScan {
+    uint32_t total;
+    int      files;
+    char     oldest[96];
+    uint32_t oldest_rank;
+};
+
+static bool scan_logs_fast(LogScan *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->oldest_rank = UINT32_MAX;
+
+    /* The SD library registers its volume with the first free FatFs drive; there is
+     * only one card, so it is drive 0, but look rather than assume. */
+    for (int drv = 0; drv < FF_VOLUMES; drv++) {
+        char dirpath[40];
+        snprintf(dirpath, sizeof(dirpath), "%d:%s", drv, CAIRN_DIR_LOGS);
+
+        FF_DIR dir;
+        if (f_opendir(&dir, dirpath) != FR_OK) continue;
+
+        FILINFO fno;
+        for (;;) {
+            if (f_readdir(&dir, &fno) != FR_OK || fno.fname[0] == '\0') break;
+            if (fno.fattrib & AM_DIR) continue;
+
+            out->total += (uint32_t)fno.fsize;
+            out->files++;
+
+            unsigned b = 0, i = 0;
+            if (sscanf(fno.fname, "boot-%6u-%3u.log", &b, &i) == 2) {
+                uint32_t rank = b * 1000u + i;
+                if (rank < out->oldest_rank) {
+                    out->oldest_rank = rank;
+                    snprintf(out->oldest, sizeof(out->oldest), "%s/%s", CAIRN_DIR_LOGS, fno.fname);
+                }
+            }
+        }
+        f_closedir(&dir);
+        return true;
+    }
+    return false;
+}
+
+/*
  * Enforce the total log budget oldest-first.
  *
  * Deleting log files needs no receipt, and must not be confused with pruning
  * bundles, which does: this only ever walks CAIRN_DIR_LOGS.
  */
+static void enforce_log_budget_slow(void);
+
 static void enforce_log_budget(void)
+{
+    /* Each pass is one directory read, so the bound is on deletions, not on scans; the
+     * time cap stops a card with thousands of old files from stalling the boot. */
+    uint32_t started = millis();
+    for (int pass = 0; pass < 256; pass++) {
+        LogScan scan;
+        if (!scan_logs_fast(&scan)) {
+            enforce_log_budget_slow();
+            return;
+        }
+
+        /* Keep at least one file: deleting the only log to satisfy a budget
+         * would destroy the very thing the budget exists to preserve. */
+        if (scan.total <= CAIRN_LOG_TOTAL_BUDGET_BYTES || scan.files <= 1) return;
+        if (scan.oldest[0] == '\0') return; /* nothing recognizable to drop */
+
+        SD.remove(scan.oldest);
+        if (millis() - started > 3000) return; /* the rest goes at the next attach or rotation */
+    }
+}
+
+/* The original slow walk, kept for a card where FatFs cannot be reached directly. */
+static void enforce_log_budget_slow(void)
 {
     /*
      * Delete oldest-first until the tree fits. Iterative rather than recursive:
@@ -152,7 +236,18 @@ static bool open_next_file(void)
         return false;
     }
 
-    s_file_bytes = (uint32_t)s_file.size();
+    /*
+     * The file's current length, for the rotation check. Not File::size(): for a file
+     * that did not exist before this open, the Arduino core never fills in the stat buffer
+     * size() reads (VFSFileImpl: stat() fails, _stat stays uninitialised, and size() only
+     * refreshes it after a write). It returned whatever the heap held, here the bytes
+     * "/cai" of the path string, 1767990063, which is far past the 2 MiB rotation limit,
+     * so the first write rotated, the next file did the same, and every log line rotated
+     * the file and re-scanned the directory. Seeking to the end and asking for the
+     * position is the real length for both a new and an existing file.
+     */
+    s_file.seek(0, SeekEnd);
+    s_file_bytes = (uint32_t)s_file.position();
     return true;
 }
 

@@ -5,7 +5,7 @@
 
 static const char *const STAGE_NAMES[CAIRN_BOOT_STAGE_COUNT] = {
     "app_start", "log_ready", "sd_mounted", "store_ready", "obd_first_answer",
-    "gnss_first_fix", "first_sample", "ble_advertising", "first_chunk", "capture_open",
+    "gnss_first_fix", "first_sample", "ble_advertising", "first_chunk", "capture_open", "sensors_ready",
 };
 
 static const char *const RESET_NAMES[] = {
@@ -82,13 +82,23 @@ size_t cairn_boottime_format(const cairn_boottime_t *b, char *out, size_t cap)
                  b->sd_present ? "yes" : "no");
     append(out, cap, &used, line, n);
 
+    /* Stages are listed in the order they were reached, not enum order: a boot does not
+     * reach them in enum order (BLE can advertise before the first sample, or after), and
+     * a delta against the wrong neighbour is meaningless. Ties keep enum order. */
+    bool done[CAIRN_BOOT_STAGE_COUNT] = { false };
     uint32_t prev = 0;
-    for (int i = 0; i < CAIRN_BOOT_STAGE_COUNT; i++) {
-        if (b->at_us[i] == CAIRN_BOOT_NOT_REACHED) continue;
-        n = snprintf(line, sizeof line, "boot: %-16s %9u us  (+%u)\n", STAGE_NAMES[i],
-                     (unsigned)b->at_us[i], (unsigned)(b->at_us[i] - prev));
+    for (int printed = 0; printed < CAIRN_BOOT_STAGE_COUNT; printed++) {
+        int next = -1;
+        for (int i = 0; i < CAIRN_BOOT_STAGE_COUNT; i++) {
+            if (done[i] || b->at_us[i] == CAIRN_BOOT_NOT_REACHED) continue;
+            if (next < 0 || b->at_us[i] < b->at_us[next]) next = i;
+        }
+        if (next < 0) break;
+        done[next] = true;
+        n = snprintf(line, sizeof line, "boot: %-16s %9u us  (+%u)\n", STAGE_NAMES[next],
+                     (unsigned)b->at_us[next], (unsigned)(b->at_us[next] - prev));
         append(out, cap, &used, line, n);
-        prev = b->at_us[i];
+        prev = b->at_us[next];
     }
     return used;
 }

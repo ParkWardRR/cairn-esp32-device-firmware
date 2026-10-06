@@ -53,6 +53,7 @@ typedef enum {
     CAIRN_BOOT_BLE_ADVERTISING,   /* T_ble */
     CAIRN_BOOT_FIRST_CHUNK,       /* T_uplink (per path: the first one reached) */
     CAIRN_BOOT_CAPTURE_OPEN,      /* a capture bundle is open: able to start a capture */
+    CAIRN_BOOT_SENSORS_READY,     /* coprocessor, GNSS and IMU brought up (sensors_begin returned) */
     CAIRN_BOOT_STAGE_COUNT
 } cairn_boot_stage_t;
 
