@@ -1,0 +1,17 @@
+.DS_Store
+.claude/
+.nimbalyst/
+
+# Fetched contracts (scripts/fetch-contracts.sh)
+/.contracts/
+
+# Local credentials: never commit. Template: include/secrets.h.example
+include/secrets.h
+third_party/freematics-base/src/secrets.h
+
+# Build output
+.pio/
+third_party/freematics-base/.pio/
+test/host/build/
+emulator/target/
+emulator/output/
