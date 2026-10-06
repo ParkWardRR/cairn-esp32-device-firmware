@@ -1,7 +1,7 @@
 # RTOS Evaluation — Zephyr and Apache NuttX vs. Arduino/ESP-IDF
 
 > Status: **research only**, no action taken. Written in response to a question about
-> replacing the Arduino/PlatformIO firmware stack (then `firmware/freematics-base`
+> replacing the Arduino/PlatformIO firmware stack (then `firmware/cairn-v2/third_party/freematics-base`
 > and `firmware/hal`, both since removed; the current firmware is
 > `firmware/cairn-v2`, still Arduino-on-ESP-IDF via PlatformIO) with Zephyr RTOS or
 > Apache NuttX. Conclusion: **not viable today** —
@@ -19,7 +19,7 @@
 
 Cairn's firmware targets the **Freematics ONE+ Model B**, built on a plain **ESP32**
 (original dual-core Xtensa LX6 — not S2/S3/C3/C6). The current stack is the Arduino
-framework on PlatformIO (at the time `firmware/freematics-base/platformio.ini`;
+framework on PlatformIO (at the time `firmware/cairn-v2/third_party/freematics-base/platformio.ini`;
 now `firmware/cairn-v2/platformio.ini`), with a custom HAL (`firmware/hal/`, since removed) that calls ESP-IDF APIs fairly directly for low-level control. Someone
 asked whether switching to Zephyr or NuttX made sense. The answer depends entirely on
 whether those RTOSes support the *specific* ESP32 peripherals the HAL relies on — this

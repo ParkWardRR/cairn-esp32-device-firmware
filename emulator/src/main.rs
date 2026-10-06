@@ -27,9 +27,9 @@ enum Command {
     /// implementation can quietly drag the other along. A disagreement about a
     /// single byte fails the run.
     Conformance {
-        /// Directory holding the vectors.
-        #[arg(long, default_value = "../fixtures/format-v3")]
-        vectors: PathBuf,
+        /// Directory holding the vectors (default: $CAIRN_CONTRACTS/format/v3/vectors).
+        #[arg(long)]
+        vectors: Option<PathBuf>,
 
         /// Print every vector, not only failures.
         #[arg(long)]
@@ -116,7 +116,9 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Conformance { vectors, verbose } => run_conformance(&vectors, verbose),
+        Command::Conformance { vectors, verbose } => {
+            run_conformance(&vectors.unwrap_or_else(|| contracts_dir().join("format/v3/vectors")), verbose)
+        }
         Command::FaultMatrix {
             work_dir,
             server,
@@ -134,6 +136,28 @@ fn main() {
     }
 }
 
+/// The Cairn contracts directory (the one containing format/, sync/, ble/): $CAIRN_CONTRACTS,
+/// else the nearest ancestor of the working directory with contracts/format (the monorepo or
+/// the front door), else one with .contracts/contracts/format (a fetched copy).
+fn contracts_dir() -> PathBuf {
+    if let Ok(d) = std::env::var("CAIRN_CONTRACTS") {
+        if !d.is_empty() {
+            return PathBuf::from(d);
+        }
+    }
+    let wd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut dir = Some(wd.as_path());
+    while let Some(d) = dir {
+        for rel in ["contracts", ".contracts/contracts"] {
+            if d.join(rel).join("format").is_dir() {
+                return d.join(rel);
+            }
+        }
+        dir = d.parent();
+    }
+    wd.join(".contracts/contracts")
+}
+
 /// Check the format implementation against the committed vectors.
 fn run_conformance(vectors: &PathBuf, verbose: bool) {
     let report = match conformance::run(vectors) {
@@ -141,7 +165,7 @@ fn run_conformance(vectors: &PathBuf, verbose: bool) {
         Err(e) => {
             eprintln!("cannot read vectors at {}: {e}", vectors.display());
             eprintln!(
-                "generate them with: cd ../server && go run ./cmd/mkvectors -out ../fixtures/format-v3"
+                "set CAIRN_CONTRACTS to the contracts directory, or generate them with the server's `go run ./cmd/mkvectors`"
             );
             std::process::exit(2);
         }

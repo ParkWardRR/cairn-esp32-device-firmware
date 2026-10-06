@@ -1,9 +1,9 @@
 //! Rust implementation of Cairn bundle format v3.
 //!
-//! The normative specification is `docs/bundle-format-v3.md`. This is a second,
+//! The normative specification is `contracts/format/v3/spec.md`. This is a second,
 //! independent implementation of it — the Go one under `server/format/` is the
 //! reference. Both are checked against the committed vectors in
-//! `fixtures/format-v3/`, which is what makes the spec meaningful rather than
+//! `contracts/format/v3/vectors/`, which is what makes the spec meaningful rather than
 //! merely descriptive: if the two disagree about a single byte, the conformance
 //! runner fails.
 //!

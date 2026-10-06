@@ -195,7 +195,7 @@ bool ble_companion_begin(void)
         NIMBLE_PROPERTY::READ_ENC |
         NIMBLE_PROPERTY::READ_AUTHEN);
 
-    /* Capabilities: bit 2 = bundle offload (docs/ble-offload.md). Advertised only
+    /* Capabilities: bit 2 = bundle offload (contracts/ble/v1/offload.md). Advertised only
      * if the offload task actually started. */
     if (ble_offload_register(svc)) {
         ver[1] |= 0x04;

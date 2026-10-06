@@ -301,4 +301,4 @@ X = longitudinal (+ forward), Y = lateral (+ left), Z = vertical (+ up, reads +1
 with stops every 1-3 min, highway 80-110 km/h. GNSS generally good; degrades
 near overpasses and tall buildings on Wilshire corridor.
 
-The on-wire encoding is specified in [bundle-format-v3.md](bundle-format-v3.md).
+The on-wire encoding is specified in [bundle-format-v3.md](../contracts/format/v3/spec.md).

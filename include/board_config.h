@@ -2,7 +2,7 @@
  * Board and filesystem layout for the Freematics ONE+ Model B (classic ESP32).
  *
  * Pin assignments are taken from the working v1 firmware
- * (firmware/freematics-base/lib/FreematicsPlus/FreematicsPlus.h), not guessed.
+ * (firmware/cairn-v2/third_party/freematics-base/lib/FreematicsPlus/FreematicsPlus.h), not guessed.
  *
  * Nothing here is a secret. Hostnames and keys live in secrets.h, which is
  * gitignored; this repository is public, so every value in this file is either

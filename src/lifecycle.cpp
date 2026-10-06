@@ -1090,7 +1090,7 @@ static void maybe_standby(Lifecycle *lc)
  * Count what is waiting to leave the device.
  *
  * There is no network on this device. Sealed bundles leave it over BLE, pulled
- * by the enrolled phone app (docs/ble-offload.md), and a bundle is only deleted
+ * by the enrolled phone app (contracts/ble/v1/offload.md), and a bundle is only deleted
  * from the card once the app hands back a server receipt that verifies against
  * the pinned key. All this stage does is keep the pending count honest while the
  * vehicle is stopped; it starts no radio and moves no data.

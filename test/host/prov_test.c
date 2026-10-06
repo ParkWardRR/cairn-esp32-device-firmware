@@ -145,8 +145,13 @@ static bool row_base64(void)
 
 static bool row_blob_matches_go(void)
 {
-    char *text = slurp("../../../../fixtures/enroll-v1/vectors.json");
-    CHECK(text != NULL, "cannot read fixtures/enroll-v1/vectors.json");
+    /* The vectors belong to the Cairn contracts, not to this project: the Makefile hands
+     * their location over (CAIRN_ENROLL_VECTORS). */
+    const char *vpath = getenv("CAIRN_ENROLL_VECTORS");
+    CHECK(vpath != NULL, "CAIRN_ENROLL_VECTORS is not set; run through the Makefile or point it at "
+          "$CAIRN_CONTRACTS/enrolment/v1/vectors/vectors.json");
+    char *text = slurp(vpath);
+    CHECK(text != NULL, "cannot read %s", vpath);
     mj_doc_t *doc = (mj_doc_t *)malloc(sizeof(*doc));
     CHECK(mj_parse(doc, text), "vectors.json: %s", doc->error);
 

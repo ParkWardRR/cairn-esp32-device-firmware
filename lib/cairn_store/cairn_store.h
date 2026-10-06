@@ -7,7 +7,7 @@
  * chain are all checked over the stored bytes — so a device that has lost its
  * key still recovers and seals what is on the card rather than discarding it.
  *
- * Four invariants from docs/bundle-format-v3.md govern everything here:
+ * Four invariants from contracts/format/v3/spec.md govern everything here:
  *
  *   1. A sealed bundle is never mutated. Sealing moves a directory; it never
  *      rewrites one in place.

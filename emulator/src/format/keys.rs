@@ -142,7 +142,7 @@ mod tests {
         id
     }
 
-    /// The vector identities from fixtures/format-v3/keys.json.
+    /// The vector identities from contracts/format/v3/vectors/keys.json.
     fn vector_header(segment_index: u32) -> SegmentHeader {
         SegmentHeader {
             device_id: ids(0x10),

@@ -124,7 +124,7 @@ self-test actuation running continuously.
 
 Fix: Changed `writeByte(SELF_TEST_CONFIG_REG, 0x07)` to
 `writeByte(SELF_TEST_CONFIG_REG, 0x00)` in
-`firmware/freematics-base/lib/FreematicsPlus/FreematicsMEMS.cpp:742` (vendored; still used by `firmware/cairn-v2` through `lib_extra_dirs`).
+`firmware/cairn-v2/third_party/freematics-base/lib/FreematicsPlus/FreematicsMEMS.cpp:742` (vendored; still used by `firmware/cairn-v2` through `lib_extra_dirs`).
 
 The bias calibration step masked this bug (it subtracted the ~108 dps offset),
 but running in self-test mode wastes power and reduces gyro dynamic range.
@@ -156,7 +156,7 @@ python3 -m venv ~/cairn-flash/venv
 ### Build (on dev machine)
 
 The firmware is `firmware/cairn-v2` (the v1 firmware that used to live in
-`firmware/freematics-base` is gone; only its vendored `lib/` drivers remain and
+`firmware/cairn-v2/third_party/freematics-base` is gone; only its vendored `lib/` drivers remain and
 are pulled in by `lib_extra_dirs`).
 
 ```bash

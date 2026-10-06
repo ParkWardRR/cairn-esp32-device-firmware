@@ -6,7 +6,7 @@
  * cannot report that it is bricked. So this module is written around what has
  * to be true before a device is allowed to replace itself, not around
  * downloading. There is no network on this device, so the image arrives from
- * the enrolled phone app over BLE (docs/ble-offload.md); the gate below is
+ * the enrolled phone app over BLE (contracts/ble/v1/offload.md); the gate below is
  * independent of how the bytes got here.
  */
 

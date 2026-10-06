@@ -9,7 +9,7 @@
  *
  *   1. Seal the storage root to the server's enrolment key and sign the result
  *      (cairn_enroll_build). The blob is byte-identical to the Go reference in
- *      server/internal/enroll; fixtures/enroll-v1 pins that.
+ *      server/internal/enroll; contracts/enrolment/v1/vectors pins that.
  *   2. Speak a small line protocol over the USB console so an operator's
  *      workstation can fetch that blob and install the vehicle assignment and
  *      counter floor (cairn_prov_line).
@@ -54,7 +54,7 @@ int cairn_b64_decode(const char *in, size_t n, uint8_t *out, size_t cap);
 /*
  * Build a version-1 enrolment blob. Deterministic in its inputs: production
  * passes hardware-random `eph_priv` and `nonce`; the host tests pass the values
- * from fixtures/enroll-v1 and compare bytes.
+ * from contracts/enrolment/v1/vectors and compare bytes.
  *
  * Refuses (returns false) when `server_pub` is all zero — the unconfigured
  * placeholder — or when the key agreement yields a low-order result. Sealing a

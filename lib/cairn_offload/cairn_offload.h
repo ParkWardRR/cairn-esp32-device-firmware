@@ -1,5 +1,5 @@
 /*
- * BLE bundle offload: the dongle's half of docs/ble-offload.md.
+ * BLE bundle offload: the dongle's half of contracts/ble/v1/offload.md.
  *
  * The dongle has no network. The enrolled phone pulls sealed bundles over BLE,
  * uploads them, and hands the server's signed receipt back. This module is the

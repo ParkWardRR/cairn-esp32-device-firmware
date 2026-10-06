@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 /*
- * The NimBLE shim for BLE bundle offload (docs/ble-offload.md). The protocol is
+ * The NimBLE shim for BLE bundle offload (contracts/ble/v1/offload.md). The protocol is
  * lib/cairn_offload; this file only moves bytes between it and the radio.
  */
 

@@ -1,7 +1,7 @@
 /*
  * Cairn bundle format v3 — C implementation.
  *
- * The normative specification is docs/bundle-format-v3.md. This is the third
+ * The normative specification is contracts/format/v3/spec.md. This is the third
  * implementation of it, after Go (server/format) and Rust (emulator/src/format),
  * and it is the one that matters most: a disagreement here means a device
  * writing bundles the server cannot recover.
@@ -18,7 +18,7 @@
  *
  * Deliberately portable C11 with no ESP-IDF dependency, so exactly this code
  * can be compiled natively and checked against the committed conformance
- * vectors in fixtures/format-v3/. Verifying firmware correctness without
+ * vectors in contracts/format/v3/vectors/. Verifying firmware correctness without
  * hardware is otherwise impossible, and "it compiled" is not the same as "it
  * agrees with the other two implementations". The one thing this library does
  * not do is generate randomness: nonces are passed in, so the caller owns the

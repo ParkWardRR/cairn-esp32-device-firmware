@@ -16,7 +16,7 @@
 /*
  * There is no Wi-Fi, no server address and no TLS client in this
  * firmware. The dongle talks to exactly one thing over the air: the enrolled
- * phone app, over BLE (docs/ble-offload.md). The app is the only component that
+ * phone app, over BLE (contracts/ble/v1/offload.md). The app is the only component that
  * talks to the server, so the device holds no network credentials of any kind:
  * no SSID, no password, no client certificate, no private key for a transport.
  *

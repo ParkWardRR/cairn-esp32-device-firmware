@@ -18,7 +18,14 @@
 #   make clean
 
 CC       ?= cc
-FIXTURES ?= ../../../../fixtures/format-v3
+
+# The Cairn contracts (specs and vectors) are not part of this project's code: they are
+# the shared protocols. CAIRN_CONTRACTS is the contracts directory itself (the one that
+# contains format/, sync/, ble/). Unset, it is found in the monorepo checkout or, once
+# this project is its own repository, in the fetched copy at .contracts/contracts.
+CAIRN_CONTRACTS ?= $(patsubst %/format,%,$(firstword $(wildcard ../../../../contracts/format ../../.contracts/contracts/format) ../../.contracts/contracts/format))
+FIXTURES        ?= $(CAIRN_CONTRACTS)/format/v3/vectors
+ENROLL_VECTORS  ?= $(CAIRN_CONTRACTS)/enrolment/v1/vectors/vectors.json
 
 FORMAT_DIR := ../../lib/cairn_format
 STORE_DIR  := ../../lib/cairn_store
@@ -44,7 +51,7 @@ SRC_DIR    := ../../src
 APP_SRC    := $(SRC_DIR)/preroll.c $(SRC_DIR)/policy.c $(OTA_DIR)/cairn_ota.c $(POWER_DIR)/cairn_power.c
 
 # The conformance runner needs the policy codec, which lives in src/.
-BLE_VECTORS     ?= ../../../../fixtures/ble-v1/golden-vectors.json
+BLE_VECTORS     ?= $(CAIRN_CONTRACTS)/ble/v1/vectors/golden/golden-vectors.json
 CONFORMANCE_SRC := $(FORMAT_SRC) $(SRC_DIR)/policy.c minijson.c conformance.c
 FAULTS_SRC      := $(FORMAT_SRC) $(STORE_SRC) $(FS_SRC) $(APP_SRC) \
                    log_host.c platform_host.c faults.c
@@ -118,7 +125,7 @@ $(BUILD)/prov: $(PROV_SRC) $(HEADERS) | $(BUILD)
 	$(CC) $(CFLAGS) $(PROV_SRC) -o $@
 
 prov: $(BUILD)/prov
-	$(BUILD)/prov
+	CAIRN_ENROLL_VECTORS=$(ENROLL_VECTORS) $(BUILD)/prov
 
 $(BUILD)/offload: $(OFFLOAD_SRC) $(HEADERS) | $(BUILD)
 	$(CC) $(CFLAGS) $(OFFLOAD_SRC) -o $@
@@ -151,7 +158,7 @@ asan: | $(BUILD)
 	$(CC) $(CFLAGS) $(SAN) $(SRC_DIR)/mtprobe_parse.c mtprobe_parse_test.c -o $(BUILD)/mtprobe-asan
 	$(BUILD)/mtprobe-asan
 	$(CC) $(CFLAGS) $(SAN) $(PROV_SRC) -o $(BUILD)/prov-asan
-	$(BUILD)/prov-asan
+	CAIRN_ENROLL_VECTORS=$(ENROLL_VECTORS) $(BUILD)/prov-asan
 	$(CC) $(CFLAGS) $(SAN) $(OFFLOAD_SRC) -o $(BUILD)/offload-asan
 	$(BUILD)/offload-asan
 
