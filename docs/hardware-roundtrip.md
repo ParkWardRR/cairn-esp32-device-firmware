@@ -13,7 +13,7 @@ So the round trip has two stages, and only the first can be run today.
 | Stage | What it proves | State (2026-10-05) |
 |---|---|---|
 | **A. Bench: capture and seal** | Encrypted frames, the manifest signature and the counter commit work on this silicon, and the sealed bundle is visible to the hand-off path | Capture, seal and storage checks all `[PASS]` on the real dongle with the card seated (2026-10-05). The new `awaiting hand-off` line was added after that run and has so far only been built, not flashed |
-| **B. Offload: BLE → relay → receipt → prune** | The server accepts and decodes what the dongle wrote, the receipt verifies on the dongle against the pinned key, and the bundle is pruned | **Not runnable yet**: needs the firmware BLE offload (Cairn #6), the server relay (Cairn #5) and the app (iOS #14) |
+| **B. Offload: BLE → relay → receipt → prune** | The server accepts and decodes what the dongle wrote, the receipt verifies on the dongle against the pinned key, and the bundle is pruned | **Every part exists and is tested together on the host with no radio** (the firmware's protocol module, a phone client and the server's relay, `go test ./internal/offloadclient`). **Not yet run over the air**: the offload firmware has not been flashed. Run it with `cairn-phone` below |
 
 ## 0. Before you start
 
@@ -50,14 +50,20 @@ Expect, in order:
 There is no network step in the self-test and no `associated` / `mTLS` line: the
 firmware has neither.
 
-## B. The offload (when the pieces exist)
+## B. The offload
 
-Not runnable yet; this is the procedure it will be.
+The host test (`go test ./internal/offloadclient`, after `make -C firmware/cairn-v2/test/host offload-sim`)
+runs the whole path with no radio. To run it over the air with a Mac standing in for the
+phone:
 
-1. Flash the production build (`pio run -e cairn-ble -t upload …`; the offload needs the BLE build).
-2. Pair the phone (BLE passkey). Drive, or run the self-test for a synthetic bundle.
-3. When parked, open the app. It lists the sealed bundles, fetches each manifest,
-   offers it to the server, reads and uploads the missing chunks, commits, and returns the receipt.
+1. Flash the production build (`pio run -e cairn -t upload …`). BLE is in every build now.
+2. Enrol the Mac once: `cairn-admin client invite --role user --vehicles '*'` on the server,
+   then `cairn-phone enrol --server https://<host>:8444 --code <invitation>`.
+3. Get a sealed bundle: run the self-test build (it seals a synthetic one), or drive; a trip
+   is sealed a few minutes after you park. The dongle refuses offload (`TRIP_ACTIVE`) until then.
+4. `cairn-phone offload`. macOS asks for the pairing passkey the first time. It lists the
+   sealed bundles, fetches each manifest, offers it to the server, reads and uploads the missing
+   chunks, commits, and returns the receipt.
 4. On the server:
    ```sh
    cairn-admin counters <device-id>                  # contiguous, none missing
