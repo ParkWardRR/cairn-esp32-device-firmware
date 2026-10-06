@@ -9,6 +9,7 @@
 #include <freertos/task.h>
 #include <string.h>
 
+#include "boot_timing.h"
 #include "cairn_log.h"
 #include "cairn_offload.h"
 
@@ -65,7 +66,9 @@ static bool io_indicate(void *, const uint8_t *buf, size_t len)
 static bool io_notify(void *, const uint8_t *buf, size_t len)
 {
     if (s_conn == BLE_HS_CONN_HANDLE_NONE || s_chr_data == nullptr) return false;
-    return s_chr_data->notify(buf, len, s_conn);
+    bool sent = s_chr_data->notify(buf, len, s_conn);
+    if (sent) boot_timing_mark(CAIRN_BOOT_FIRST_CHUNK);
+    return sent;
 }
 
 static uint32_t io_now(void *) { return millis(); }

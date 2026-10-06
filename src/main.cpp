@@ -23,6 +23,8 @@
 #include <esp_sleep.h>
 
 #include "board_config.h"
+#include "boot_timing.h"
+#include "device_info.h"
 #include "cairn_format.h"
 #include "cairn_fs.h"
 #include "cairn_log.h"
@@ -327,6 +329,7 @@ static bool try_mount_sd(void)
     for (int attempt = 1; attempt <= CAIRN_SD_MOUNT_ATTEMPTS; attempt++) {
         if (SD.begin(CAIRN_PIN_SD_CS)) {
             mounted = true;
+            boot_timing_mark(CAIRN_BOOT_SD_MOUNTED);
             if (attempt > 1) {
                 CAIRN_LOGW(TAG, "SD mounted on attempt %d of %d; the card needed "
                                 "a settling period",
@@ -358,6 +361,11 @@ static bool bring_up_after_mount(void)
     CAIRN_LOGI(TAG, "SD mounted: %llu MiB total, %llu MiB used",
                SD.totalBytes() / (1024ULL * 1024ULL),
                SD.usedBytes() / (1024ULL * 1024ULL));
+
+    {
+        uint64_t total = SD.totalBytes(), used = SD.usedBytes();
+        device_info_set_storage(1, (uint32_t)((total > used ? total - used : 0) / (1024ULL * 1024ULL)));
+    }
 
     /* The card is already mounted; this only binds the storage abstraction to
      * it, so the same cairn_store.c runs here and under the host fault tests. */
@@ -433,7 +441,9 @@ static bool bring_up_after_mount(void)
 
 void setup()
 {
+    boot_timing_begin();
     cairn_log_init(115200);
+    boot_timing_mark(CAIRN_BOOT_LOG_READY);
     prov_console_begin();
 #if CAIRN_SELFTEST || CAIRN_PIDTEST
     delay(300);

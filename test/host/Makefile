@@ -34,6 +34,10 @@ INCLUDE_DIR := ../../include
 LOG_DIR     := ../../lib/cairn_log
 PROV_DIR    := ../../lib/cairn_prov
 OFFLOAD_DIR := ../../lib/cairn_offload
+BOOTTIME_DIR := ../../lib/cairn_boottime
+UPLINK_DIR  := ../../lib/cairn_uplink
+CONFIG_DIR  := ../../lib/cairn_config
+DEVINFO_DIR := ../../lib/cairn_devinfo
 
 FORMAT_SRC := $(wildcard $(FORMAT_DIR)/*.c)
 STORE_SRC  := $(wildcard $(STORE_DIR)/*.c)
@@ -48,7 +52,11 @@ POWER_DIR  := ../../lib/cairn_power
 
 # Only the portable application sources; the rest of src/ is Arduino C++.
 SRC_DIR    := ../../src
-APP_SRC    := $(SRC_DIR)/preroll.c $(SRC_DIR)/policy.c $(OTA_DIR)/cairn_ota.c $(POWER_DIR)/cairn_power.c
+# policy.c and cairn_power.c take their engine-dependent values from the profile, so every
+# binary that links them links the engine module too.
+ENGINE_DIR := ../../lib/cairn_engine
+ENGINE_LIB_SRC := $(ENGINE_DIR)/cairn_engine.c $(ENGINE_DIR)/cairn_expr.c
+APP_SRC    := $(SRC_DIR)/preroll.c $(SRC_DIR)/policy.c $(OTA_DIR)/cairn_ota.c $(POWER_DIR)/cairn_power.c $(ENGINE_LIB_SRC)
 
 # The conformance runner needs the policy codec, which lives in src/.
 BLE_VECTORS     ?= $(CAIRN_CONTRACTS)/ble/v1/vectors/golden/golden-vectors.json
@@ -83,20 +91,23 @@ CFLAGS  ?= -std=c11 -O1 -g -D_DEFAULT_SOURCE \
            -Wall -Wextra -Werror -Wno-format-truncation \
            -Wshadow -Wpointer-arith -Wcast-qual -Wstrict-prototypes \
            -Wmissing-prototypes -Wno-unused-parameter \
-           -I$(FORMAT_DIR) -I$(STORE_DIR) -I$(FS_DIR) -I$(LOG_DIR) -I$(PROV_DIR) -I$(INCLUDE_DIR) -I$(SRC_DIR) -I$(OTA_DIR) -I$(POWER_DIR) -I$(OFFLOAD_DIR) -I.
+           -I$(FORMAT_DIR) -I$(STORE_DIR) -I$(FS_DIR) -I$(LOG_DIR) -I$(PROV_DIR) -I$(INCLUDE_DIR) -I$(SRC_DIR) -I$(OTA_DIR) -I$(POWER_DIR) -I$(OFFLOAD_DIR) -I$(BOOTTIME_DIR) -I$(UPLINK_DIR) -I$(CONFIG_DIR) -I$(DEVINFO_DIR) -I.
 
 # Every header the sources can include. Without this a change to a shared header
 # (config.h, cairn_platform.h, policy.h) leaves a stale binary in build/ and a
 # result that describes yesterday's code — which already produced one false
 # failure and could as easily produce a false pass.
 HEADERS := $(wildcard $(OFFLOAD_DIR)/*.h $(PROV_DIR)/*.h $(FORMAT_DIR)/*.h $(STORE_DIR)/*.h $(FS_DIR)/*.h $(LOG_DIR)/*.h \
-                      $(INCLUDE_DIR)/*.h $(SRC_DIR)/*.h $(OTA_DIR)/*.h $(POWER_DIR)/*.h *.h)
+                      $(INCLUDE_DIR)/*.h $(SRC_DIR)/*.h $(OTA_DIR)/*.h $(POWER_DIR)/*.h $(BOOTTIME_DIR)/*.h $(UPLINK_DIR)/*.h $(CONFIG_DIR)/*.h $(DEVINFO_DIR)/*.h *.h)
 
 SAN := -fsanitize=address,undefined -fno-omit-frame-pointer
 
 BUILD := build
 
-.PHONY: all run asan clean conformance faults ble-vectors mtprobe prov offload offload-sim
+# Engine profiles (lib/cairn_engine): see engine.mk.
+include engine.mk
+
+.PHONY: all run asan clean conformance faults ble-vectors mtprobe prov offload offload-sim boottime uplink config devinfo
 
 all: run
 
@@ -144,7 +155,48 @@ $(BUILD)/mtprobe: $(SRC_DIR)/mtprobe_parse.c $(HEADERS) mtprobe_parse_test.c | $
 mtprobe: $(BUILD)/mtprobe
 	$(BUILD)/mtprobe
 
-run: conformance faults ble-vectors mtprobe prov offload
+$(BUILD)/boottime: $(BOOTTIME_DIR)/cairn_boottime.c boottime_test.c $(HEADERS) | $(BUILD)
+	$(CC) $(CFLAGS) $(BOOTTIME_DIR)/cairn_boottime.c boottime_test.c -o $@
+
+boottime: $(BUILD)/boottime
+	$(BUILD)/boottime
+
+$(BUILD)/uplink: $(UPLINK_DIR)/cairn_uplink.c uplink_test.c $(HEADERS) | $(BUILD)
+	$(CC) $(CFLAGS) $(UPLINK_DIR)/cairn_uplink.c uplink_test.c -o $@
+
+uplink: $(BUILD)/uplink
+	$(BUILD)/uplink
+
+CONFIG_SRC := $(FORMAT_SRC) $(FS_DIR)/cairn_kv_posix.c $(CONFIG_DIR)/cairn_config.c config_test.c
+
+$(BUILD)/config: $(CONFIG_SRC) $(HEADERS) | $(BUILD)
+	$(CC) $(CFLAGS) $(CONFIG_SRC) -o $@
+
+config: $(BUILD)/config
+	$(BUILD)/config
+
+# DEVICE_INFO and UPLINK_EVENT against the contract's vectors (ble/v1/device-info.md). The
+# vectors arrived in contracts-v0.2.0; a checkout still pinned to 0.1.0 does not have them, so
+# the row is built only where they exist and says so where they do not.
+DEVINFO_VECTORS ?= $(CAIRN_CONTRACTS)/ble/v1/vectors/device-info/vectors.json
+DEVINFO_SRC     := $(DEVINFO_DIR)/cairn_devinfo.c minijson.c devinfo_test.c
+DEVINFO_CFLAGS  := $(CFLAGS) -DMJ_MAX_NODES=2500 -DMJ_MAX_STR=1100
+
+.PHONY: devinfo
+
+$(BUILD)/devinfo: $(DEVINFO_SRC) $(HEADERS) | $(BUILD)
+	$(CC) $(DEVINFO_CFLAGS) $(DEVINFO_SRC) -o $@
+
+devinfo: $(BUILD)/devinfo
+	$(BUILD)/devinfo $(DEVINFO_VECTORS)
+
+ifneq ($(wildcard $(DEVINFO_VECTORS)),)
+run: devinfo
+else
+$(info device-info vectors not in this contracts pin (needs contracts-v0.2.0): devinfo row skipped)
+endif
+
+run: conformance faults ble-vectors mtprobe prov offload boottime uplink config
 
 # Undefined behaviour in the scan path would be a parser reading past a torn
 # segment — exactly the case the format exists to handle safely.
@@ -161,6 +213,45 @@ asan: | $(BUILD)
 	CAIRN_ENROLL_VECTORS=$(ENROLL_VECTORS) $(BUILD)/prov-asan
 	$(CC) $(CFLAGS) $(SAN) $(OFFLOAD_SRC) -o $(BUILD)/offload-asan
 	$(BUILD)/offload-asan
+	$(CC) $(CFLAGS) $(SAN) $(BOOTTIME_DIR)/cairn_boottime.c boottime_test.c -o $(BUILD)/boottime-asan
+	$(BUILD)/boottime-asan
+	$(CC) $(CFLAGS) $(SAN) $(UPLINK_DIR)/cairn_uplink.c uplink_test.c -o $(BUILD)/uplink-asan
+	$(BUILD)/uplink-asan
+	$(CC) $(CFLAGS) $(SAN) $(CONFIG_SRC) -o $(BUILD)/config-asan
+	$(BUILD)/config-asan
+	$(if $(wildcard $(DEVINFO_VECTORS)),$(CC) $(DEVINFO_CFLAGS) $(SAN) $(DEVINFO_SRC) -o $(BUILD)/devinfo-asan && $(BUILD)/devinfo-asan $(DEVINFO_VECTORS))
+	$(MAKE) asan-lte
 
 clean:
 	rm -rf $(BUILD)
+
+# ── the C writer, for the server's reader ───────────────────────────────────────
+#
+# interop-writer seals bundles with lib/cairn_store + lib/cairn_format and leaves them in
+# $(INTEROP_OUT) for the server's verifier (cairn-verify, Go) to judge. Building and running
+# it needs nothing but a C compiler; judging its output needs the server repository, which
+# is scripts/interop-writer.sh's job (and the server's interop job's), not this Makefile's.
+# Appended as separate rules so it adds to run/asan without editing their lines.
+INTEROP_OUT    ?= $(BUILD)/interop-out
+INTEROP_W_SRC  := $(FORMAT_SRC) $(STORE_SRC) $(FS_SRC) $(APP_SRC) \
+                  log_host.c platform_host.c interop_writer.c
+
+.PHONY: interop-writer interop-writer-asan
+
+$(BUILD)/interop-writer: $(INTEROP_W_SRC) $(HEADERS) | $(BUILD)
+	$(CC) $(CFLAGS) $(INTEROP_W_SRC) -o $@
+
+interop-writer: $(BUILD)/interop-writer
+	rm -rf $(INTEROP_OUT)
+	$(BUILD)/interop-writer $(INTEROP_OUT)
+
+interop-writer-asan: | $(BUILD)
+	$(CC) $(CFLAGS) $(SAN) $(INTEROP_W_SRC) -o $(BUILD)/interop-writer-asan
+	rm -rf $(INTEROP_OUT)-asan
+	$(BUILD)/interop-writer-asan $(INTEROP_OUT)-asan
+
+run: interop-writer
+asan: interop-writer-asan
+
+# LTE digest (#20) and data accounting (#21): see lte.mk.
+include lte.mk

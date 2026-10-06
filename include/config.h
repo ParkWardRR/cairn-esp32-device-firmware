@@ -95,6 +95,10 @@
  */
 #define CAIRN_GNSS_PERIOD_MS      200
 #define CAIRN_IMU_WINDOW_MS       100
+/* Device defaults. The active engine profile (engines/, lib/cairn_engine) supplies
+ * the OBD cadence, engine-on voltage and the standby and drive-confirmation dwells below;
+ * these are what a profile that marks a value `unknown` falls back to, and the host test
+ * test/host/engine_test.c asserts the N20 profile equals them. */
 #define CAIRN_OBD_PERIOD_MS       1200
 #define CAIRN_OBD_BATCH_PERIOD_MS 200
 

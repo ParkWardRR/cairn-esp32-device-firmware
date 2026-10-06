@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 
+#include "cairn_engine.h"
 #include "cairn_log.h"
 #include "config.h"
 #include "mtprobe.h"
@@ -17,7 +18,7 @@ static volatile bool  s_retry_requested;
  * the first pass before any update samples at nominal rather than at zero. */
 static volatile uint16_t s_gnss_period_ms = CAIRN_GNSS_PERIOD_MS;
 static volatile uint16_t s_imu_window_ms  = CAIRN_IMU_WINDOW_MS;
-static volatile uint16_t s_obd_period_ms  = CAIRN_OBD_PERIOD_MS;
+static volatile uint16_t s_obd_period_ms  = CAIRN_OBD_PERIOD_MS; /* replaced by the active profile in sensor_task_start() */
 
 /*
  * Default silent. A device that boots next to a parked car must not start
@@ -204,7 +205,7 @@ static void sensor_task(void *arg)
                 bool have_batch = sensors_read_obd_batch(&batch);
                 if (!have_batch) batch.valid = false;
 
-                next_obd = now + (batch.valid ? CAIRN_OBD_BATCH_PERIOD_MS
+                next_obd = now + (batch.valid ? cairn_engine_params()->obd_batch_period_ms
                                               : s_obd_period_ms);
 
                 fact_t f;
@@ -292,6 +293,7 @@ bool sensor_task_start(SensorStatus *status)
     s_status = status;
     s_dropped = 0;
     s_retry_requested = false;
+    s_obd_period_ms = cairn_engine_params()->obd_period_ms;
 
     s_queue = xQueueCreate(CAIRN_FACT_QUEUE_DEPTH, sizeof(fact_t));
     if (s_queue == nullptr) {

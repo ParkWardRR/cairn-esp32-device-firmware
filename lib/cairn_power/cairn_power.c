@@ -11,6 +11,7 @@
 #include <stdio.h>
 
 #include "cairn_format.h"
+#include "cairn_engine.h"
 #include "config.h"
 
 bool cairn_power_should_standby(const cairn_power_evidence_t *e)
@@ -45,14 +46,14 @@ const char *cairn_power_standby_blocker(const cairn_power_evidence_t *e)
         return "bundles are awaiting a receipt and the link is up";
     }
 
-    if (e->idle_ms < CAIRN_STANDBY_IDLE_MS) return "not idle long enough";
+    if (e->idle_ms < cairn_engine_params()->standby_idle_ms) return "not idle long enough";
 
     /*
      * A supply already near the engine-on threshold means the engine is
      * probably running, whatever the accelerometer says.
      */
     if (e->battery_mv != CAIRN_U16_UNKNOWN &&
-        e->battery_mv >= CAIRN_ENGINE_ON_MV) {
+        e->battery_mv >= cairn_engine_params()->engine_on_mv) {
         return "supply voltage suggests the engine is running";
     }
 
@@ -80,7 +81,7 @@ cairn_wake_reason_t cairn_power_should_wake(uint16_t accel_rms_mg,
      * this is the earlier and more reliable signal — and catching it early is
      * what lets the pre-roll cover the first seconds of the drive.
      */
-    if (battery_mv != CAIRN_U16_UNKNOWN && battery_mv >= CAIRN_ENGINE_ON_MV) {
+    if (battery_mv != CAIRN_U16_UNKNOWN && battery_mv >= cairn_engine_params()->engine_on_mv) {
         return CAIRN_WAKE_ENGINE_VOLTAGE;
     }
 
@@ -91,7 +92,7 @@ cairn_wake_reason_t cairn_power_should_wake(uint16_t accel_rms_mg,
      * from a dead one. Without this, weeks of correct silence and a failure
      * look identical in the data.
      */
-    if (standby_ms >= CAIRN_STANDBY_HEARTBEAT_MS) {
+    if (standby_ms >= cairn_engine_params()->standby_heartbeat_ms) {
         return CAIRN_WAKE_PERIODIC_HEALTH;
     }
 
@@ -149,8 +150,9 @@ bool cairn_bus_may_transmit(const cairn_bus_evidence_t *e)
 
 const char *cairn_drive_blocker(const cairn_drive_evidence_t *e)
 {
+    const cairn_engine_params_t *ep = cairn_engine_params();
     bool voltage_up = (e->battery_mv != CAIRN_U16_UNKNOWN &&
-                       e->battery_mv >= CAIRN_ENGINE_ON_MV);
+                       e->battery_mv >= cairn_engine_params()->engine_on_mv);
     bool moving     = (e->accel_rms_mg >= CAIRN_MOTION_ACCEL_RMS_MG);
 
     /*
@@ -158,20 +160,20 @@ const char *cairn_drive_blocker(const cairn_drive_evidence_t *e)
      * parked car does not simultaneously lift its supply rail and shake.
      */
     if (voltage_up && moving) {
-        if (e->voltage_high_ms >= CAIRN_DRIVE_BOTH_DWELL_MS ||
-            e->motion_ms >= CAIRN_DRIVE_BOTH_DWELL_MS) {
+        if (e->voltage_high_ms >= ep->drive_both_dwell_ms ||
+            e->motion_ms >= ep->drive_both_dwell_ms) {
             return NULL;
         }
         return "voltage and motion agree but have not persisted yet";
     }
 
     if (voltage_up) {
-        if (e->voltage_high_ms >= CAIRN_DRIVE_VOLTAGE_DWELL_MS) return NULL;
+        if (e->voltage_high_ms >= ep->drive_voltage_dwell_ms) return NULL;
         return "supply is above engine-on but has not persisted yet";
     }
 
     if (moving) {
-        if (e->motion_ms >= CAIRN_DRIVE_MOTION_DWELL_MS) return NULL;
+        if (e->motion_ms >= ep->drive_motion_dwell_ms) return NULL;
         return "motion has not persisted long enough to be a drive";
     }
 

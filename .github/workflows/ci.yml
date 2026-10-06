@@ -81,6 +81,24 @@ jobs:
             -DCAIRN_UPDATE_KEY_HEX='"0000000000000000000000000000000000000000000000000000000000000001"'
         run: pio run -e cairn -j 1
 
+  # Engine profiles (engines/*.yaml): the generator validates them and emits the C
+  # tables, the committed all-engines header must equal a regeneration, the formula
+  # vectors and negative profile vectors must hold, and the firmware's own tests must
+  # pass against one-engine and all-engines tables (tests/ in tools/enginegen, then
+  # test/host engine_test). `make engines-check` is the whole of it.
+  engines:
+    runs-on: [self-hosted, cairn]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Validate, generate, diff and test
+        run: make engines-check
+
   # The emulator's independent Rust implementation of bundle format v3, checked against
   # the same pinned vectors the Go reference and the C implementation pass.
   emulator:
