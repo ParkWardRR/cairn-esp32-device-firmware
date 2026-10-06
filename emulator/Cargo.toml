@@ -19,6 +19,8 @@ ed25519-dalek = "3.0.0"
 crc32fast = "1.5.2"
 chacha20poly1305 = "0.10"
 hkdf = "0.12"
+p256 = { version = "0.13", features = ["ecdsa"] }
+base64 = "0.22"
 
 [profile.release]
 lto = true

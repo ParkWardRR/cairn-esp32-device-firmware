@@ -24,6 +24,7 @@ use sha2::{Digest, Sha256};
 use crate::format::{self, StopReason, segment::parse_segment_header};
 
 use super::fault::{FaultPlan, FaultPoint, Injector};
+use super::relay::Phone;
 use super::store::{
     CaptureSpec, DeviceIdentity, DeviceStore, SealedBundle, StoreError, gnss_payload,
 };
@@ -66,7 +67,7 @@ pub struct RowResult {
 }
 
 impl RowResult {
-    fn pass(family: &str, property: &str, detail: String, seed: u64) -> Self {
+    pub(super) fn pass(family: &str, property: &str, detail: String, seed: u64) -> Self {
         Self {
             family: family.into(),
             property: property.into(),
@@ -77,7 +78,7 @@ impl RowResult {
         }
     }
 
-    fn fail(family: &str, property: &str, detail: String, seed: u64) -> Self {
+    pub(super) fn fail(family: &str, property: &str, detail: String, seed: u64) -> Self {
         Self {
             family: family.into(),
             property: property.into(),
@@ -88,7 +89,7 @@ impl RowResult {
         }
     }
 
-    fn skip(family: &str, property: &str, why: String) -> Self {
+    pub(super) fn skip(family: &str, property: &str, why: String) -> Self {
         Self {
             family: family.into(),
             property: property.into(),
@@ -129,6 +130,81 @@ pub struct Config {
     pub verbose: bool,
     /// The provisioned identity of the simulated device under test.
     pub identity: IdentityConfig,
+    /// The phone relay to run the protocol rows against, as an enrolled app client.
+    /// The legacy `server` and this are independent: either, both or neither.
+    pub relay: Option<RelayConfig>,
+}
+
+/// An authenticated client acting as the phone, against `/v1/relay/bundles/*`.
+#[derive(Clone)]
+pub struct RelayConfig {
+    /// The app API's base URL (not the device listener's).
+    pub base: String,
+    pub phone: Phone,
+    /// The server's receipt-signing public key, as a dongle pins it at provisioning
+    /// (`cairn-server -print-receipt-key`). Absent: fetched from the legacy listener
+    /// when `server` is also given, otherwise the relay rows fail saying so.
+    pub receipt_key: Option<[u8; 32]>,
+}
+
+/// One server path the protocol rows run against: the same rows, a different wire.
+pub struct Target {
+    /// "" for the legacy listener, "relay/" for the phone relay. Prefixes row families,
+    /// so a report shows which path a row ran on.
+    pub label: &'static str,
+    pub client: SyncClient,
+    /// The pinned receipt key, or why there is none.
+    pub key: std::result::Result<VerifyingKey, String>,
+    /// Added to every bundle id, so two paths against one server never offer different
+    /// content under one id (intake would quarantine the second, correctly).
+    pub id_offset: u8,
+}
+
+impl Target {
+    pub fn family(&self, name: &str) -> String {
+        format!("{}{name}", self.label)
+    }
+
+    /// A row's working-directory name, distinct per path.
+    pub fn tag(&self, name: &str) -> String {
+        format!("{}{name}", self.label.replace('/', "-"))
+    }
+
+    pub fn bundle_id(&self, n: u8) -> [u8; 16] {
+        bundle_id(n.wrapping_add(self.id_offset))
+    }
+}
+
+fn legacy_target(cfg: &Config) -> Target {
+    let client = SyncClient::new(&cfg.server);
+    let key = client.fetch_receipt_key().map_err(|e| e.to_string());
+    Target {
+        label: "",
+        client,
+        key,
+        id_offset: 0,
+    }
+}
+
+fn relay_target(cfg: &Config, r: &RelayConfig) -> Target {
+    let client = SyncClient::relay(&r.base, r.phone.clone()).with_backlog_base(&cfg.server);
+    let key = match (&r.receipt_key, cfg.server.is_empty()) {
+        (Some(raw), _) => VerifyingKey::from_bytes(raw).map_err(|e| format!("--receipt-key: {e}")),
+        (None, false) => SyncClient::new(&cfg.server)
+            .fetch_receipt_key()
+            .map_err(|e| e.to_string()),
+        (None, true) => Err(
+            "the relay has no receipt-key endpoint: pass --receipt-key (cairn-server \
+             -print-receipt-key) or --server to fetch it from the legacy listener"
+                .into(),
+        ),
+    };
+    Target {
+        label: "relay/",
+        client,
+        key,
+        id_offset: 0x40,
+    }
 }
 
 /// What provisioning gives the device: its storage root and key version, and
@@ -212,7 +288,7 @@ fn device_id() -> [u8; 16] {
     id
 }
 
-fn bundle_id(n: u8) -> [u8; 16] {
+pub(super) fn bundle_id(n: u8) -> [u8; 16] {
     let mut id = [0u8; 16];
     for (i, b) in id.iter_mut().enumerate() {
         *b = n.wrapping_add(i as u8);
@@ -272,10 +348,24 @@ pub fn run(cfg: &Config) -> std::io::Result<MatrixReport> {
             ));
         }
     } else {
-        rows.extend(network_loss_per_chunk(cfg));
-        rows.push(corrupt_chunk_in_transit(cfg));
-        rows.push(duplicate_upload_stored_once(cfg));
-        rows.push(receipt_lost_in_transit(cfg));
+        // Kept until front door #7 removes the listener.
+        let t = legacy_target(cfg);
+        rows.extend(network_loss_per_chunk(cfg, &t));
+        rows.push(corrupt_chunk_in_transit(cfg, &t));
+        rows.push(duplicate_upload_stored_once(cfg, &t));
+        rows.push(receipt_lost_in_transit(cfg, &t));
+    }
+
+    // ── protocol, over the phone relay: the real path ────────────────────────
+    // The same four rows as above, then the rows only the relay can have: an
+    // authenticated caller, and chunks that arrive in the wrong order.
+    if let Some(r) = &cfg.relay {
+        let t = relay_target(cfg, r);
+        rows.extend(network_loss_per_chunk(cfg, &t));
+        rows.push(corrupt_chunk_in_transit(cfg, &t));
+        rows.push(duplicate_upload_stored_once(cfg, &t));
+        rows.push(receipt_lost_in_transit(cfg, &t));
+        rows.extend(super::relay_matrix::rows(cfg, &t));
     }
 
     Ok(MatrixReport { rows })
@@ -1805,7 +1895,7 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
 // ── protocol rows ──────────────────────────────────────────────────────────
 
 /// Build and seal a bundle for a protocol row.
-fn sealed_for_protocol(
+pub(super) fn sealed_for_protocol(
     cfg: &Config,
     name: &str,
     id: [u8; 16],
@@ -1835,22 +1925,19 @@ fn sealed_for_protocol(
     Ok((store, sealed))
 }
 
-fn receipt_key(client: &SyncClient) -> std::result::Result<VerifyingKey, String> {
-    client.fetch_receipt_key().map_err(|e| e.to_string())
-}
-
 /// Property: the device eventually obtains a valid receipt despite the network
 /// dropping at every chunk boundary, and the server stores one bundle.
-fn network_loss_per_chunk(cfg: &Config) -> Vec<RowResult> {
-    const FAMILY: &str = "network-loss-per-chunk";
+fn network_loss_per_chunk(cfg: &Config, t: &Target) -> Vec<RowResult> {
+    let family = t.family("network-loss-per-chunk");
+    let family = family.as_str();
     const PROPERTY: &str = "device eventually obtains a valid receipt; resume, not restart";
 
-    let client = SyncClient::new(&cfg.server);
-    let key = match receipt_key(&client) {
+    let client = &t.client;
+    let key = match t.key.clone() {
         Ok(k) => k,
         Err(e) => {
             return vec![RowResult::fail(
-                FAMILY,
+                family,
                 PROPERTY,
                 format!("receipt key: {e}"),
                 cfg.seed,
@@ -1863,15 +1950,16 @@ fn network_loss_per_chunk(cfg: &Config) -> Vec<RowResult> {
         chunk_size: 128,
         ..clone_cfg(cfg)
     };
-    let (store, sealed) = match sealed_for_protocol(&small, "net-loss", bundle_id(8), 40) {
+    let (store, sealed) = match sealed_for_protocol(&small, &t.tag("net-loss"), t.bundle_id(8), 40)
+    {
         Ok(v) => v,
-        Err(e) => return vec![RowResult::fail(FAMILY, PROPERTY, e.to_string(), cfg.seed)],
+        Err(e) => return vec![RowResult::fail(family, PROPERTY, e.to_string(), cfg.seed)],
     };
 
     let total = sealed.chunk_count();
     if total < 3 {
         return vec![RowResult::fail(
-            FAMILY,
+            family,
             PROPERTY,
             format!("only {total} chunks; need at least 3 boundaries"),
             cfg.seed,
@@ -1892,7 +1980,7 @@ fn network_loss_per_chunk(cfg: &Config) -> Vec<RowResult> {
             Ok(_) => break,
             Err(e) => {
                 return vec![RowResult::fail(
-                    FAMILY,
+                    family,
                     PROPERTY,
                     format!("unexpected error while dropping after chunk {drop_after}: {e}"),
                     cfg.seed,
@@ -1907,7 +1995,7 @@ fn network_loss_per_chunk(cfg: &Config) -> Vec<RowResult> {
         Ok(outcome) => {
             let Some(receipt) = outcome.receipt else {
                 return vec![RowResult::fail(
-                    FAMILY,
+                    family,
                     PROPERTY,
                     "sync reported success with no receipt".into(),
                     cfg.seed,
@@ -1915,7 +2003,7 @@ fn network_loss_per_chunk(cfg: &Config) -> Vec<RowResult> {
             };
             if receipt.content_root != sealed.manifest.content_root {
                 return vec![RowResult::fail(
-                    FAMILY,
+                    family,
                     PROPERTY,
                     "the receipt acknowledges different content".into(),
                     cfg.seed,
@@ -1924,7 +2012,7 @@ fn network_loss_per_chunk(cfg: &Config) -> Vec<RowResult> {
             if let Err(e) = store.store_receipt(&sealed.manifest.bundle_id, &outcome.receipt_bytes)
             {
                 return vec![RowResult::fail(
-                    FAMILY,
+                    family,
                     PROPERTY,
                     format!("store receipt: {e}"),
                     cfg.seed,
@@ -1933,7 +2021,7 @@ fn network_loss_per_chunk(cfg: &Config) -> Vec<RowResult> {
         }
         Err(e) => {
             return vec![RowResult::fail(
-                FAMILY,
+                family,
                 PROPERTY,
                 format!("the final attempt failed: {e}"),
                 cfg.seed,
@@ -1942,7 +2030,7 @@ fn network_loss_per_chunk(cfg: &Config) -> Vec<RowResult> {
     }
 
     vec![RowResult::pass(
-        FAMILY,
+        family,
         PROPERTY,
         format!(
             "{total} chunks, connection dropped after each of the first {} boundaries; \
@@ -1955,24 +2043,26 @@ fn network_loss_per_chunk(cfg: &Config) -> Vec<RowResult> {
 
 /// Property: a corrupted chunk is rejected, and a retry succeeds without
 /// operator action.
-fn corrupt_chunk_in_transit(cfg: &Config) -> RowResult {
-    const FAMILY: &str = "corrupt-chunk-in-transit";
+fn corrupt_chunk_in_transit(cfg: &Config, t: &Target) -> RowResult {
+    let family = t.family("corrupt-chunk-in-transit");
+    let family = family.as_str();
     const PROPERTY: &str = "rejected; retry succeeds without operator action";
 
-    let client = SyncClient::new(&cfg.server);
-    let key = match receipt_key(&client) {
+    let client = &t.client;
+    let key = match t.key.clone() {
         Ok(k) => k,
-        Err(e) => return RowResult::fail(FAMILY, PROPERTY, format!("receipt key: {e}"), cfg.seed),
+        Err(e) => return RowResult::fail(family, PROPERTY, format!("receipt key: {e}"), cfg.seed),
     };
 
     let small = Config {
         chunk_size: 256,
         ..clone_cfg(cfg)
     };
-    let (_store, sealed) = match sealed_for_protocol(&small, "corrupt-chunk", bundle_id(9), 30) {
-        Ok(v) => v,
-        Err(e) => return RowResult::fail(FAMILY, PROPERTY, e.to_string(), cfg.seed),
-    };
+    let (_store, sealed) =
+        match sealed_for_protocol(&small, &t.tag("corrupt-chunk"), t.bundle_id(9), 30) {
+            Ok(v) => v,
+            Err(e) => return RowResult::fail(family, PROPERTY, e.to_string(), cfg.seed),
+        };
 
     let mut inj = Injector::armed(
         FaultPlan::corrupt(FaultPoint::CorruptChunkInTransit(1)).with_seed(cfg.seed),
@@ -1982,7 +2072,7 @@ fn corrupt_chunk_in_transit(cfg: &Config) -> RowResult {
         Ok(outcome) => {
             if outcome.chunks_rejected == 0 {
                 return RowResult::fail(
-                    FAMILY,
+                    family,
                     PROPERTY,
                     "the corrupted chunk was not rejected".into(),
                     cfg.seed,
@@ -1990,14 +2080,14 @@ fn corrupt_chunk_in_transit(cfg: &Config) -> RowResult {
             }
             if outcome.receipt.is_none() {
                 return RowResult::fail(
-                    FAMILY,
+                    family,
                     PROPERTY,
                     "no receipt after retrying the corrupted chunk".into(),
                     cfg.seed,
                 );
             }
             RowResult::pass(
-                FAMILY,
+                family,
                 PROPERTY,
                 format!(
                     "chunk 1 corrupted in flight: rejected ({} rejection(s)), \
@@ -2007,44 +2097,46 @@ fn corrupt_chunk_in_transit(cfg: &Config) -> RowResult {
                 cfg.seed,
             )
         }
-        Err(e) => RowResult::fail(FAMILY, PROPERTY, format!("sync failed: {e}"), cfg.seed),
+        Err(e) => RowResult::fail(family, PROPERTY, format!("sync failed: {e}"), cfg.seed),
     }
 }
 
 /// Property: re-offering identical content stores it exactly once and returns
 /// the receipt already earned.
-fn duplicate_upload_stored_once(cfg: &Config) -> RowResult {
-    const FAMILY: &str = "duplicate-upload";
+fn duplicate_upload_stored_once(cfg: &Config, t: &Target) -> RowResult {
+    let family = t.family("duplicate-upload");
+    let family = family.as_str();
     const PROPERTY: &str = "immutable bundle stored exactly once";
 
-    let client = SyncClient::new(&cfg.server);
-    let key = match receipt_key(&client) {
+    let client = &t.client;
+    let key = match t.key.clone() {
         Ok(k) => k,
-        Err(e) => return RowResult::fail(FAMILY, PROPERTY, format!("receipt key: {e}"), cfg.seed),
+        Err(e) => return RowResult::fail(family, PROPERTY, format!("receipt key: {e}"), cfg.seed),
     };
 
-    let (_store, sealed) = match sealed_for_protocol(cfg, "duplicate", bundle_id(10), 25) {
+    let (_store, sealed) = match sealed_for_protocol(cfg, &t.tag("duplicate"), t.bundle_id(10), 25)
+    {
         Ok(v) => v,
-        Err(e) => return RowResult::fail(FAMILY, PROPERTY, e.to_string(), cfg.seed),
+        Err(e) => return RowResult::fail(family, PROPERTY, e.to_string(), cfg.seed),
     };
 
     let before = client.decode_backlog().unwrap_or(-1);
 
     let first = match client.sync(&sealed, &key, &mut Injector::none()) {
         Ok(o) => o,
-        Err(e) => return RowResult::fail(FAMILY, PROPERTY, format!("first sync: {e}"), cfg.seed),
+        Err(e) => return RowResult::fail(family, PROPERTY, format!("first sync: {e}"), cfg.seed),
     };
     let after_first = client.decode_backlog().unwrap_or(-1);
 
     let second = match client.sync(&sealed, &key, &mut Injector::none()) {
         Ok(o) => o,
-        Err(e) => return RowResult::fail(FAMILY, PROPERTY, format!("second sync: {e}"), cfg.seed),
+        Err(e) => return RowResult::fail(family, PROPERTY, format!("second sync: {e}"), cfg.seed),
     };
     let after_second = client.decode_backlog().unwrap_or(-1);
 
     let (Some(r1), Some(r2)) = (first.receipt.as_ref(), second.receipt.as_ref()) else {
         return RowResult::fail(
-            FAMILY,
+            family,
             PROPERTY,
             "a sync produced no receipt".into(),
             cfg.seed,
@@ -2053,7 +2145,7 @@ fn duplicate_upload_stored_once(cfg: &Config) -> RowResult {
 
     if r1.receipt_id != r2.receipt_id {
         return RowResult::fail(
-            FAMILY,
+            family,
             PROPERTY,
             "the second upload minted a different receipt".into(),
             cfg.seed,
@@ -2061,7 +2153,7 @@ fn duplicate_upload_stored_once(cfg: &Config) -> RowResult {
     }
     if second.chunks_sent != 0 {
         return RowResult::fail(
-            FAMILY,
+            family,
             PROPERTY,
             format!("the second upload re-sent {} chunks", second.chunks_sent),
             cfg.seed,
@@ -2071,7 +2163,7 @@ fn duplicate_upload_stored_once(cfg: &Config) -> RowResult {
     // Exactly one decode job, not two.
     if after_first >= 0 && after_second != after_first {
         return RowResult::fail(
-            FAMILY,
+            family,
             PROPERTY,
             format!(
                 "decode backlog went {before} -> {after_first} -> {after_second}; \
@@ -2082,7 +2174,7 @@ fn duplicate_upload_stored_once(cfg: &Config) -> RowResult {
     }
 
     RowResult::pass(
-        FAMILY,
+        family,
         PROPERTY,
         format!(
             "identical content uploaded twice: same receipt, zero chunks re-sent, \
@@ -2094,20 +2186,22 @@ fn duplicate_upload_stored_once(cfg: &Config) -> RowResult {
 
 /// Property: when the commit response is lost, a retry returns the same
 /// receipt rather than minting a second one.
-fn receipt_lost_in_transit(cfg: &Config) -> RowResult {
-    const FAMILY: &str = "receipt-lost-in-transit";
+fn receipt_lost_in_transit(cfg: &Config, t: &Target) -> RowResult {
+    let family = t.family("receipt-lost-in-transit");
+    let family = family.as_str();
     const PROPERTY: &str = "a retry returns the same receipt";
 
-    let client = SyncClient::new(&cfg.server);
-    let key = match receipt_key(&client) {
+    let client = &t.client;
+    let key = match t.key.clone() {
         Ok(k) => k,
-        Err(e) => return RowResult::fail(FAMILY, PROPERTY, format!("receipt key: {e}"), cfg.seed),
+        Err(e) => return RowResult::fail(family, PROPERTY, format!("receipt key: {e}"), cfg.seed),
     };
 
-    let (_store, sealed) = match sealed_for_protocol(cfg, "receipt-lost", bundle_id(11), 22) {
-        Ok(v) => v,
-        Err(e) => return RowResult::fail(FAMILY, PROPERTY, e.to_string(), cfg.seed),
-    };
+    let (_store, sealed) =
+        match sealed_for_protocol(cfg, &t.tag("receipt-lost"), t.bundle_id(11), 22) {
+            Ok(v) => v,
+            Err(e) => return RowResult::fail(family, PROPERTY, e.to_string(), cfg.seed),
+        };
 
     // The server commits and receipts; the device never sees the response.
     let mut inj =
@@ -2115,10 +2209,10 @@ fn receipt_lost_in_transit(cfg: &Config) -> RowResult {
     match client.sync(&sealed, &key, &mut inj) {
         Err(SyncError::Interrupted(_)) => {}
         Ok(_) => {
-            return RowResult::fail(FAMILY, PROPERTY, "the fault never fired".into(), cfg.seed);
+            return RowResult::fail(family, PROPERTY, "the fault never fired".into(), cfg.seed);
         }
         Err(e) => {
-            return RowResult::fail(FAMILY, PROPERTY, format!("unexpected error: {e}"), cfg.seed);
+            return RowResult::fail(family, PROPERTY, format!("unexpected error: {e}"), cfg.seed);
         }
     }
 
@@ -2127,7 +2221,7 @@ fn receipt_lost_in_transit(cfg: &Config) -> RowResult {
         Ok(outcome) => {
             let Some(receipt) = outcome.receipt else {
                 return RowResult::fail(
-                    FAMILY,
+                    family,
                     PROPERTY,
                     "the retry produced no receipt".into(),
                     cfg.seed,
@@ -2135,7 +2229,7 @@ fn receipt_lost_in_transit(cfg: &Config) -> RowResult {
             };
             if receipt.content_root != sealed.manifest.content_root {
                 return RowResult::fail(
-                    FAMILY,
+                    family,
                     PROPERTY,
                     "the retry's receipt acknowledges different content".into(),
                     cfg.seed,
@@ -2143,24 +2237,24 @@ fn receipt_lost_in_transit(cfg: &Config) -> RowResult {
             }
             if !outcome.already_committed {
                 return RowResult::fail(
-                    FAMILY,
+                    family,
                     PROPERTY,
                     "the retry was not recognised as already committed".into(),
                     cfg.seed,
                 );
             }
             RowResult::pass(
-                FAMILY,
+                family,
                 PROPERTY,
                 "the lost-response retry returned the already-committed receipt".into(),
                 cfg.seed,
             )
         }
-        Err(e) => RowResult::fail(FAMILY, PROPERTY, format!("the retry failed: {e}"), cfg.seed),
+        Err(e) => RowResult::fail(family, PROPERTY, format!("the retry failed: {e}"), cfg.seed),
     }
 }
 
-fn clone_cfg(cfg: &Config) -> Config {
+pub(super) fn clone_cfg(cfg: &Config) -> Config {
     Config {
         work_dir: cfg.work_dir.clone(),
         server: cfg.server.clone(),
@@ -2168,6 +2262,7 @@ fn clone_cfg(cfg: &Config) -> Config {
         chunk_size: cfg.chunk_size,
         verbose: cfg.verbose,
         identity: cfg.identity.clone(),
+        relay: cfg.relay.clone(),
     }
 }
 

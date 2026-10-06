@@ -4,12 +4,19 @@
 //! offer the signed manifest, transfer only the chunks the server asks for
 //! addressed by content hash, commit, then verify the receipt locally before
 //! the bundle becomes eligible for pruning.
+//!
+//! Two server paths speak this protocol. The legacy device listener
+//! (`/api/v2/bundles/*`) is being retired (front door #7); the real path is
+//! dongle -> BLE -> phone -> the relay (`/v1/relay/bundles/*`), where an enrolled
+//! app client signs every request. [`SyncClient`] speaks either, so one fault row
+//! runs against both and a divergence between them is a finding.
 
 use ed25519_dalek::VerifyingKey;
 
 use crate::format::{self, Receipt};
 
 use super::fault::{FaultPoint, Injector};
+use super::relay::{self, AuthOverrides, Phone, Raw};
 use super::store::SealedBundle;
 
 #[derive(Debug)]
@@ -67,25 +74,147 @@ pub struct SyncOutcome {
     pub receipt_bytes: Vec<u8>,
 }
 
+/// Which server path this client speaks.
+#[derive(Clone)]
+enum Mode {
+    /// The legacy device listener (`/api/v2/...`).
+    Legacy,
+    /// The phone relay (`/v1/relay/bundles/...`): an enrolled app client signs every
+    /// request and uploads on the dongle's behalf.
+    Relay(Phone),
+}
+
 pub struct SyncClient {
     base: String,
     agent: ureq::Agent,
+    mode: Mode,
+    /// Where `/api/v2/health` can be read for the decode backlog. The relay has no such
+    /// endpoint; this is a diagnostic, never part of the protocol under test.
+    backlog_base: Option<String>,
+}
+
+fn new_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
 }
 
 impl SyncClient {
+    /// A client for the legacy device listener.
     pub fn new(base: &str) -> Self {
+        let base = base.trim_end_matches('/').to_string();
+        Self {
+            backlog_base: Some(base.clone()),
+            base,
+            agent: new_agent(),
+            mode: Mode::Legacy,
+        }
+    }
+
+    /// A client acting as the enrolled phone, against the app API's relay.
+    pub fn relay(base: &str, phone: Phone) -> Self {
         Self {
             base: base.trim_end_matches('/').to_string(),
-            agent: ureq::AgentBuilder::new()
-                .timeout(std::time::Duration::from_secs(30))
-                .build(),
+            agent: new_agent(),
+            mode: Mode::Relay(phone),
+            backlog_base: None,
+        }
+    }
+
+    /// Read the decode backlog from this (legacy) base while running over the relay.
+    pub fn with_backlog_base(mut self, base: &str) -> Self {
+        if !base.is_empty() {
+            self.backlog_base = Some(base.trim_end_matches('/').to_string());
+        }
+        self
+    }
+
+    pub fn is_relay(&self) -> bool {
+        matches!(self.mode, Mode::Relay(_))
+    }
+
+    pub fn base(&self) -> &str {
+        &self.base
+    }
+
+    pub fn phone(&self) -> Option<&Phone> {
+        match &self.mode {
+            Mode::Relay(p) => Some(p),
+            Mode::Legacy => None,
+        }
+    }
+
+    fn prefix(&self) -> &'static str {
+        match self.mode {
+            Mode::Legacy => "/api/v2/bundles",
+            Mode::Relay(_) => "/v1/relay/bundles",
+        }
+    }
+
+    /// One request on this client's path, returning whatever the server said. The relay
+    /// signs it (with `auth` altering exactly what a fault row wants altered); the legacy
+    /// listener takes it as is.
+    pub fn send(
+        &self,
+        method: &str,
+        suffix: &str,
+        headers: &[(&str, String)],
+        body: &[u8],
+        auth: &AuthOverrides,
+    ) -> Result<Raw> {
+        let target = format!("{}{}", self.prefix(), suffix);
+        // A phone backs off on 429 (the relay rate-limits per client: a burst of 240, then
+        // 4 a second) and tries again with a FRESH signature, because a repeated nonce is
+        // refused. Anything else is returned as the answer.
+        let mut tries = 0;
+        loop {
+            let authorization = self
+                .phone()
+                .map(|p| p.authorization(method, &target, body, auth));
+            let r = relay::raw_call(
+                &self.agent,
+                &self.base,
+                method,
+                &target,
+                authorization.as_deref(),
+                headers,
+                body,
+            )
+            .map_err(SyncError::Http)?;
+            if r.status == 429 && tries < 100 {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                continue;
+            }
+            return Ok(r);
+        }
+    }
+
+    /// `send` with the default request, a non-200 answer becoming `Rejected`.
+    fn call(
+        &self,
+        method: &str,
+        suffix: &str,
+        headers: &[(&str, String)],
+        body: &[u8],
+    ) -> Result<Raw> {
+        let r = self.send(method, suffix, headers, body, &AuthOverrides::default())?;
+        if (200..300).contains(&r.status) {
+            Ok(r)
+        } else {
+            Err(SyncError::Rejected {
+                status: r.status,
+                body: String::from_utf8_lossy(&r.body).into_owned(),
+            })
         }
     }
 
     /// Fetch and pin the receipt verification key.
     ///
     /// Provisioning, not part of a sync: a device that has not pinned this key
-    /// cannot act on any receipt, and must not prune.
+    /// cannot act on any receipt, and must not prune. Only the legacy listener serves
+    /// it; for the relay the key comes from `--receipt-key` (the server's
+    /// `-print-receipt-key`), exactly as a real dongle gets it at provisioning.
     pub fn fetch_receipt_key(&self) -> Result<VerifyingKey> {
         let resp = self
             .agent
@@ -181,42 +310,97 @@ impl SyncClient {
         Ok(outcome)
     }
 
-    fn offer(&self, bundle: &SealedBundle) -> Result<OfferResponse> {
-        let resp = self
-            .agent
-            .post(&format!("{}/api/v2/bundles/offer", self.base))
-            .set("Content-Type", "application/cbor")
-            .set("X-Cairn-Signature", &format::hex(&bundle.signature))
-            .send_bytes(&bundle.manifest_bytes);
+    /// Offer the manifest. Returns the chunks the server still wants.
+    ///
+    /// Over the relay the answer also says where each wanted chunk lives in the byte
+    /// stream (the phone reads exactly those ranges from the dongle and has no CBOR
+    /// parser), so those ranges are checked against the manifest the dongle sealed: a
+    /// server that points the phone at the wrong bytes would corrupt every upload.
+    pub fn offer(&self, bundle: &SealedBundle) -> Result<OfferResponse> {
+        let r = self.offer_raw(&bundle.manifest_bytes, &bundle.signature)?;
+        let r = if (200..300).contains(&r.status) {
+            r
+        } else {
+            return Err(SyncError::Rejected {
+                status: r.status,
+                body: String::from_utf8_lossy(&r.body).into_owned(),
+            });
+        };
+        let wire: OfferWire = serde_json::from_slice(&r.body)
+            .map_err(|e| SyncError::Http(format!("decode offer response: {e}")))?;
 
-        match resp {
-            Ok(r) => r
-                .into_json::<OfferResponse>()
-                .map_err(|e| SyncError::Http(format!("decode offer response: {e}"))),
-            Err(ureq::Error::Status(status, r)) => Err(SyncError::Rejected {
-                status,
-                body: r.into_string().unwrap_or_default(),
-            }),
-            Err(e) => Err(SyncError::Http(e.to_string())),
+        let mut missing = Vec::with_capacity(wire.missing_chunks.len());
+        let mut at = Vec::with_capacity(bundle.chunk_count());
+        let mut off = 0u64;
+        for d in &bundle.manifest.chunk_descriptors {
+            at.push(off);
+            off += d.byte_length as u64;
         }
+        for m in &wire.missing_chunks {
+            match m {
+                // Legacy: a bare index.
+                serde_json::Value::Number(n) => {
+                    let idx = n
+                        .as_u64()
+                        .ok_or_else(|| SyncError::Http("bad chunk index".into()))?;
+                    missing.push(idx as u32);
+                }
+                // Relay: {index, offset, length, sha256}.
+                serde_json::Value::Object(o) => {
+                    let idx = o.get("index").and_then(|v| v.as_u64()).ok_or_else(|| {
+                        SyncError::Http("relay offer: chunk without an index".into())
+                    })? as usize;
+                    let d = bundle.manifest.chunk_descriptors.get(idx).ok_or_else(|| {
+                        SyncError::Http(format!("relay offer names chunk {idx}, not in manifest"))
+                    })?;
+                    let ok = o.get("offset").and_then(|v| v.as_u64()) == Some(at[idx])
+                        && o.get("length").and_then(|v| v.as_u64()) == Some(d.byte_length as u64)
+                        && o.get("sha256").and_then(|v| v.as_str())
+                            == Some(format::hex(&d.sha256).as_str());
+                    if !ok {
+                        return Err(SyncError::Http(format!(
+                            "relay offer's range for chunk {idx} disagrees with the manifest"
+                        )));
+                    }
+                    missing.push(idx as u32);
+                }
+                other => {
+                    return Err(SyncError::Http(format!("unrecognised chunk entry {other}")));
+                }
+            }
+        }
+        Ok(OfferResponse {
+            missing_chunks: missing,
+            total_chunks: wire.total_chunks,
+            bytes_outstanding: wire.bytes_outstanding,
+            receipt_available: wire.receipt_available,
+        })
     }
 
-    fn put_chunk(&self, bundle_hex: &str, digest: &[u8; 32], data: &[u8]) -> Result<()> {
-        let url = format!(
-            "{}/api/v2/bundles/{}/chunks/{}",
-            self.base,
-            bundle_hex,
-            format::hex(digest)
-        );
+    /// The offer request alone, with whatever signature and manifest bytes the caller
+    /// chooses (a forged-offer row sends the wrong ones).
+    pub fn offer_raw(&self, manifest: &[u8], signature: &[u8; 64]) -> Result<Raw> {
+        self.send(
+            "POST",
+            "/offer",
+            &[
+                ("Content-Type", "application/cbor".into()),
+                ("X-Cairn-Signature", format::hex(signature)),
+            ],
+            manifest,
+            &AuthOverrides::default(),
+        )
+    }
 
-        match self.agent.put(&url).send_bytes(data) {
-            Ok(_) => Ok(()),
-            Err(ureq::Error::Status(status, r)) => Err(SyncError::Rejected {
-                status,
-                body: r.into_string().unwrap_or_default(),
-            }),
-            Err(e) => Err(SyncError::Http(e.to_string())),
-        }
+    /// PUT one chunk, addressed by its content hash.
+    pub fn put_chunk(&self, bundle_hex: &str, digest: &[u8; 32], data: &[u8]) -> Result<()> {
+        self.call(
+            "PUT",
+            &format!("/{}/chunks/{}", bundle_hex, format::hex(digest)),
+            &[("Content-Type", "application/octet-stream".into())],
+            data,
+        )
+        .map(|_| ())
     }
 
     /// Commit, returning the raw receipt bytes and whether it was already
@@ -225,32 +409,29 @@ impl SyncClient {
     /// The bytes are returned verbatim because the device verifies a signature
     /// over exactly them; any envelope would create a re-encode step on the
     /// device, which is precisely where a canonical-encoding bug would hide.
-    fn commit(&self, bundle_hex: &str) -> Result<(Vec<u8>, bool)> {
-        let url = format!("{}/api/v2/bundles/{}/commit", self.base, bundle_hex);
+    pub fn commit(&self, bundle_hex: &str) -> Result<(Vec<u8>, bool)> {
+        let r = self.call("POST", &format!("/{bundle_hex}/commit"), &[], &[])?;
+        let already = r.header("X-Cairn-Already-Committed") == Some("1");
+        Ok((r.body, already))
+    }
 
-        match self.agent.post(&url).call() {
-            Ok(r) => {
-                let already = r.header("X-Cairn-Already-Committed") == Some("1");
-                let mut buf = Vec::new();
-                r.into_reader()
-                    .read_to_end(&mut buf)
-                    .map_err(|e| SyncError::Http(format!("read receipt: {e}")))?;
-                Ok((buf, already))
-            }
-            Err(ureq::Error::Status(status, r)) => Err(SyncError::Rejected {
-                status,
-                body: r.into_string().unwrap_or_default(),
-            }),
-            Err(e) => Err(SyncError::Http(e.to_string())),
-        }
+    /// The server's stored receipt for a bundle, without committing anything (relay only;
+    /// the legacy listener has no such endpoint).
+    pub fn fetch_receipt(&self, bundle_hex: &str) -> Result<Vec<u8>> {
+        Ok(self
+            .call("GET", &format!("/{bundle_hex}/receipt"), &[], &[])?
+            .body)
     }
 
     /// The server's reported decode backlog, used to assert that work was
-    /// queued exactly once.
+    /// queued exactly once. -1 when this client has nowhere to read it.
     pub fn decode_backlog(&self) -> Result<i64> {
+        let Some(base) = &self.backlog_base else {
+            return Ok(-1);
+        };
         let resp = self
             .agent
-            .get(&format!("{}/api/v2/health", self.base))
+            .get(&format!("{base}/api/v2/health"))
             .call()
             .map_err(|e| SyncError::Http(e.to_string()))?;
 
@@ -265,17 +446,25 @@ impl SyncClient {
     }
 }
 
+/// The offer answer, normalised across both paths.
+#[derive(Debug, Clone)]
+pub struct OfferResponse {
+    pub missing_chunks: Vec<u32>,
+    #[allow(dead_code)]
+    pub total_chunks: usize,
+    #[allow(dead_code)]
+    pub bytes_outstanding: i64,
+    #[allow(dead_code)]
+    pub receipt_available: bool,
+}
+
 #[derive(Debug, serde::Deserialize)]
-struct OfferResponse {
-    missing_chunks: Vec<u32>,
-    #[allow(dead_code)]
+struct OfferWire {
+    missing_chunks: Vec<serde_json::Value>,
+    #[serde(default)]
     total_chunks: usize,
-    #[allow(dead_code)]
     #[serde(default)]
     bytes_outstanding: i64,
     #[serde(default)]
-    #[allow(dead_code)]
     receipt_available: bool,
 }
-
-use std::io::Read;
