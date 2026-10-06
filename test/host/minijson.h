@@ -29,8 +29,12 @@ typedef enum {
 /* Sized for the vectors with room to spare. The longest string in the corpus is
  * a prose "asserts" field, which is what sets MJ_MAX_STR rather than any
  * protocol value. */
+#ifndef MJ_MAX_NODES
 #define MJ_MAX_NODES 512
+#endif
+#ifndef MJ_MAX_STR
 #define MJ_MAX_STR   1024
+#endif
 
 typedef struct mj_node mj_node_t;
 

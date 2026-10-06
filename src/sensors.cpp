@@ -4,6 +4,7 @@
 #include <FreematicsPlus.h>
 #include <math.h>
 
+#include "cairn_engine.h"
 #include "cairn_log.h"
 #include "config.h"
 
@@ -160,12 +161,91 @@ static void init_gnss(SensorStatus *status)
     }
 }
 
+/* ── engine profile ───────────────────────────────────────────────────────── */
+
+/*
+ * An engine id this unit has been told its vehicle has, if any. Nothing sets it by
+ * default, and then the unit behaves exactly as it did before profiles: it serves
+ * whatever answers, using the active profile. Set it (for instance with
+ * -DCAIRN_VEHICLE_ENGINE_ID='"bmw-b58"') and a build that does not carry that engine
+ * refuses to open an OBD session, and says so.
+ */
+#ifndef CAIRN_VEHICLE_ENGINE_ID
+#define CAIRN_VEHICLE_ENGINE_ID nullptr
+#endif
+
+/* Latched: once refused, the ECU is not asked again, so a refusal costs no bus traffic. */
+static bool s_engine_refused = false;
+static const char *const k_declared_engine = CAIRN_VEHICLE_ENGINE_ID;
+
+static void log_engine_identity(void)
+{
+    const cairn_engine_identity_t *id = cairn_engine_identity();
+    const cairn_engine_profile_t  *p  = cairn_engine_active();
+
+    CAIRN_LOGI(TAG, "%s", id->string);
+    if (p == nullptr) return;
+
+    CAIRN_LOGI(TAG, "active engine profile %s v%u (%s)", p->id, (unsigned)p->version,
+               p->status == CAIRN_ENGINE_STUB      ? "stub"
+               : p->status == CAIRN_ENGINE_DERIVED ? "derived"
+                                                   : "verified");
+    if (!cairn_engine_has_pids()) {
+        CAIRN_LOGW(TAG, "profile %s has no PID table (unknown): no OBD request will be sent; "
+                        "cadence and thresholds are the device defaults", p->id);
+    }
+}
+
+/*
+ * Whether this build may open an OBD session for this vehicle. `vin` is null before
+ * the ECU has answered; the declared engine needs no bus traffic, so it is checked first.
+ */
+static bool engine_gate(const char *vin)
+{
+    const char *engine = nullptr;
+    cairn_vehicle_verdict_t v =
+        cairn_engine_check_vehicle(k_declared_engine, vin, &engine);
+
+    switch (v) {
+    case CAIRN_VEHICLE_REFUSED_NOT_INSTALLED:
+        CAIRN_LOGE(TAG, "vehicle needs engine %s, which this build does not carry (%s): "
+                        "refusing OBD, nothing will be requested from the ECU",
+                   engine, cairn_engine_identity()->selection);
+        s_engine_refused = true;
+        return false;
+    case CAIRN_VEHICLE_REFUSED_UNKNOWN_ENGINE:
+        CAIRN_LOGE(TAG, "vehicle is declared as engine \"%s\", which has no profile in "
+                        "engines/: refusing OBD", k_declared_engine != nullptr ? k_declared_engine : "?");
+        s_engine_refused = true;
+        return false;
+    case CAIRN_VEHICLE_SERVED:
+        if (engine != nullptr && cairn_engine_select(engine)) {
+            CAIRN_LOGI(TAG, "vehicle identified as engine %s: using that profile", engine);
+        }
+        break;
+    case CAIRN_VEHICLE_UNIDENTIFIED:
+    default:
+        break;
+    }
+
+    if (!cairn_engine_has_pids()) {
+        CAIRN_LOGE(TAG, "active profile %s has no PID table: refusing OBD rather than "
+                        "polling with another engine's PIDs", cairn_engine_active()->id);
+        s_engine_refused = true;
+        return false;
+    }
+    return true;
+}
+
 bool sensors_begin(SensorStatus *status)
 {
     memset(status, 0, sizeof(*status));
     memset(&s_imu, 0, sizeof(s_imu));
     s_imu.window_start_ms = millis();
     s_status = status;
+
+    cairn_engine_select_default();
+    log_engine_identity();
 
     init_obd(status);
     init_gnss(status);
@@ -176,7 +256,8 @@ bool sensors_begin(SensorStatus *status)
 
 void sensors_retry_failed(SensorStatus *status, bool bus_open)
 {
-    if (bus_open && !status->obd && status->coprocessor) {
+    if (bus_open && !status->obd && status->coprocessor && !s_engine_refused &&
+        engine_gate(nullptr)) {
         if (s_obd.init()) {
             status->obd = true;
             CAIRN_LOGI(TAG, "ECU connected");
@@ -185,6 +266,11 @@ void sensors_retry_failed(SensorStatus *status, bool bus_open)
             if (s_obd.getVIN(buf, sizeof(buf))) {
                 snprintf(status->vin, sizeof(status->vin), "%.17s", buf);
                 CAIRN_LOGI(TAG, "VIN %s", status->vin);
+
+                /* The VIN may say which engine this is. If it names one this build
+                 * does not carry, stop using the ECU: the capture would otherwise
+                 * carry values read with the wrong profile. */
+                if (!engine_gate(status->vin)) status->obd = false;
             }
         }
     }
@@ -456,11 +542,12 @@ static bool pid_raw_u16(uint8_t pid, uint16_t *out)
  *
  * Returns false on any parse failure (timeout, GNSS contamination, partial
  * response). The caller falls back to sequential reads for that cycle.
+ *
+ * Which PIDs, in what order, and how each reply becomes a stored value all come
+ * from the active engine profile (lib/cairn_engine). The request string and the
+ * parse are the profile code's, and test/host/engine_test.c holds both to the
+ * behaviour this function had when the list was hard-coded here.
  */
-static const uint8_t  k_batch_pids[]   = { 0x0C, 0x0D, 0x11, 0x0E, 0x0B, 0x44 };
-static const uint8_t  k_batch_dbytes[] = {    2,    1,    1,    1,    1,    2  };
-#define BATCH_PID_COUNT 6
-
 bool sensors_read_obd_batch(obd_batch_t *out)
 {
     memset(out, 0, sizeof(*out));
@@ -468,13 +555,11 @@ bool sensors_read_obd_batch(obd_batch_t *out)
     if (s_status == nullptr || !s_status->obd || s_obd.link == nullptr)
         return false;
 
+    const cairn_engine_profile_t *prof = cairn_engine_active();
+
     char cmd[24];
-    size_t k = (size_t)snprintf(cmd, sizeof(cmd), "01");
-    for (int i = 0; i < BATCH_PID_COUNT; i++)
-        k += (size_t)snprintf(cmd + k, sizeof(cmd) - k, "%02X",
-                              (unsigned)k_batch_pids[i]);
-    cmd[k++] = '\r';
-    cmd[k]   = '\0';
+    if (cairn_engine_batch_request(prof, cmd, sizeof(cmd)) == 0)
+        return false;
 
     char buf[192];
     if (s_obd.link->sendCommand(cmd, buf, sizeof(buf), OBD_TIMEOUT_SHORT) == 0)
@@ -504,29 +589,36 @@ bool sensors_read_obd_batch(obd_batch_t *out)
         }
     }
 
-    int expected = 0;
-    for (int i = 0; i < BATCH_PID_COUNT; i++)
-        expected += 1 + k_batch_dbytes[i];
-    if (nbytes < expected) return false;
+    int32_t  v[CAIRN_FIELD_COUNT];
+    uint32_t present = 0;
+    if (!cairn_engine_batch_parse(prof, bytes, (size_t)nbytes, v, &present))
+        return false;
 
-    int pos = 0;
-    uint8_t data[BATCH_PID_COUNT][2];
-    for (int i = 0; i < BATCH_PID_COUNT; i++) {
-        if (bytes[pos] != k_batch_pids[i]) return false;
-        pos++;
-        for (int j = 0; j < k_batch_dbytes[i]; j++)
-            data[i][j] = bytes[pos++];
-    }
-
-    out->rpm        = (int16_t)(((uint16_t)data[0][0] << 8 | data[0][1]) / 4u);
-    out->speed_kph  = (int16_t)data[1][0];
-    out->throttle_pct = (uint8_t)((uint16_t)data[2][0] * 100u / 255u);
-    out->timing_deg = sat_i8((int)data[3][0] / 2 - 64);
-    out->map_kpa    = data[4][0];
-    out->lambda_raw = (uint16_t)((uint16_t)data[5][0] << 8 | data[5][1]);
-    out->valid      = true;
+    out->rpm          = (int16_t)v[CAIRN_FIELD_RPM];
+    out->speed_kph    = (int16_t)v[CAIRN_FIELD_SPEED_KPH];
+    out->throttle_pct = (uint8_t)v[CAIRN_FIELD_THROTTLE_PCT];
+    out->timing_deg   = (int8_t)v[CAIRN_FIELD_TIMING_ADVANCE_DEG];
+    out->map_kpa      = (uint16_t)v[CAIRN_FIELD_MAP_KPA];
+    out->lambda_e4    = (uint16_t)v[CAIRN_FIELD_LAMBDA_E4];
+    out->present      = present;
+    out->valid        = true;
     return true;
 }
+
+static inline bool batch_has(const obd_batch_t *b, cairn_field_t f)
+{
+    return (b->present & (1u << f)) != 0;
+}
+
+/* The PID the active profile reads for `f`, as a Mode 01 PID the library can send. */
+static bool field_pid(cairn_field_t f, byte *pid)
+{
+    const cairn_pid_t *p = cairn_engine_pid_for_field(cairn_engine_active(), f);
+    if (p == nullptr || p->service != 0x01) return false;
+    *pid = (byte)p->pid;
+    return true;
+}
+
 
 #if CAIRN_PIDTEST
 /*
@@ -611,13 +703,23 @@ int sensors_obd_multi_probe(const uint8_t *pids, int n, char *out, size_t cap)
  * already treats sentinels as absent, so a slow channel simply appears in one
  * record in seven instead of in all of them.
  */
-#define CAIRN_OBD_COLD_SLOTS 10
-
 static uint8_t s_cold_phase;
 
-static inline bool cold_turn(uint8_t slot)
+/* Slots in the rotation: the profile's, and never zero so the modulo below is safe. */
+static inline uint8_t cold_slots(void)
 {
-    return s_cold_phase == slot;
+    return cairn_engine_params()->cold_slots;
+}
+
+static bool cold_pid(cairn_field_t f, byte *pid)
+{
+    const cairn_pid_t *p = cairn_engine_pid_for_field(cairn_engine_active(), f);
+    if (p == nullptr || p->service != 0x01 || p->tier != CAIRN_TIER_COLD ||
+        p->cold_slot != s_cold_phase) {
+        return false;
+    }
+    *pid = (byte)p->pid;
+    return true;
 }
 
 bool sensors_read_obd(cairn_obd_snapshot_t *out, const obd_batch_t *batch)
@@ -629,58 +731,85 @@ bool sensors_read_obd(cairn_obd_snapshot_t *out, const obd_batch_t *batch)
     uint32_t requested = 0, answered = 0;
     uint8_t  errors = 0;
     int      v = 0;
+    byte     pid = 0;
 
-    if (batch != nullptr && batch->valid) {
-        out->speed_kph          = batch->speed_kph;
-        out->rpm                = batch->rpm;
-        out->throttle_pct       = batch->throttle_pct;
-        out->timing_advance_deg = batch->timing_deg;
-        requested += 4;
-        answered  += 4;
-    } else {
+    const bool have_batch = (batch != nullptr && batch->valid);
+
+    /*
+     * The four hot channels of the snapshot. From the batch when it answered, else
+     * one request each through the library. A channel the active profile does not
+     * carry is its sentinel and is not counted as requested, because it was not.
+     */
+    if (have_batch && batch_has(batch, CAIRN_FIELD_SPEED_KPH)) {
+        out->speed_kph = batch->speed_kph;
+        requested++; answered++;
+    } else if (!have_batch && field_pid(CAIRN_FIELD_SPEED_KPH, &pid)) {
         requested++;
-        if (pid_value(PID_SPEED, &v)) {
+        if (pid_value(pid, &v)) {
             out->speed_kph = (int16_t)v;
             answered++;
         } else {
             out->speed_kph = CAIRN_I16_UNKNOWN;
             errors++;
         }
+    } else {
+        out->speed_kph = CAIRN_I16_UNKNOWN;
+    }
 
+    if (have_batch && batch_has(batch, CAIRN_FIELD_RPM)) {
+        out->rpm = batch->rpm;
+        requested++; answered++;
+    } else if (!have_batch && field_pid(CAIRN_FIELD_RPM, &pid)) {
         requested++;
-        if (pid_value(PID_RPM, &v)) {
+        if (pid_value(pid, &v)) {
             out->rpm = (int16_t)((v > 32767) ? 32767 : v);
             answered++;
         } else {
             out->rpm = CAIRN_I16_UNKNOWN;
             errors++;
         }
+    } else {
+        out->rpm = CAIRN_I16_UNKNOWN;
+    }
 
+    if (have_batch && batch_has(batch, CAIRN_FIELD_THROTTLE_PCT)) {
+        out->throttle_pct = batch->throttle_pct;
+        requested++; answered++;
+    } else if (!have_batch && field_pid(CAIRN_FIELD_THROTTLE_PCT, &pid)) {
         requested++;
-        if (pid_value(PID_THROTTLE, &v)) {
+        if (pid_value(pid, &v)) {
             out->throttle_pct = (uint8_t)v;
             answered++;
         } else {
             out->throttle_pct = CAIRN_U8_UNKNOWN;
             errors++;
         }
+    } else {
+        out->throttle_pct = CAIRN_U8_UNKNOWN;
+    }
 
+    if (have_batch && batch_has(batch, CAIRN_FIELD_TIMING_ADVANCE_DEG)) {
+        out->timing_advance_deg = batch->timing_deg;
+        requested++; answered++;
+    } else if (!have_batch && field_pid(CAIRN_FIELD_TIMING_ADVANCE_DEG, &pid)) {
         requested++;
-        if (pid_value(PID_TIMING_ADVANCE, &v)) {
+        if (pid_value(pid, &v)) {
             out->timing_advance_deg = sat_i8(v);
             answered++;
         } else {
             out->timing_advance_deg = CAIRN_I8_UNKNOWN;
             errors++;
         }
+    } else {
+        out->timing_advance_deg = CAIRN_I8_UNKNOWN;
     }
 
     out->fuel_pressure_kpa = CAIRN_U16_UNKNOWN;
 
     out->engine_load_pct = CAIRN_U8_UNKNOWN;
-    if (cold_turn(0)) {
+    if (cold_pid(CAIRN_FIELD_ENGINE_LOAD_PCT, &pid)) {
         requested++;
-        if (pid_value(PID_ENGINE_LOAD, &v)) {
+        if (pid_value(pid, &v)) {
             out->engine_load_pct = (uint8_t)v;
             answered++;
         } else {
@@ -689,9 +818,9 @@ bool sensors_read_obd(cairn_obd_snapshot_t *out, const obd_batch_t *batch)
     }
 
     out->coolant_temp_c = CAIRN_I8_UNKNOWN;
-    if (cold_turn(1)) {
+    if (cold_pid(CAIRN_FIELD_COOLANT_TEMP_C, &pid)) {
         requested++;
-        if (pid_value(PID_COOLANT_TEMP, &v)) {
+        if (pid_value(pid, &v)) {
             out->coolant_temp_c = sat_i8(v);
             answered++;
         } else {
@@ -700,9 +829,9 @@ bool sensors_read_obd(cairn_obd_snapshot_t *out, const obd_batch_t *batch)
     }
 
     out->intake_temp_c = CAIRN_I8_UNKNOWN;
-    if (cold_turn(2)) {
+    if (cold_pid(CAIRN_FIELD_INTAKE_TEMP_C, &pid)) {
         requested++;
-        if (pid_value(PID_INTAKE_TEMP, &v)) {
+        if (pid_value(pid, &v)) {
             out->intake_temp_c = sat_i8(v);
             answered++;
         } else {
@@ -713,9 +842,8 @@ bool sensors_read_obd(cairn_obd_snapshot_t *out, const obd_batch_t *batch)
     out->pids_requested  = requested;
     out->pids_answered   = answered;
     out->pid_error_count = errors;
-    out->poll_cadence_ms = (batch != nullptr && batch->valid)
-                               ? CAIRN_OBD_BATCH_PERIOD_MS
-                               : CAIRN_OBD_PERIOD_MS;
+    out->poll_cadence_ms = have_batch ? cairn_engine_params()->obd_batch_period_ms
+                                      : cairn_engine_params()->obd_period_ms;
 
     return answered > 0;
 }
@@ -866,22 +994,22 @@ bool sensors_read_obd_extended(cairn_obd_extended_t *out,
 
     uint32_t requested = 0, answered = 0;
     int      v = 0;
+    byte     pid = 0;
 
-    if (batch != nullptr && batch->valid) {
+    const bool have_batch = (batch != nullptr && batch->valid);
+    const cairn_engine_profile_t *prof = cairn_engine_active();
+
+    /* Manifold pressure: from the batch, else one request. */
+    if (have_batch && batch_has(batch, CAIRN_FIELD_MAP_KPA)) {
         out->map_kpa = batch->map_kpa;
         if (out->map_kpa >= 250)
             CAIRN_LOGW(TAG, "MAP %u kPa — nearing PID 0x0B ceiling (255)",
                        (unsigned)out->map_kpa);
         requested++;
         answered++;
-
-        uint32_t e4 = ((uint32_t)batch->lambda_raw * 10000u) / 32768u;
-        out->lambda_e4 = (uint16_t)((e4 > 65534u) ? 65534u : e4);
+    } else if (!have_batch && field_pid(CAIRN_FIELD_MAP_KPA, &pid)) {
         requested++;
-        answered++;
-    } else {
-        requested++;
-        if (pid_value(PID_INTAKE_MAP, &v)) {
+        if (pid_value(pid, &v)) {
             out->map_kpa = (v < 0) ? 0 : (uint16_t)((v > 65534) ? 65534 : v);
             if (out->map_kpa >= 250)
                 CAIRN_LOGW(TAG, "MAP %u kPa — nearing PID 0x0B ceiling (255)",
@@ -890,25 +1018,41 @@ bool sensors_read_obd_extended(cairn_obd_extended_t *out,
         } else {
             out->map_kpa = CAIRN_U16_UNKNOWN;
         }
+    } else {
+        out->map_kpa = CAIRN_U16_UNKNOWN;
+    }
 
+    /*
+     * Equivalence ratio, stored as lambda x 10^4. The scaling and the clamp are the
+     * profile's formula over the raw 16 bits, so the batch and the single read agree
+     * by construction.
+     */
+    if (have_batch && batch_has(batch, CAIRN_FIELD_LAMBDA_E4)) {
+        out->lambda_e4 = batch->lambda_e4;
         requested++;
-        {
-            uint16_t raw = 0;
-            if (pid_raw_u16(PID_AIR_FUEL_EQUIV_RATIO, &raw)) {
-                uint32_t e4 = ((uint32_t)raw * 10000u) / 32768u;
-                out->lambda_e4 = (uint16_t)((e4 > 65534u) ? 65534u : e4);
+        answered++;
+    } else if (!have_batch && field_pid(CAIRN_FIELD_LAMBDA_E4, &pid)) {
+        requested++;
+        out->lambda_e4 = CAIRN_U16_UNKNOWN;
+        uint16_t raw = 0;
+        if (pid_raw_u16(pid, &raw)) {
+            const uint8_t in[4] = { (uint8_t)(raw >> 8), (uint8_t)(raw & 0xFF), 0, 0 };
+            int32_t e4 = 0;
+            const cairn_pid_t *lp = cairn_engine_pid_for_field(prof, CAIRN_FIELD_LAMBDA_E4);
+            if (cairn_engine_eval_pid(prof, lp, in, &e4) == CAIRN_EXPR_OK) {
+                out->lambda_e4 = (uint16_t)e4;
                 answered++;
-            } else {
-                out->lambda_e4 = CAIRN_U16_UNKNOWN;
             }
         }
+    } else {
+        out->lambda_e4 = CAIRN_U16_UNKNOWN;
     }
 
     /* Cold slot 3. MAF is largely redundant against MAP for judging a pull. */
     out->maf_cgps = CAIRN_U16_UNKNOWN;
-    if (cold_turn(3)) {
+    if (cold_pid(CAIRN_FIELD_MAF_CGPS, &pid)) {
         requested++;
-        if (pid_value(PID_MAF_FLOW, &v)) {
+        if (pid_value(pid, &v)) {
             long cg = (long)v * 100L;
             out->maf_cgps = (uint16_t)((cg > 65534L) ? 65534L : ((cg < 0) ? 0 : cg));
             answered++;
@@ -917,27 +1061,27 @@ bool sensors_read_obd_extended(cairn_obd_extended_t *out,
 
     /* Cold slot 4. Outside air; constant over a drive. */
     out->ambient_temp_c = CAIRN_I8_UNKNOWN;
-    if (cold_turn(4)) {
+    if (cold_pid(CAIRN_FIELD_AMBIENT_TEMP_C, &pid)) {
         requested++;
-        if (pid_value(PID_AMBIENT_TEMP, &v)) {
+        if (pid_value(pid, &v)) {
             out->ambient_temp_c = sat_i8(v);
             answered++;
         }
     }
 
     out->fuel_trim_short_pct = CAIRN_I8_UNKNOWN;
-    if (cold_turn(5)) {
+    if (cold_pid(CAIRN_FIELD_FUEL_TRIM_SHORT_PCT, &pid)) {
         requested++;
-        if (pid_value(PID_SHORT_TERM_FUEL_TRIM_1, &v)) {
+        if (pid_value(pid, &v)) {
             out->fuel_trim_short_pct = sat_i8(v);
             answered++;
         }
     }
 
     out->fuel_trim_long_pct = CAIRN_I8_UNKNOWN;
-    if (cold_turn(6)) {
+    if (cold_pid(CAIRN_FIELD_FUEL_TRIM_LONG_PCT, &pid)) {
         requested++;
-        if (pid_value(PID_LONG_TERM_FUEL_TRIM_1, &v)) {
+        if (pid_value(pid, &v)) {
             out->fuel_trim_long_pct = sat_i8(v);
             answered++;
         }
@@ -953,20 +1097,20 @@ bool sensors_read_obd_extended(cairn_obd_extended_t *out,
      * which the batch already covers.
      */
     out->baro_kpa = 0xFF;
-    if (cold_turn(7)) {
+    if (cold_pid(CAIRN_FIELD_BARO_KPA, &pid)) {
         requested++;
-        if (pid_value(PID_BAROMETRIC, &v)) {
+        if (pid_value(pid, &v)) {
             out->baro_kpa = (uint8_t)((v < 0) ? 0 : ((v > 254) ? 254 : v));
             answered++;
         }
     }
 
     out->abs_load_raw = CAIRN_U16_UNKNOWN;
-    if (cold_turn(8)) {
+    if (cold_pid(CAIRN_FIELD_ABS_LOAD_RAW, &pid)) {
         requested++;
         {
             uint16_t raw = 0;
-            if (pid_raw_u16(PID_ABSOLUTE_ENGINE_LOAD, &raw)) {
+            if (pid_raw_u16(pid, &raw)) {
                 out->abs_load_raw = raw;
                 answered++;
             }
@@ -975,9 +1119,9 @@ bool sensors_read_obd_extended(cairn_obd_extended_t *out,
 
     /* Cold slot 9. Fuel tank level; slow-moving but useful for economy. */
     out->fuel_level_pct = CAIRN_U8_UNKNOWN;
-    if (cold_turn(9)) {
+    if (cold_pid(CAIRN_FIELD_FUEL_LEVEL_PCT, &pid)) {
         requested++;
-        if (pid_value(PID_FUEL_LEVEL, &v)) {
+        if (pid_value(pid, &v)) {
             out->fuel_level_pct = (uint8_t)((v < 0) ? 0 : ((v > 100) ? 100 : v));
             answered++;
         }
@@ -985,11 +1129,10 @@ bool sensors_read_obd_extended(cairn_obd_extended_t *out,
 
     out->pids_requested = requested;
     out->pids_answered  = answered;
-    out->poll_cadence_ms = (batch != nullptr && batch->valid)
-                               ? CAIRN_OBD_BATCH_PERIOD_MS
-                               : CAIRN_OBD_PERIOD_MS;
+    out->poll_cadence_ms = have_batch ? cairn_engine_params()->obd_batch_period_ms
+                                      : cairn_engine_params()->obd_period_ms;
 
-    s_cold_phase = (uint8_t)((s_cold_phase + 1u) % CAIRN_OBD_COLD_SLOTS);
+    s_cold_phase = (uint8_t)((s_cold_phase + 1u) % cold_slots());
 
     return true;
 }

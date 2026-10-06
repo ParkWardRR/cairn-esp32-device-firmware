@@ -115,7 +115,8 @@ typedef struct {
     uint8_t  throttle_pct;
     int8_t   timing_deg;
     uint16_t map_kpa;
-    uint16_t lambda_raw;
+    uint16_t lambda_e4;      /* already scaled and clamped by the profile formula */
+    uint32_t present;        /* bit per cairn_field_t the active profile's batch carries */
 } obd_batch_t;
 
 bool sensors_read_obd_batch(obd_batch_t *out);

@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "cairn_format.h"
+#include "cairn_engine.h"
 #include "cairn_store.h"
 
 /* ── defaults ─────────────────────────────────────────────────────────────── */
@@ -15,7 +16,7 @@ void cairn_policy_defaults(cairn_policy_t *p)
 
     p->gnss_period_ms   = CAIRN_GNSS_PERIOD_MS;
     p->imu_window_ms    = CAIRN_IMU_WINDOW_MS;
-    p->obd_period_ms    = CAIRN_OBD_PERIOD_MS;
+    p->obd_period_ms    = cairn_engine_params()->obd_period_ms;
     p->health_period_ms = CAIRN_HEALTH_PERIOD_MS;
 
     p->start_score_threshold_e2 = CAIRN_START_SCORE_THRESHOLD_E2;

@@ -10,6 +10,8 @@
 #include "cairn_log.h"
 #include "config.h"
 #include "ble_offload.h"
+#include "cairn_devinfo.h"
+#include "device_info.h"
 #include "facts.h"
 #include "sensor_task.h"
 
@@ -140,7 +142,18 @@ class ServerCallbacks : public NimBLEServerCallbacks {
     }
 };
 
+/* DEVICE_INFO is built when it is read, so it reports the state at that moment (boot timing
+ * that was not yet known on the last read, a card that has since mounted). */
+class DeviceInfoCallbacks : public NimBLECharacteristicCallbacks {
+    void onRead(NimBLECharacteristic *chr, NimBLEConnInfo &info) override {
+        static uint8_t buf[CAIRN_DI_MAX_LEN];
+        size_t n = device_info_build(buf, sizeof buf);
+        if (n > 0) chr->setValue(buf, n);
+    }
+};
+
 static ServerCallbacks    s_server_cbs;
+static DeviceInfoCallbacks s_device_info_cbs;
 static GnssFixCallbacks   s_gnss_fix_cbs;
 
 void ble_companion_clear_bonds(void)
@@ -197,11 +210,27 @@ bool ble_companion_begin(void)
 
     /* Capabilities: bit 2 = bundle offload (contracts/ble/v1/offload.md). Advertised only
      * if the offload task actually started. */
+    uint32_t caps = CAIRN_CAP_PHONE_GNSS;
     if (ble_offload_register(svc)) {
         ver[1] |= 0x04;
+        caps |= CAIRN_CAP_OFFLOAD;
     } else {
         CAIRN_LOGE(TAG, "bundle offload unavailable");
     }
+
+    /* Device information (contracts/ble/v1/device-info.md): capability bit 3, and the
+     * characteristic itself. The uplink event, instruction and home-trigger characteristics
+     * (0041 to 0044) are not created: nothing sends or accepts them yet, and a capability bit
+     * for something absent would be a lie the app is told to trust. */
+    NimBLECharacteristic *chr_info = svc->createCharacteristic(
+        "A8E30040-4F5B-11EF-A017-325096B39F47",
+        NIMBLE_PROPERTY::READ |
+        NIMBLE_PROPERTY::READ_ENC |
+        NIMBLE_PROPERTY::READ_AUTHEN);
+    chr_info->setCallbacks(&s_device_info_cbs);
+    ver[1] |= 0x08;
+    device_info_set_capabilities(caps);
+
     chr_version->setValue(ver, sizeof(ver));
 
     s_server->start();

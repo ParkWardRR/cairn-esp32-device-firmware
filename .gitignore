@@ -18,3 +18,5 @@ emulator/output/
 
 # The server checkout the scheduled interop run fetches
 /.interop/
+/build/
+/tools/enginegen/target/

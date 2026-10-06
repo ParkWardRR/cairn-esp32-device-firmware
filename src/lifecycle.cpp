@@ -6,9 +6,12 @@
 #include <esp_timer.h>
 
 #include "board_config.h"
+#include "boot_timing.h"
+#include "device_info.h"
 #include "cairn_log.h"
 #include "ble_companion.h"
 #include "ble_offload.h"
+#include "cairn_engine.h"
 #include "cairn_fs.h"
 #include "cairn_kv.h"
 #include "cairn_power.h"
@@ -167,6 +170,9 @@ static void emit_capture_record(Lifecycle *lc, uint8_t record_type,
     uint16_t flags = frame_flags(lc);
     uint32_t now = millis();
 
+    /* Pre-roll or capture, the sample has entered the pipeline: that is T_capture. */
+    boot_timing_mark(CAIRN_BOOT_FIRST_SAMPLE);
+
     if (lc->capture == CaptureState::Idle || lc->capture == CaptureState::Pretrip) {
         cairn_preroll_push(&lc->preroll, record_type, schema_version, flags, now,
                            payload, payload_len);
@@ -269,6 +275,8 @@ bool lifecycle_begin(Lifecycle *lc)
         CAIRN_LOGE(TAG, "no storage key; refusing to capture data nobody could read");
         return false;
     }
+    device_info_set_identity(lc->device_id, lc->key_public, lc->storage.storage_key_version,
+                             lc->storage.assigned);
     cairn_new_boot_id(lc->boot_id);
     cairn_log_set_context(lc->boot_id);
 
@@ -284,12 +292,15 @@ bool lifecycle_begin(Lifecycle *lc)
      */
     cairn_store_resume_interrupted_seals();
     cairn_prune_resume_interrupted();
+    boot_timing_mark(CAIRN_BOOT_STORE_READY);
 
     if (!cairn_capture_open_or_resume(&lc->cap, lc->device_id, lc->boot_id,
                                       &lc->storage)) {
         CAIRN_LOGE(TAG, "cannot open a capture bundle");
         return false;
     }
+
+    boot_timing_mark(CAIRN_BOOT_CAPTURE_OPEN);
 
     cairn_policy_defaults(&lc->policy);
     cairn_preroll_reset(&lc->preroll);
@@ -327,6 +338,8 @@ bool lifecycle_begin(Lifecycle *lc)
 
     if (!ble_companion_begin()) {
         CAIRN_LOGW(TAG, "BLE companion init failed; phone GPS unavailable");
+    } else {
+        boot_timing_mark(CAIRN_BOOT_BLE_ADVERTISING);
     }
 
     CAIRN_LOGI(TAG, "lifecycle up: boot %u, wake cause %d, sensors obd=%d imu=%d gnss=%d",
@@ -429,7 +442,7 @@ static void enforce_bus_silence(Lifecycle *lc)
 
     /* Dwell tracking for the supply rail. Local measurement; no bus traffic. */
     bool rail_up = (lc->last_battery_mv != CAIRN_U16_UNKNOWN &&
-                    lc->last_battery_mv >= CAIRN_ENGINE_ON_MV);
+                    lc->last_battery_mv >= cairn_engine_params()->engine_on_mv);
     if (rail_up) {
         if (lc->voltage_high_since_ms == 0) lc->voltage_high_since_ms = now;
     } else {
@@ -530,6 +543,7 @@ static void on_gnss_sample(Lifecycle *lc, const fact_t *f)
     } else {
         close_gnss_gap(lc, lc->sensors.gnss ? CAIRN_GAP_NO_FIX
                                             : CAIRN_GAP_POWERED_DOWN);
+        if (f->data.gnss.fix_type > 0) boot_timing_mark(CAIRN_BOOT_GNSS_FIRST_FIX);
         lc->last_gnss_internal        = f->data.gnss;
         lc->have_recent_gnss_internal = true;
         lc->internal_gnss_last_ms     = f->monotonic_ms;
@@ -589,6 +603,7 @@ static void on_obd_snapshot(Lifecycle *lc, const fact_t *f)
 {
     lc->last_obd = f->data.obd;
     lc->have_recent_obd = true;
+    boot_timing_mark(CAIRN_BOOT_OBD_FIRST_ANSWER);
 
     uint8_t payload[24];
     cairn_encode_obd_snapshot(&f->data.obd, payload);
@@ -965,7 +980,7 @@ static void maybe_standby(Lifecycle *lc)
      * sleeping with it open.
      */
     if (!e.trip_active && e.capture_open &&
-        e.idle_ms >= CAIRN_STANDBY_IDLE_MS) {
+        e.idle_ms >= cairn_engine_params()->standby_idle_ms) {
         CAIRN_LOGI(TAG, "sealing before standby");
         seal_and_reopen(lc, 3);
         return;
@@ -1111,6 +1126,7 @@ static void refresh_pending(Lifecycle *lc)
                    (unsigned)pending, (unsigned long long)bytes);
     }
     lc->pending_bundles = pending;
+    device_info_set_pending(pending);
 }
 
 /* ── tick ─────────────────────────────────────────────────────────────────── */
@@ -1118,6 +1134,20 @@ static void refresh_pending(Lifecycle *lc)
 void lifecycle_tick(Lifecycle *lc)
 {
     uint32_t now = millis();
+
+    /* Once, when both T_capture and T_ble are known. */
+    {
+        static bool logged = false;
+        if (!logged) {
+            cairn_boottime_t bt;
+            boot_timing_snapshot(&bt);
+            if (cairn_boottime_reached(&bt, CAIRN_BOOT_FIRST_SAMPLE) &&
+                cairn_boottime_reached(&bt, CAIRN_BOOT_BLE_ADVERTISING)) {
+                boot_timing_log();
+                logged = true;
+            }
+        }
+    }
 
     /*
      * Drain everything waiting. The controller is the only consumer, so the
