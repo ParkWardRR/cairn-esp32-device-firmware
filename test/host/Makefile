@@ -58,6 +58,10 @@ PROV_SRC        := $(FORMAT_SRC) $(wildcard $(PROV_DIR)/*.c) $(FS_DIR)/cairn_kv_
 OFFLOAD_SRC     := $(FORMAT_SRC) $(STORE_SRC) $(FS_SRC) $(APP_SRC) $(OFFLOAD_DIR)/cairn_offload.c \
                    log_host.c platform_host.c offload_test.c
 
+# A dongle on a pipe, for the Go end-to-end test (server/internal/offloadclient).
+OFFLOAD_SIM_SRC := $(FORMAT_SRC) $(STORE_SRC) $(FS_SRC) $(APP_SRC) $(OFFLOAD_DIR)/cairn_offload.c \
+                   log_host.c platform_host.c offload_sim.c
+
 # -Wconversion is deliberately absent but the rest is strict: this code does a
 # great deal of width narrowing between the wire format and C types, and a
 # silent truncation there corrupts a bundle rather than crashing.
@@ -78,7 +82,7 @@ SAN := -fsanitize=address,undefined -fno-omit-frame-pointer
 
 BUILD := build
 
-.PHONY: all run asan clean conformance faults ble-vectors mtprobe prov offload
+.PHONY: all run asan clean conformance faults ble-vectors mtprobe prov offload offload-sim
 
 all: run
 
@@ -114,6 +118,11 @@ $(BUILD)/offload: $(OFFLOAD_SRC) $(HEADERS) | $(BUILD)
 
 offload: $(BUILD)/offload
 	$(BUILD)/offload
+
+$(BUILD)/offload-sim: $(OFFLOAD_SIM_SRC) $(HEADERS) | $(BUILD)
+	$(CC) $(CFLAGS) $(OFFLOAD_SIM_SRC) -o $@
+
+offload-sim: $(BUILD)/offload-sim
 
 $(BUILD)/mtprobe: $(SRC_DIR)/mtprobe_parse.c $(HEADERS) mtprobe_parse_test.c | $(BUILD)
 	$(CC) $(CFLAGS) $(SRC_DIR)/mtprobe_parse.c mtprobe_parse_test.c -o $@
