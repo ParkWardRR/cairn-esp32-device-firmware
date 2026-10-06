@@ -1,0 +1,30 @@
+# BMW B58 profile.  DRAFT schema cairn.engine/v1-draft (see engines/SPEC.draft.md).
+#
+# A STUB. The repository documents nothing about the B58 beyond the fact that the
+# owner has one (an M240i; issue #13). The research notes cover the F3x 428i and
+# the N20; an M240i is an F22 and nothing here says its PID support, formulas,
+# cadence or sleep behaviour match. So everything else is `unknown` rather than
+# copied from the N20, and the generator refuses a stub that claims anything.
+#
+# Filling this in needs a drive with the pidtest build (CAIRN_PIDTEST) against the
+# car: its raw replies are what turn an `unknown` into a formula.
+schema: cairn.engine/v1-draft
+engine_id: bmw-b58
+version: 1
+name: BMW B58 (M240i)
+status: stub
+sources:
+  - "ParkWardRR/cairn-esp32-device-firmware#13 (the owner's cars: 428i and M240i)"
+
+applies_to:
+  make: BMW
+  models: ["M240i"]
+  years: unknown
+  vin_patterns: unknown
+
+fuel: unknown
+obd: unknown
+pids: unknown
+cadence: unknown
+wake_sleep: unknown
+supply: unknown

@@ -1,0 +1,15 @@
+# expect-error: data byte
+schema: cairn.engine/v1-draft
+engine_id: bad-formula-byte
+version: 1
+name: Test
+status: derived
+sources: [test fixture]
+applies_to: { make: Test, models: [m], years: unknown, vin_patterns: unknown }
+fuel: unknown
+obd: unknown
+wake_sleep: unknown
+supply: unknown
+cadence: { obd_period_ms: 1000, obd_batch_period_ms: 200, cold_slots: 4 }
+pids:
+  - { id: 0x0D, name: speed, field: speed_kph, unit: u, bytes: 1, tier: hot, formula: "B", range: [0, 255], log: true }

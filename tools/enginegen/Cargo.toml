@@ -1,0 +1,28 @@
+[package]
+name = "enginegen"
+version = "0.1.0"
+edition = "2021"
+description = "Validates engines/*.yaml and emits the C tables and build identity the firmware compiles in"
+publish = false
+
+[lib]
+name = "enginegen"
+path = "src/lib.rs"
+
+[[bin]]
+name = "enginegen"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+# serde_yaml is archived upstream but is stable, small and rejects duplicate keys, which
+# is what this needs. Swapping it touches one function (profile::parse_yaml).
+serde_yaml = "0.9"
+sha2 = "0.10"
+
+[dev-dependencies]
+jsonschema = { version = "0.18", default-features = false }
+serde_json = "1"
+
+[profile.release]
+opt-level = 2

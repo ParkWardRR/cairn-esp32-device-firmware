@@ -1,0 +1,113 @@
+# BMW N20/N26 profile.  DRAFT schema cairn.engine/v1-draft (see engines/SPEC.draft.md).
+#
+# Provenance: every value below was extracted from what the firmware hard-codes
+# today (status: derived), not measured afresh and not taken from a datasheet. The
+# host test test/host/engine_test.c proves each number and each formula against
+# the original code paths, exhaustively over every possible input byte.
+#
+# "unknown" is an explicit statement that nothing is claimed. A section left out
+# is a validation error, so a gap cannot hide as an omission.
+schema: cairn.engine/v1-draft
+engine_id: bmw-n20
+version: 1
+name: BMW N20/N26 (F32 428i)
+status: derived
+sources:
+  - src/sensors.cpp (batch request, cold-channel rotation, stored-value narrowing)
+  - vendored FreematicsPlus COBD::normalizeData (the sequential-read conversions)
+  - include/config.h (cadence and engine-on thresholds)
+  - lib/cairn_power/cairn_power.c (standby and drive-confirmation decisions)
+  - src/pidtest.cpp (the PID validation probe list)
+  - research/research_notes/BMW N20 OBD PID support/pid_formulas_and_support.md
+  - research/research_notes/Freematics parked drain BMW F32/bmw_obd_bus_sleep.md
+
+applies_to:
+  make: BMW
+  models: ["428i (F32)"]   # research note title: "BMW F32 428i (N20/N26, 2014-2016)"
+  years: { from: 2014, to: 2016 }
+  vin_patterns: unknown     # nothing in the repository says how an N20 VIN reads
+
+fuel:
+  type: gasoline            # pidtest.cpp: stoichiometry discussed as gasoline vs E85
+  blend: unknown            # whether this ECU reports ethanol is unproven (pidtest.cpp)
+
+obd:
+  bus: d-can                # bmw_obd_bus_sleep.md: D-CAN on OBD pins 6 and 14
+  bitrate_kbps: 500
+  addressing: unknown
+
+# Hot PIDs share one multi-PID Mode 01 request, in the order listed, every cycle
+# (confirmed on the N20 DME, 2026-10-03 drive). Cold PIDs are requested one at a
+# time, one cold slot per cycle. A formula yields the value exactly as the capture
+# record stores it, including the saturation sat_i8() applies, so the table is a
+# statement about the data on the card and not about an intermediate.
+pids:
+  - { id: 0x0C, name: engine_speed,        field: rpm,                 unit: rpm,  bytes: 2, tier: hot, formula: "(A*256+B)/4",                  range: [0, 16383],  log: true }
+  - { id: 0x0D, name: vehicle_speed,       field: speed_kph,           unit: km/h, bytes: 1, tier: hot, formula: "A",                            range: [0, 255],    log: true }
+  - { id: 0x11, name: throttle_position,   field: throttle_pct,        unit: "%",  bytes: 1, tier: hot, formula: "A*100/255",                    range: [0, 100],    log: true }
+  - { id: 0x0E, name: timing_advance,      field: timing_advance_deg,  unit: deg,  bytes: 1, tier: hot, formula: "clamp(A/2-64, -127, 127)",     range: [-64, 63],   log: true }
+  - { id: 0x0B, name: intake_map,          field: map_kpa,             unit: kPa,  bytes: 1, tier: hot, formula: "A",                            range: [0, 255],    log: true }
+  # Equivalence ratio, stored as lambda x 10^4 (SAE J1979: 2/65536 per count, which is 1/32768).
+  - { id: 0x44, name: equivalence_ratio,   field: lambda_e4,           unit: lambda, scale: -4, bytes: 2, tier: hot, formula: "clamp((A*256+B)*10000/32768, 0, 65534)", range: [0, 19999], log: true }
+
+  - { id: 0x04, name: engine_load,         field: engine_load_pct,     unit: "%",  bytes: 1, tier: cold, cold_slot: 0, formula: "A*100/255",              range: [0, 100],    log: true }
+  - { id: 0x05, name: coolant_temp,        field: coolant_temp_c,      unit: degC, bytes: 1, tier: cold, cold_slot: 1, formula: "clamp(A-40, -127, 127)", range: [-40, 127],  log: true }
+  - { id: 0x0F, name: intake_air_temp,     field: intake_temp_c,       unit: degC, bytes: 1, tier: cold, cold_slot: 2, formula: "clamp(A-40, -127, 127)", range: [-40, 127],  log: true }
+  # The library divides to whole g/s first; the record stores centigrams per second.
+  - { id: 0x10, name: maf_flow,            field: maf_cgps,           unit: g/s,  scale: -2, bytes: 2, tier: cold, cold_slot: 3, formula: "((A*256+B)/100)*100", range: [0, 65500], log: true }
+  - { id: 0x46, name: ambient_air_temp,    field: ambient_temp_c,      unit: degC, bytes: 1, tier: cold, cold_slot: 4, formula: "clamp(A-40, -127, 127)", range: [-40, 127],  log: true }
+  - { id: 0x06, name: fuel_trim_short_b1,  field: fuel_trim_short_pct, unit: "%",  bytes: 1, tier: cold, cold_slot: 5, formula: "(A-128)*100/128",        range: [-100, 99],  log: true }
+  - { id: 0x07, name: fuel_trim_long_b1,   field: fuel_trim_long_pct,  unit: "%",  bytes: 1, tier: cold, cold_slot: 6, formula: "(A-128)*100/128",        range: [-100, 99],  log: true }
+  - { id: 0x33, name: barometric_pressure, field: baro_kpa,            unit: kPa,  bytes: 1, tier: cold, cold_slot: 7, formula: "min(A, 254)",            range: [0, 254],    log: true }
+  # Captured raw on purpose: the library mishandles this PID, so the scaling
+  # (100/255 of the 16-bit value) is applied at decode (sensors.cpp, pid_raw_u16).
+  - { id: 0x43, name: absolute_load,       field: abs_load_raw,        unit: raw,  bytes: 2, tier: cold, cold_slot: 8, formula: "A*256+B",                range: [0, 65535],  log: true }
+  - { id: 0x2F, name: fuel_level,          field: fuel_level_pct,      unit: "%",  bytes: 1, tier: cold, cold_slot: 9, formula: "A*100/255",              range: [0, 100],    log: true }
+
+cadence:
+  obd_period_ms: 1200          # CAIRN_OBD_PERIOD_MS: the sequential-read period
+  obd_batch_period_ms: 200     # CAIRN_OBD_BATCH_PERIOD_MS: the period when the multi-PID batch answers
+  cold_slots: 10               # CAIRN_OBD_COLD_SLOTS
+  measured:                    # config.h / sensors.cpp comments, 2026-10-03 drive; informational
+    single_request_ms: [110, 140]
+    batch_6pid_ms: 56
+
+wake_sleep:
+  engine_on_mv: 13200                # CAIRN_ENGINE_ON_MV: resting battery ~12.4 V, alternator well above 13 V
+  standby_idle_ms: 300000            # CAIRN_STANDBY_IDLE_MS
+  standby_heartbeat_ms: 21600000     # CAIRN_STANDBY_HEARTBEAT_MS
+  drive_voltage_dwell_ms: 15000      # CAIRN_DRIVE_VOLTAGE_DWELL_MS
+  drive_motion_dwell_ms: 10000       # CAIRN_DRIVE_MOTION_DWELL_MS
+  drive_both_dwell_ms: 2000          # CAIRN_DRIVE_BOTH_DWELL_MS
+  # Documented, not read by the firmware: Boardnet 2020 (F-series) first sleep phase is
+  # 8 minutes (bmw_obd_bus_sleep.md, Q3). The 5 minute standby_idle_ms sits inside it.
+  bus_first_sleep_phase_ms: 480000
+
+supply:
+  plausible_mv: [9000, 18000]              # sensors_battery_mv(): outside this is the link, not the car
+  alternator_measured_mv: [14490, 14910]   # 2026-10-03 drive; informational
+
+# What src/pidtest.cpp asks of the ECU in the validation build. std_bytes is the
+# data length SAE J1979 specifies, used to spot a library helper reading half a value.
+probes:
+  - { id: 0x04, name: ENGINE_LOAD,     std_bytes: 1 }
+  - { id: 0x05, name: COOLANT_TEMP,    std_bytes: 1 }
+  - { id: 0x0A, name: FUEL_PRESSURE,   std_bytes: 1 }
+  - { id: 0x0C, name: RPM,             std_bytes: 2 }
+  - { id: 0x0D, name: SPEED,           std_bytes: 1 }
+  - { id: 0x0E, name: TIMING_ADVANCE,  std_bytes: 1 }
+  - { id: 0x0F, name: INTAKE_TEMP,     std_bytes: 1 }
+  - { id: 0x11, name: THROTTLE,        std_bytes: 1 }
+  - { id: 0x0B, name: INTAKE_MAP,      std_bytes: 1 }
+  - { id: 0x33, name: BAROMETRIC,      std_bytes: 1 }
+  - { id: 0x10, name: MAF_FLOW,        std_bytes: 2 }
+  - { id: 0x44, name: EQUIV_RATIO,     std_bytes: 2 }
+  - { id: 0x43, name: ABSOLUTE_LOAD,   std_bytes: 2 }
+  - { id: 0x46, name: AMBIENT_TEMP,    std_bytes: 1 }
+  - { id: 0x06, name: FUEL_TRIM_SHORT, std_bytes: 1 }
+  - { id: 0x07, name: FUEL_TRIM_LONG,  std_bytes: 1 }
+  - { id: 0x51, name: FUEL_TYPE,       std_bytes: 1 }
+  - { id: 0x52, name: ETHANOL_PCT,     std_bytes: 1 }
+  - { id: 0x4F, name: MAX_VALUES,      std_bytes: 4 }
+  - { id: 0x87, name: IMAP_WIDE,       std_bytes: 5 }
+  - { id: 0x70, name: BOOST_CONTROL,   std_bytes: 5 }
