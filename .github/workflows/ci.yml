@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Self-hosted jobs run only for pushes and for pull requests from branches of THIS
+# repository (see tests/check-runners.sh).
+jobs:
+  runner-policy:
+    runs-on: [self-hosted, cairn]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Every job is on the self-hosted runner
+        run: tests/check-runners.sh
+
+      - name: The policy check can actually fail
+        run: tests/check-runners-selftest.sh
+
+  # The firmware's own C code, compiled natively. Two suites:
+  #
+  #   conformance  lib/cairn_format against the pinned vectors. A disagreement means a
+  #                device writing bundles the server cannot recover, and "it compiled
+  #                for ESP32" would not have caught it.
+  #   faults       lib/cairn_store, lib/cairn_prune and the pre-roll over a POSIX
+  #                filesystem, with files torn mid-frame and receipts forged.
+  firmware-conformance:
+    runs-on: [self-hosted, cairn]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch the pinned contracts
+        run: scripts/fetch-contracts.sh
+
+      - name: Format vectors and the storage property matrix
+        run: make -C test/host
+
+      # Undefined behaviour in the scan path would be a parser reading past a torn
+      # segment, exactly the case the format exists to handle safely.
+      - name: Under AddressSanitizer and UBSan
+        run: make -C test/host asan
+
+  # Compiling for the actual target, which the host suites do not do. Both
+  # configurations are built because they are different code paths: the OTA install
+  # path is behind CAIRN_OTA_AVAILABLE and is otherwise never compiled.
+  firmware-build:
+    runs-on: [self-hosted, cairn]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PlatformIO
+        run: |
+          python3 -m pip install --user --upgrade platformio
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # The template verbatim. Its placeholder values only affect runtime behaviour
+      # (an all-zero receipt key refuses to prune), not what compiles.
+      - name: Provide build-time configuration
+        run: cp include/secrets.h.example include/secrets.h
+
+      # Capped to one job: the runner is memory-constrained and an uncapped parallel
+      # build has wedged it before.
+      - name: Build the capture image
+        run: pio run -e cairn -j 1
+
+      - name: Build the self-test image
+        run: pio run -e cairn-selftest -j 1
+
+      - name: Build with OTA enabled
+        env:
+          PLATFORMIO_BUILD_FLAGS: >-
+            -DCAIRN_UPDATE_KEY_HEX='"0000000000000000000000000000000000000000000000000000000000000001"'
+        run: pio run -e cairn -j 1
+
+  # The emulator's independent Rust implementation of bundle format v3, checked against
+  # the same pinned vectors the Go reference and the C implementation pass.
+  emulator:
+    runs-on: [self-hosted, cairn]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch the pinned contracts
+        run: scripts/fetch-contracts.sh
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Unit tests
+        working-directory: emulator
+        run: cargo test
+
+      - name: Conformance against the pinned vectors
+        working-directory: emulator
+        run: cargo run --release -- conformance
+
+      - name: Build the release binary
+        working-directory: emulator
+        run: cargo build --release && ./target/release/cairn-emulator --help
