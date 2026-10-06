@@ -283,6 +283,7 @@ bool lifecycle_begin(Lifecycle *lc)
     if (!sensors_begin(&lc->sensors)) {
         CAIRN_LOGE(TAG, "coprocessor unavailable; capture will be degraded");
     }
+    boot_timing_mark(CAIRN_BOOT_SENSORS_READY);
 
     /*
      * Order matters at boot. Interrupted seals are finished first so a bundle

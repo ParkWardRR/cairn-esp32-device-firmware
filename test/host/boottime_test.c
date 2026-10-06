@@ -86,6 +86,27 @@ static void test_report(void)
     CHECK("a zero-length buffer is safe", cairn_boottime_format(&b, NULL, 0) == need);
 }
 
+/* A real boot, measured on the dongle: BLE advertised slightly BEFORE the first sample,
+ * the reverse of the enum order. The report used to print the second with a delta of about
+ * four billion. */
+static void test_report_is_chronological(void)
+{
+    cairn_boottime_t b;
+    cairn_boottime_init(&b, CAIRN_RESET_POWER_ON, 0, 530439u);
+    cairn_boottime_mark(&b, CAIRN_BOOT_SD_MOUNTED,      540003u);
+    cairn_boottime_mark(&b, CAIRN_BOOT_CAPTURE_OPEN,  53999897u);
+    cairn_boottime_mark(&b, CAIRN_BOOT_BLE_ADVERTISING, 54918456u);
+    cairn_boottime_mark(&b, CAIRN_BOOT_FIRST_SAMPLE,  54929151u);
+
+    char text[1024];
+    cairn_boottime_format(&b, text, sizeof text);
+    const char *ble = strstr(text, "ble_advertising");
+    const char *sample = strstr(text, "first_sample");
+    CHECK("stages are listed in the order they were reached", ble && sample && ble < sample);
+    CHECK("no delta is a wrapped negative", strstr(text, "(+42949") == NULL);
+    CHECK("the delta after BLE is the real gap to the first sample", strstr(text, "(+10695)") != NULL);
+}
+
 static void test_budget(void)
 {
     cairn_boottime_t b;
@@ -157,6 +178,7 @@ int main(void)
     test_first_mark_wins();
     test_clock_wrap();
     test_report();
+    test_report_is_chronological();
     test_budget();
     test_wire();
 
