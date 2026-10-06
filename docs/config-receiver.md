@@ -41,6 +41,14 @@ the settings, the counter, a state hash (SHA-256 over canonical settings and cou
 whether credentials are accepted, and the refusal counts. Rollback restores the previous
 configuration but keeps the counter, so a rolled-back message cannot be replayed.
 
+## How a message reaches it
+
+At a BLE check-in the phone writes an `INSTRUCTION` of type `CONFIG` and `lib/cairn_checkin`
+(`docs/check-in.md`) hands the body to `cairn_config_receive`, mapping a credential refusal to
+`ENCRYPTION_REQUIRED`. Both hand-offs are host-tested; nothing is wired on the device yet.
+The body is capped at 440 bytes by `checkin.md`, which leaves about 240 bytes of payload after
+this envelope: too little for a full list of Wi-Fi networks in one message.
+
 ## Open points the contract has to settle
 
 - **How the server learns the device's configuration public key.** The enrolment blob carries

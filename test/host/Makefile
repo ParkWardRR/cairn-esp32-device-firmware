@@ -38,6 +38,7 @@ BOOTTIME_DIR := ../../lib/cairn_boottime
 UPLINK_DIR  := ../../lib/cairn_uplink
 CONFIG_DIR  := ../../lib/cairn_config
 DEVINFO_DIR := ../../lib/cairn_devinfo
+CHECKIN_DIR := ../../lib/cairn_checkin
 
 FORMAT_SRC := $(wildcard $(FORMAT_DIR)/*.c)
 STORE_SRC  := $(wildcard $(STORE_DIR)/*.c)
@@ -91,14 +92,14 @@ CFLAGS  ?= -std=c11 -O1 -g -D_DEFAULT_SOURCE \
            -Wall -Wextra -Werror -Wno-format-truncation \
            -Wshadow -Wpointer-arith -Wcast-qual -Wstrict-prototypes \
            -Wmissing-prototypes -Wno-unused-parameter \
-           -I$(FORMAT_DIR) -I$(STORE_DIR) -I$(FS_DIR) -I$(LOG_DIR) -I$(PROV_DIR) -I$(INCLUDE_DIR) -I$(SRC_DIR) -I$(OTA_DIR) -I$(POWER_DIR) -I$(OFFLOAD_DIR) -I$(BOOTTIME_DIR) -I$(UPLINK_DIR) -I$(CONFIG_DIR) -I$(DEVINFO_DIR) -I.
+           -I$(FORMAT_DIR) -I$(STORE_DIR) -I$(FS_DIR) -I$(LOG_DIR) -I$(PROV_DIR) -I$(INCLUDE_DIR) -I$(SRC_DIR) -I$(OTA_DIR) -I$(POWER_DIR) -I$(OFFLOAD_DIR) -I$(BOOTTIME_DIR) -I$(UPLINK_DIR) -I$(CONFIG_DIR) -I$(DEVINFO_DIR) -I$(CHECKIN_DIR) -I.
 
 # Every header the sources can include. Without this a change to a shared header
 # (config.h, cairn_platform.h, policy.h) leaves a stale binary in build/ and a
 # result that describes yesterday's code — which already produced one false
 # failure and could as easily produce a false pass.
 HEADERS := $(wildcard $(OFFLOAD_DIR)/*.h $(PROV_DIR)/*.h $(FORMAT_DIR)/*.h $(STORE_DIR)/*.h $(FS_DIR)/*.h $(LOG_DIR)/*.h \
-                      $(INCLUDE_DIR)/*.h $(SRC_DIR)/*.h $(OTA_DIR)/*.h $(POWER_DIR)/*.h $(BOOTTIME_DIR)/*.h $(UPLINK_DIR)/*.h $(CONFIG_DIR)/*.h $(DEVINFO_DIR)/*.h *.h)
+                      $(INCLUDE_DIR)/*.h $(SRC_DIR)/*.h $(OTA_DIR)/*.h $(POWER_DIR)/*.h $(BOOTTIME_DIR)/*.h $(UPLINK_DIR)/*.h $(CONFIG_DIR)/*.h $(DEVINFO_DIR)/*.h $(CHECKIN_DIR)/*.h *.h)
 
 SAN := -fsanitize=address,undefined -fno-omit-frame-pointer
 
@@ -182,7 +183,17 @@ DEVINFO_VECTORS ?= $(CAIRN_CONTRACTS)/ble/v1/vectors/device-info/vectors.json
 DEVINFO_SRC     := $(DEVINFO_DIR)/cairn_devinfo.c minijson.c devinfo_test.c
 DEVINFO_CFLAGS  := $(CFLAGS) -DMJ_MAX_NODES=2500 -DMJ_MAX_STR=1100
 
-.PHONY: devinfo
+.PHONY: devinfo checkin
+
+# The check-in vectors (instructions and the home trigger, ble/v1/checkin.md) are in the same
+# file as the device-info ones.
+CHECKIN_SRC := $(FORMAT_SRC) $(CHECKIN_DIR)/cairn_checkin.c minijson.c checkin_test.c
+
+$(BUILD)/checkin: $(CHECKIN_SRC) $(HEADERS) | $(BUILD)
+	$(CC) $(DEVINFO_CFLAGS) $(CHECKIN_SRC) -o $@
+
+checkin: $(BUILD)/checkin
+	$(BUILD)/checkin $(DEVINFO_VECTORS)
 
 $(BUILD)/devinfo: $(DEVINFO_SRC) $(HEADERS) | $(BUILD)
 	$(CC) $(DEVINFO_CFLAGS) $(DEVINFO_SRC) -o $@
@@ -191,7 +202,7 @@ devinfo: $(BUILD)/devinfo
 	$(BUILD)/devinfo $(DEVINFO_VECTORS)
 
 ifneq ($(wildcard $(DEVINFO_VECTORS)),)
-run: devinfo
+run: devinfo checkin
 else
 $(info device-info vectors not in this contracts pin (needs contracts-v0.2.0): devinfo row skipped)
 endif
@@ -220,6 +231,7 @@ asan: | $(BUILD)
 	$(CC) $(CFLAGS) $(SAN) $(CONFIG_SRC) -o $(BUILD)/config-asan
 	$(BUILD)/config-asan
 	$(if $(wildcard $(DEVINFO_VECTORS)),$(CC) $(DEVINFO_CFLAGS) $(SAN) $(DEVINFO_SRC) -o $(BUILD)/devinfo-asan && $(BUILD)/devinfo-asan $(DEVINFO_VECTORS))
+	$(if $(wildcard $(DEVINFO_VECTORS)),$(CC) $(DEVINFO_CFLAGS) $(SAN) $(CHECKIN_SRC) -o $(BUILD)/checkin-asan && $(BUILD)/checkin-asan $(DEVINFO_VECTORS))
 	$(MAKE) asan-lte
 
 clean:
