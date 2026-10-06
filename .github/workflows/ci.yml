@@ -104,6 +104,10 @@ jobs:
         working-directory: emulator
         run: cargo run --release -- conformance
 
+      - name: Local durability rows (no server needed)
+        working-directory: emulator
+        run: cargo run --release -- fault-matrix --work-dir target/fault-matrix --verbose
+
       - name: Build the release binary
         working-directory: emulator
         run: cargo build --release && ./target/release/cairn-emulator --help

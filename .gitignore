@@ -15,3 +15,6 @@ third_party/freematics-base/.pio/
 test/host/build/
 emulator/target/
 emulator/output/
+
+# The server checkout the scheduled interop run fetches
+/.interop/

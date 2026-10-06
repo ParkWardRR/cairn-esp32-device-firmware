@@ -1,0 +1,39 @@
+name: Interop (latest server)
+
+# DIAGNOSTIC, not a gate. The vehicle server's CI already runs the same script against a
+# firmware revision it pins (that one is required there). This runs it the other way round
+# each week: THIS firmware against the server's current main, so a server change that the
+# pin has not caught up with shows up here before a release does.
+#
+# A red run here means "look", not "revert": decide whether the server or the firmware
+# should move, and bump the server's interop.lock when the firmware is the one that did.
+on:
+  schedule:
+    - cron: '23 9 * * 1'
+  workflow_dispatch:
+
+jobs:
+  interop:
+    runs-on: [self-hosted, cairn]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch the pinned contracts
+        run: scripts/fetch-contracts.sh
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: The server's current main
+        run: git clone --quiet --depth 1 https://github.com/ParkWardRR/cairn-vehicle-server.git .interop/server
+
+      - name: This firmware against it
+        working-directory: .interop/server
+        run: INTEROP_FIRMWARE_DIR="${{ github.workspace }}" tests/interop/run.sh
