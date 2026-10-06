@@ -105,12 +105,23 @@ INVITE="$(printf '%s\n' "$INVITE_OUT" | tr -d ' ' | grep -E '^[0-9a-f]{4}(-[0-9a
   -keystore-master "$MASTER" -receipt-key "$DATA/receipt.seed" \
   -app-addr "127.0.0.1:$APP_PORT" >"$WORK/server.log" 2>&1 &
 SERVER_PID=$!
+# Both listeners must answer, and the server process must still be alive. Probing only the
+# legacy port let a server that failed to bind the app port (another server already listening
+# there) pass this check through the OTHER server, then fail later with a bare "connection
+# refused" from the emulator and nothing pointing at the cause.
+up=0
 for _ in $(seq 1 50); do
-  curl -sf "http://127.0.0.1:$PORT/api/v2/health" >/dev/null &&
-    curl -s -o /dev/null "http://127.0.0.1:$APP_PORT/v1/health" && break
+  kill -0 "$SERVER_PID" 2>/dev/null || break
+  if curl -sf "http://127.0.0.1:$PORT/api/v2/health" >/dev/null &&
+     curl -sf "http://127.0.0.1:$APP_PORT/v1/health" >/dev/null; then up=1; break; fi
   sleep 0.2
 done
-curl -sf "http://127.0.0.1:$PORT/api/v2/health" >/dev/null || { echo "the server did not start:" >&2; tail -20 "$WORK/server.log" >&2; exit 1; }
+if [ "$up" != 1 ]; then
+  echo "the server did not come up on both ports ($PORT legacy, $APP_PORT app)." >&2
+  kill -0 "$SERVER_PID" 2>/dev/null || echo "its process exited; if another server holds one of the ports, set INTEROP_PORT and INTEROP_APP_PORT." >&2
+  tail -20 "$WORK/server.log" >&2
+  exit 1
+fi
 
 args=(fault-matrix --work-dir "$WORK/fault-matrix-relay"
   --root-key "$ROOT_HEX" --vehicle-id "$VEHICLE" --assignment-id "$ASSIGNMENT"
