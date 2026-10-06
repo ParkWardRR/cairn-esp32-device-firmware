@@ -34,6 +34,24 @@ jobs:
       - name: The server's current main
         run: git clone --quiet --depth 1 https://github.com/ParkWardRR/cairn-vehicle-server.git .interop/server
 
+      # Issue #8: the bytes the firmware's C WRITER produces, judged by the server's Go reader
+      # (cairn-verify), plus a mutation check proving the judgement can fail. Needs the server
+      # checkout, so it cannot be a firmware-repo CI job; the server's own required interop
+      # job gets the same check by adding this to tests/interop/run.sh (server-side hook,
+      # not made here):
+      #     "$FW/scripts/interop-writer.sh" --server "$ROOT" --mutation-check
+      - name: The C writer's bundles against the server's verifier
+        run: scripts/interop-writer.sh --server .interop/server --mutation-check
+
+      # Issue #12: the emulator's protocol rows as the PHONE, over /v1/relay/bundles/* (the
+      # real path), plus the rows only the relay has (caller forgery and replay, reordering,
+      # early commit, forged receipts and offers). Builds the server from the checkout into a
+      # temporary directory; --selftest also proves the run can fail. Server-side hook for its
+      # own required interop job (not made here), in tests/interop/run.sh:
+      #     "$FW/scripts/relay-interop.sh" --server "$ROOT"
+      - name: The emulator as the phone, against the relay
+        run: scripts/relay-interop.sh --server .interop/server --selftest
+
       - name: This firmware against it
         working-directory: .interop/server
         run: INTEROP_FIRMWARE_DIR="${{ github.workspace }}" tests/interop/run.sh

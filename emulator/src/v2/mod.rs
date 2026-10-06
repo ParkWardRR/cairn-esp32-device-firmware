@@ -19,5 +19,7 @@
 
 pub mod fault;
 pub mod matrix;
+pub mod relay;
+pub mod relay_matrix;
 pub mod store;
 pub mod sync;

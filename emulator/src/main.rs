@@ -63,7 +63,77 @@ enum Command {
 
         #[command(flatten)]
         identity: IdentityArgs,
+
+        #[command(flatten)]
+        relay: RelayArgs,
     },
+}
+
+/// The phone relay: an authenticated client uploading on the dongle's behalf through the
+/// app API's `/v1/relay/bundles/*`, the real path (the device listener `--server` is the
+/// legacy one, retired by front door #7). With --relay the protocol rows run against it,
+/// plus the rows only the relay has: caller forgery and replay, chunk reordering, early
+/// commits and forged receipts.
+#[derive(clap::Args)]
+struct RelayArgs {
+    /// App API base URL, e.g. http://127.0.0.1:18701 (or https:// with the system trust
+    /// store). Plain HTTP is only offered by the server on loopback.
+    #[arg(long)]
+    relay: Option<String>,
+
+    /// One-time invitation from `cairn-admin client invite`, used to enrol this run as a
+    /// phone. Not needed when --phone-state already holds an enrolment.
+    #[arg(long)]
+    invite_code: Option<String>,
+
+    /// Where the enrolled phone (client id and P-256 key, TEST KEYS ONLY) is kept, so a
+    /// re-run against a persistent server reuses it. Default: <work-dir>/relay-phone.json.
+    #[arg(long)]
+    phone_state: Option<PathBuf>,
+
+    /// The server's receipt-signing public key, 64 hex characters
+    /// (`cairn-server -print-receipt-key`): what a dongle pins at provisioning. Without it
+    /// the key is fetched from --server (the legacy listener), if given.
+    #[arg(long)]
+    receipt_key: Option<String>,
+}
+
+impl RelayArgs {
+    fn resolve(
+        &self,
+        work_dir: &std::path::Path,
+    ) -> Result<Option<v2::matrix::RelayConfig>, String> {
+        let Some(base) = &self.relay else {
+            return Ok(None);
+        };
+        let state = self
+            .phone_state
+            .clone()
+            .unwrap_or_else(|| work_dir.join("relay-phone.json"));
+        let phone = if state.exists() {
+            v2::relay::Phone::load(&state)?
+        } else {
+            let code = self.invite_code.as_deref().ok_or(
+                "--relay needs --invite-code (cairn-admin client invite) the first time, or a --phone-state from an earlier enrolment",
+            )?;
+            let phone = v2::relay::Phone::enrol(base, code, "cairn-emulator (relay rows)")?;
+            phone
+                .save(&state)
+                .map_err(|e| format!("{}: {e}", state.display()))?;
+            phone
+        };
+        let receipt_key = match &self.receipt_key {
+            Some(h) => {
+                Some(format::unhex_array(h).ok_or("--receipt-key must be 64 hex characters")?)
+            }
+            None => None,
+        };
+        Ok(Some(v2::matrix::RelayConfig {
+            base: base.clone(),
+            phone,
+            receipt_key,
+        }))
+    }
 }
 
 /// The simulated device's provisioning. Defaults are public test values that
@@ -116,9 +186,10 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Conformance { vectors, verbose } => {
-            run_conformance(&vectors.unwrap_or_else(|| contracts_dir().join("format/v3/vectors")), verbose)
-        }
+        Command::Conformance { vectors, verbose } => run_conformance(
+            &vectors.unwrap_or_else(|| contracts_dir().join("format/v3/vectors")),
+            verbose,
+        ),
         Command::FaultMatrix {
             work_dir,
             server,
@@ -126,12 +197,21 @@ fn main() {
             chunk_size,
             verbose,
             identity,
+            relay,
         } => {
             let identity = identity.resolve().unwrap_or_else(|e| {
                 eprintln!("{e}");
                 std::process::exit(2);
             });
-            run_fault_matrix(work_dir, server, seed, chunk_size, verbose, identity)
+            if let Err(e) = v2::matrix::prepare(&work_dir) {
+                eprintln!("cannot prepare {}: {e}", work_dir.display());
+                std::process::exit(2);
+            }
+            let relay = relay.resolve(&work_dir).unwrap_or_else(|e| {
+                eprintln!("relay: {e}");
+                std::process::exit(2);
+            });
+            run_fault_matrix(work_dir, server, seed, chunk_size, verbose, identity, relay)
         }
     }
 }
@@ -212,6 +292,7 @@ fn run_fault_matrix(
     chunk_size: usize,
     verbose: bool,
     identity: v2::matrix::IdentityConfig,
+    relay: Option<v2::matrix::RelayConfig>,
 ) {
     if let Err(e) = v2::matrix::prepare(&work_dir) {
         eprintln!("cannot prepare {}: {e}", work_dir.display());
@@ -225,6 +306,7 @@ fn run_fault_matrix(
         chunk_size,
         verbose,
         identity,
+        relay,
     };
 
     let report = match v2::matrix::run(&cfg) {
@@ -264,4 +346,3 @@ fn run_fault_matrix(
         std::process::exit(1);
     }
 }
-
