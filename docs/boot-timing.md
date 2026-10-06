@@ -8,8 +8,8 @@ defines what is measured, what is instrumented, and what is **not yet measured**
 
 | Part of #19 | State |
 |---|---|
-| 1. Instrument: a monotonic boot-timing record, printed on the console | **Done** (`lib/cairn_boottime`, `src/boot_timing.*`, 29 host rows) |
-| 1. ...exposed over BLE (device info) | **Not done.** The device-info contract is not released (upstream issue 21). The record already has a fixed, provisional wire layout so this is a small step once it is. |
+| 1. Instrument: a monotonic boot-timing record, printed on the console | **Done**, and verified on the unit (`lib/cairn_boottime`, `src/boot_timing.*`, 32 host rows) |
+| 1. ...exposed over BLE (device info) | **Built, not yet read from the unit.** `DEVICE_INFO` (ble/v1/device-info.md, contracts-v0.2.0) carries power-on to advertising, to capture open and to first fix, and the reset code (`docs/device-info.md`). The first attempt to read it over the air failed for a radio reason (a weak link, dropped during service discovery), before reaching it |
 | 2. Measure on the real unit | **First bench measurements done** (below): cold start from power-on, production image. Not yet done: wake from sleep, with no card, small and large card, the self-test image, anything on the car |
 | 3. Optimise the biggest terms | **The biggest term is fixed** (below): 55 s to 8.9 s. The next terms are listed |
 | Regression visible without hardware | **Mechanism done** (`cairn_boottime_check` against a budget). No budget is committed yet: one bench run on one unit is not enough to set one from |
