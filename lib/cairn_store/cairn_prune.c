@@ -156,16 +156,11 @@ static bool key_is_usable(const uint8_t key[32])
     return false; /* all-zero placeholder verifies nothing */
 }
 
-cairn_prune_result_t cairn_prune_if_receipted(const char *id_text,
-                                              const uint8_t *receipt,
-                                              size_t receipt_len,
-                                              const uint8_t pinned_key[32],
-                                              const uint8_t uploaded_root[32])
+cairn_prune_result_t cairn_receipt_check(const uint8_t *receipt, size_t receipt_len,
+                                         const uint8_t pinned_key[32],
+                                         const uint8_t uploaded_root[32])
 {
-    if (!key_is_usable(pinned_key)) {
-        CAIRN_LOGW(TAG, "no server key is pinned; %s stays on the card", id_text);
-        return CAIRN_PRUNE_NO_PINNED_KEY;
-    }
+    if (!key_is_usable(pinned_key)) return CAIRN_PRUNE_NO_PINNED_KEY;
 
     static cairn_receipt_t r;
     static uint8_t         scratch[1024];
@@ -173,8 +168,7 @@ cairn_prune_result_t cairn_prune_if_receipted(const char *id_text,
     cairn_err_t derr =
         cairn_receipt_decode(receipt, receipt_len, &r, scratch, sizeof(scratch));
     if (derr != CAIRN_OK) {
-        CAIRN_LOGE(TAG, "receipt for %s does not decode: %s", id_text,
-                   cairn_strerror(derr));
+        CAIRN_LOGE(TAG, "receipt does not decode: %s", cairn_strerror(derr));
         return CAIRN_PRUNE_RECEIPT_MALFORMED;
     }
 
@@ -185,16 +179,32 @@ cairn_prune_result_t cairn_prune_if_receipted(const char *id_text,
      * refuse to delete, but they mean different things on a bench.
      */
     if (cairn_receipt_verify(&r, pinned_key) != CAIRN_OK) {
-        CAIRN_LOGE(TAG, "receipt for %s does not verify against the pinned key; "
-                        "nothing will be deleted", id_text);
+        CAIRN_LOGE(TAG, "receipt does not verify against the pinned key; "
+                        "nothing will be deleted");
         return CAIRN_PRUNE_RECEIPT_UNVERIFIED;
     }
 
     if (cairn_receipt_verify_acknowledges(&r, pinned_key, uploaded_root) != CAIRN_OK) {
-        CAIRN_LOGE(TAG, "receipt for %s is genuine but acknowledges different "
-                        "content; refusing to delete", id_text);
+        CAIRN_LOGE(TAG, "receipt is genuine but acknowledges different content; "
+                        "refusing to delete");
         return CAIRN_PRUNE_WRONG_BUNDLE;
     }
+
+    return CAIRN_PRUNE_OK;
+}
+
+cairn_prune_result_t cairn_prune_if_receipted(const char *id_text,
+                                              const uint8_t *receipt,
+                                              size_t receipt_len,
+                                              const uint8_t pinned_key[32],
+                                              const uint8_t uploaded_root[32])
+{
+    cairn_prune_result_t check =
+        cairn_receipt_check(receipt, receipt_len, pinned_key, uploaded_root);
+    if (check == CAIRN_PRUNE_NO_PINNED_KEY) {
+        CAIRN_LOGW(TAG, "no server key is pinned; %s stays on the card", id_text);
+    }
+    if (check != CAIRN_PRUNE_OK) return check;
 
     /* Only now, with both conditions met, is deletion authorized. */
     if (!intent_write(id_text, uploaded_root)) {

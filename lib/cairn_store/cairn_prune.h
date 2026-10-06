@@ -46,6 +46,19 @@ bool cairn_receipt_store(const char *id_text, const uint8_t *receipt,
 bool cairn_receipt_exists(const char *id_text);
 
 /*
+ * The verification half of the gate, with no side effects: decode the receipt,
+ * check its signature against the pinned key, and check that it acknowledges
+ * `uploaded_root`. Returns CAIRN_PRUNE_OK only when both hold.
+ *
+ * Exists so a caller can reject a bad receipt BEFORE writing anything to the
+ * card. Storing first and verifying after would let a forged receipt overwrite a
+ * genuine one that is already on the card awaiting its prune.
+ */
+cairn_prune_result_t cairn_receipt_check(const uint8_t *receipt, size_t receipt_len,
+                                         const uint8_t pinned_key[32],
+                                         const uint8_t uploaded_root[32]);
+
+/*
  * Verify, then prune. The only sanctioned path to deleting bundle data.
  *
  * `pinned_key` may be NULL or all-zero, which returns CAIRN_PRUNE_NO_PINNED_KEY

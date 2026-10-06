@@ -9,6 +9,7 @@
 #include "cairn_format.h"
 #include "cairn_log.h"
 #include "config.h"
+#include "ble_offload.h"
 #include "facts.h"
 #include "sensor_task.h"
 
@@ -110,6 +111,7 @@ class ServerCallbacks : public NimBLEServerCallbacks {
         s_queue_drop_count  = 0;
         s_last_seq          = 0;
         s_have_seq          = false;
+        ble_offload_on_connect(s_conn_handle);
         CAIRN_LOGI(TAG, "companion connected");
     }
 
@@ -117,9 +119,14 @@ class ServerCallbacks : public NimBLEServerCallbacks {
                       int reason) override {
         s_connected   = false;
         s_conn_handle = 0xFFFF;
+        ble_offload_on_disconnect();
         CAIRN_LOGI(TAG, "companion disconnected (reason %d)", reason);
         if (!s_radio_off)
             NimBLEDevice::startAdvertising();
+    }
+
+    void onMTUChange(uint16_t mtu, NimBLEConnInfo &info) override {
+        ble_offload_on_mtu(mtu);
     }
 
     void onAuthenticationComplete(NimBLEConnInfo &info) override {
@@ -167,8 +174,7 @@ bool ble_companion_begin(void)
         NIMBLE_PROPERTY::READ |
         NIMBLE_PROPERTY::READ_ENC |
         NIMBLE_PROPERTY::READ_AUTHEN);
-    uint8_t ver[2] = {1, 0};
-    chr_version->setValue(ver, sizeof(ver));
+    uint8_t ver[2] = {1, 0};   /* capabilities: bit 2 = bundle offload, set below */
 
     NimBLECharacteristic *chr_fix = svc->createCharacteristic(
         "A8E30001-4F5B-11EF-A017-325096B39F47",
@@ -188,6 +194,15 @@ bool ble_companion_begin(void)
         NIMBLE_PROPERTY::NOTIFY |
         NIMBLE_PROPERTY::READ_ENC |
         NIMBLE_PROPERTY::READ_AUTHEN);
+
+    /* Capabilities: bit 2 = bundle offload (docs/ble-offload.md). Advertised only
+     * if the offload task actually started. */
+    if (ble_offload_register(svc)) {
+        ver[1] |= 0x04;
+    } else {
+        CAIRN_LOGE(TAG, "bundle offload unavailable");
+    }
+    chr_version->setValue(ver, sizeof(ver));
 
     s_server->start();
 

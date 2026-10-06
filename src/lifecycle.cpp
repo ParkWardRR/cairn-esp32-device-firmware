@@ -8,6 +8,7 @@
 #include "board_config.h"
 #include "cairn_log.h"
 #include "ble_companion.h"
+#include "ble_offload.h"
 #include "cairn_fs.h"
 #include "cairn_kv.h"
 #include "cairn_power.h"
@@ -223,6 +224,20 @@ static void set_capture_state(Lifecycle *lc, CaptureState next, uint8_t trigger,
     lc->capture = next;
 }
 
+/*
+ * Whether a drive is in progress, for the BLE offload, which runs on its own task.
+ * Reading one byte of state from another task is benign here: the worst a stale
+ * read does is serve or refuse one request a moment early. Any capture state but
+ * Idle counts, including a suspected start and the trailing dwell, because offload
+ * competes with capture for the card.
+ */
+static const Lifecycle *s_offload_lc = nullptr;
+
+static bool offload_trip_active(void)
+{
+    return s_offload_lc == nullptr || s_offload_lc->capture != CaptureState::Idle;
+}
+
 static void set_link_state(Lifecycle *lc, LinkState next, uint8_t reason)
 {
     if (lc->link == next) return;
@@ -304,6 +319,11 @@ bool lifecycle_begin(Lifecycle *lc)
     /* The boot itself is a journal event, including why the device woke. */
     emit_transition(lc, CAIRN_REGION_BUNDLE, 0, (uint8_t)BundleState::Open, 0,
                     lc->cap.recovery_state);
+
+    /* Before the radio starts: the offload refuses transfers while a drive is in
+     * progress, and must never be able to answer that question before it can. */
+    s_offload_lc = lc;
+    ble_offload_set_trip_source(offload_trip_active);
 
     if (!ble_companion_begin()) {
         CAIRN_LOGW(TAG, "BLE companion init failed; phone GPS unavailable");
@@ -934,7 +954,10 @@ static void maybe_standby(Lifecycle *lc)
      * gate could never fire, since it only matters while parked. */
     e.battery_mv = sensors_battery_mv();
     e.pending_bundles = lc->pending_bundles;
-    e.link_online = (lc->link != LinkState::Offline);
+    /* A phone working the offload counts as a live link: standing by switches the
+     * radio off, which would drop a transfer in progress and strand the bundles it
+     * was carrying. Bounded in ble_offload_active(). */
+    e.link_online = (lc->link != LinkState::Offline) || ble_offload_active();
 
     /*
      * An open capture holding data is a reason to seal, not a reason to stay
