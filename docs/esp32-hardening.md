@@ -2,8 +2,8 @@
 
 Plan for protecting the Freematics ONE+ Model B (classic ESP32-WROVER, 16 MB
 flash, 8 MB PSRAM, SPI microSD). Context and threat table:
-[trust-model-v3.md](https://github.com/ParkWardRR/Cairn/blob/main/docs/trust-model-v3.md). Format:
-[bundle-format-v3.md](https://github.com/ParkWardRR/Cairn/blob/main/contracts/format/v3/spec.md).
+[trust-model-v3.md](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/blob/main/docs/trust-model-v3.md). Format:
+[bundle-format-v3.md](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/blob/main/contracts/format/v3/spec.md).
 
 ## What the hardware can and cannot do
 

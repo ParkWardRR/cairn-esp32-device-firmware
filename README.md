@@ -1,6 +1,6 @@
 # Cairn ESP32 device firmware
 
-Firmware for the in-car dongle of the [Cairn driving log](https://github.com/ParkWardRR/Cairn) (a
+Firmware for the in-car dongle of the [Cairn driving log](https://github.com/ParkWardRR/cairn-driving-log-selfhosted) (a
 Freematics ONE+ Model B, ESP32). It records OBD-II, GNSS and IMU data to an SD card as encrypted,
 hash-chained bundles, seals each trip, and hands the bundles to the enrolled phone over BLE. **The dongle
 has no Wi-Fi, no LTE and no network credentials of any kind.** The server's signed receipt is checked on
@@ -18,7 +18,7 @@ the device before a bundle is deleted.
 ## Contracts
 
 The bundle format, enrolment protocol and BLE offload protocol this firmware implements are specified, with
-test vectors, in [Cairn Vehicle Data Protocols](https://github.com/ParkWardRR/Cairn/tree/main/contracts).
+test vectors, in [Cairn Vehicle Data Protocols](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/tree/main/contracts).
 `contracts.lock` pins a release by tag **and** commit; `scripts/fetch-contracts.sh` fetches it into
 `.contracts/` and verifies both. `CAIRN_CONTRACTS=<dir>` overrides it for changing a contract and the
 firmware together; release builds refuse the override.
@@ -40,7 +40,7 @@ bench round trip are in `docs/flashing-and-testing.md` and `docs/hardware-roundt
 
 ## Related repositories
 
-- [cairn-driving-log-selfhosted](https://github.com/ParkWardRR/Cairn): the front door, system docs and the contracts
+- [cairn-driving-log-selfhosted](https://github.com/ParkWardRR/cairn-driving-log-selfhosted): the front door, system docs and the contracts
 - [cairn-vehicle-server](https://github.com/ParkWardRR/cairn-vehicle-server): the vehicle server
 - [cairn-vehicle-web-dashboard](https://github.com/ParkWardRR/cairn-vehicle-web-dashboard): the web dashboard
 - [cairn-ios-companion-app](https://github.com/ParkWardRR/cairn-companion-ios-esp32-obd2-gps-ble): the iPhone app
