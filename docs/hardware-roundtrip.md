@@ -7,7 +7,7 @@ in Go, Rust and C; the Rust emulator's fault matrix against a live v3 server); t
 the step that proves it on silicon.
 
 The dongle has **no Wi-Fi**. The leg from the card to the server is BLE to the
-enrolled phone, then the phone's authenticated upload ([ble-offload.md](../contracts/ble/v1/offload.md)).
+enrolled phone, then the phone's authenticated upload ([ble-offload.md](https://github.com/ParkWardRR/Cairn/blob/main/contracts/ble/v1/offload.md)).
 So the round trip has two stages, and only the first can be run today.
 
 | Stage | What it proves | State (2026-10-05) |

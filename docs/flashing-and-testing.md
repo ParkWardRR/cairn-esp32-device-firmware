@@ -247,7 +247,7 @@ cp include/secrets.h.example include/secrets.h
 
 Production Wi-Fi credentials and the mTLS client key are not compiled in: they
 are provisioned into NVS over USB with `cairn-provision`
-(see [device-provisioning.md](device-provisioning.md)). The `CAIRN_WIFI_*`
+(see [device-provisioning.md](https://github.com/ParkWardRR/cairn-vehicle-server/blob/main/docs/device-provisioning.md)). The `CAIRN_WIFI_*`
 defines in `secrets.h` are only a development fallback, active with
 `-DCAIRN_COMPILED_WIFI_FALLBACK=1`. A missing or placeholder `secrets.h` fails
 open to an unconfigured device that uploads but never prunes, so check the boot
