@@ -184,7 +184,7 @@ static void test_effects_and_floor(void)
     cairn_checkin_ops_t o = ops_for(&w, true);
     cairn_checkin_t c;
     fresh(&c, 0);
-    uint8_t f[CAIRN_CI_MAX_FRAME], res[8];
+    uint8_t f[CAIRN_CI_MAX_FRAME + 64], res[8];      /* room for the 513-byte frame built below */
     uint32_t now = 10000;
 
     size_t n = make_frame(f, CAIRN_CI_STOP_TRYING, 1, (const uint8_t[]){ 48, 0 }, 2, g_dev);
