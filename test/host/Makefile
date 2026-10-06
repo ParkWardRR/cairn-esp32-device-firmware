@@ -44,7 +44,7 @@ SRC_DIR    := ../../src
 APP_SRC    := $(SRC_DIR)/preroll.c $(SRC_DIR)/policy.c $(OTA_DIR)/cairn_ota.c $(POWER_DIR)/cairn_power.c
 
 # The conformance runner needs the policy codec, which lives in src/.
-BLE_VECTORS     ?= $(realpath ../../../../..)/cairn-companion-ios-esp32-obd2-gps-ble/docs/golden-vectors.json
+BLE_VECTORS     ?= ../../../../fixtures/ble-v1/golden-vectors.json
 CONFORMANCE_SRC := $(FORMAT_SRC) $(SRC_DIR)/policy.c minijson.c conformance.c
 FAULTS_SRC      := $(FORMAT_SRC) $(STORE_SRC) $(FS_SRC) $(APP_SRC) \
                    log_host.c platform_host.c faults.c
@@ -65,8 +65,15 @@ OFFLOAD_SIM_SRC := $(FORMAT_SRC) $(STORE_SRC) $(FS_SRC) $(APP_SRC) $(OFFLOAD_DIR
 # -Wconversion is deliberately absent but the rest is strict: this code does a
 # great deal of width narrowing between the wire format and C types, and a
 # silent truncation there corrupts a bundle rather than crashing.
-CFLAGS  ?= -std=c11 -O1 -g \
-           -Wall -Wextra -Werror \
+# -D_DEFAULT_SOURCE: under strict -std=c11 glibc hides popen and friends, which the
+# conformance runner uses; macOS exposes them regardless, so this only ever failed on
+# the Linux CI runner. -Wno-format-truncation: gcc cannot prove a 512-byte path buffer
+# is big enough for "<dir>/segment-N.seg" and -Werror turned that into a failure;
+# these are fixed-size buffers in test code that a truncation would fail loudly, and
+# clang (which the Mac uses) has no such check. The firmware proper is built by
+# PlatformIO with its own flags and is unaffected.
+CFLAGS  ?= -std=c11 -O1 -g -D_DEFAULT_SOURCE \
+           -Wall -Wextra -Werror -Wno-format-truncation \
            -Wshadow -Wpointer-arith -Wcast-qual -Wstrict-prototypes \
            -Wmissing-prototypes -Wno-unused-parameter \
            -I$(FORMAT_DIR) -I$(STORE_DIR) -I$(FS_DIR) -I$(LOG_DIR) -I$(PROV_DIR) -I$(INCLUDE_DIR) -I$(SRC_DIR) -I$(OTA_DIR) -I$(POWER_DIR) -I$(OFFLOAD_DIR) -I.

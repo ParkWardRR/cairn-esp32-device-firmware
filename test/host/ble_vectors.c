@@ -228,7 +228,10 @@ int main(int argc, char **argv)
     long sz = ftell(f);
     fseek(f, 0, SEEK_SET);
     char *text = (char *)malloc((size_t)sz + 1);
-    fread(text, 1, (size_t)sz, f);
+    if (fread(text, 1, (size_t)sz, f) != (size_t)sz) {
+        fprintf(stderr, "cannot read %s\n", argv[1]);
+        return 1;
+    }
     text[sz] = '\0';
     fclose(f);
 
