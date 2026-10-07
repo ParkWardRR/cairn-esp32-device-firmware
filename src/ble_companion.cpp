@@ -218,7 +218,7 @@ bool ble_companion_begin(void)
     chr_fix->setCallbacks(&s_gnss_fix_cbs);
 
     NimBLECharacteristic *chr_engine = svc->createCharacteristic(
-        "A8E30002-4F5B-11EF-A017-325096B39F47",
+        "A8E30004-4F5B-11EF-A017-325096B39F47",
         NIMBLE_PROPERTY::WRITE_NR |
         NIMBLE_PROPERTY::WRITE_ENC |
         NIMBLE_PROPERTY::WRITE_AUTHEN);
