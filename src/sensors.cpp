@@ -191,8 +191,14 @@ static void log_engine_identity(void)
                : p->status == CAIRN_ENGINE_DERIVED ? "derived"
                                                    : "verified");
     if (!cairn_engine_has_pids()) {
+#if CAIRN_MTPROBE && CAIRN_MTPROBE_ALLOW_STUB
+        CAIRN_LOGW(TAG, "=== DISCOVERY MODE === profile %s has no PID table; "
+                        "probe will run in read-only mode, no production capture",
+                   p->id);
+#else
         CAIRN_LOGW(TAG, "profile %s has no PID table (unknown): no OBD request will be sent; "
                         "cadence and thresholds are the device defaults", p->id);
+#endif
     }
 }
 
@@ -229,10 +235,27 @@ static bool engine_gate(const char *vin)
     }
 
     if (!cairn_engine_has_pids()) {
+#if CAIRN_MTPROBE && CAIRN_MTPROBE_ALLOW_STUB
+        /*
+         * Discovery mode: the active profile is a stub with no PID table. The
+         * MTPROBE build needs bus access to discover what the ECU supports, so
+         * the gate passes — but no production OBD polling will happen because
+         * there are no PIDs to request. The probe runs its own read-only
+         * discovery alongside the (empty) capture path.
+         *
+         * This branch is deliberately compile-time gated: CAIRN_MTPROBE_ALLOW_STUB
+         * must never be set in a production build.
+         */
+        CAIRN_LOGW(TAG, "DISCOVERY MODE: active profile %s has no PID table; "
+                        "allowing OBD for probe-only operation (no production capture)",
+                   cairn_engine_active()->id);
+        return true;
+#else
         CAIRN_LOGE(TAG, "active profile %s has no PID table: refusing OBD rather than "
                         "polling with another engine's PIDs", cairn_engine_active()->id);
         s_engine_refused = true;
         return false;
+#endif
     }
     return true;
 }

@@ -165,6 +165,21 @@
 #define CAIRN_MTPROBE_SNIFF_EVERY_MS   90000
 #define CAIRN_MTPROBE_SNIFF_WINDOW_MS  2000
 #define CAIRN_MTPROBE_SNIFF_MAX_CHUNKS 80
+
+/*
+ * Allow the MTPROBE build to pass engine_gate() for stub engines (engines whose
+ * profile has no PID table). The probe runs in a restricted, read-only mode: it
+ * sends standard Mode 01 requests and logs responses, but no production OBD data
+ * is captured because there are no PIDs to poll. This flag is rejected in non-
+ * MTPROBE builds — it exists solely for first-contact discovery on a new engine.
+ */
+#ifndef CAIRN_MTPROBE_ALLOW_STUB
+#define CAIRN_MTPROBE_ALLOW_STUB 0
+#endif
+#if CAIRN_MTPROBE_ALLOW_STUB && !CAIRN_MTPROBE
+#error "CAIRN_MTPROBE_ALLOW_STUB requires CAIRN_MTPROBE"
+#endif
+
 #define CAIRN_HEALTH_PERIOD_MS    30000
 
 /*
