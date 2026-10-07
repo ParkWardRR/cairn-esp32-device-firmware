@@ -58,7 +58,7 @@ Separating what is proven from what is only designed. "Hardware" means run on th
 | Bundle format v3 (AEAD frames, hash chain, signed manifest) | Shipped. Byte-exact with the Go reference and the independent Rust implementation on the pinned vectors (host) |
 | Crash recovery (torn tails, interrupted seals and prunes) | Host-tested with fault injection; also exercised by pulling power on the bench |
 | BLE service: phone GNSS in, quality and status out | Shipped in every build |
-| BLE bundle offload and the receipt-verified prune | Implemented. Host-tested end to end with the real phone client and the real server relay over a simulated link. **Not yet run over the air** as of `docs/hardware-roundtrip.md` (2026-10-05) |
+| BLE bundle offload and the receipt-verified prune | **Ran on real hardware 2026-10-06.** Nine bundles pulled over BLE in 62 s on this dongle (`cmd/cairn-phone` on a Mac → `/v1/relay/bundles/*` on the deployed server); nine receipts signed and verified against the pinned key on the device; nine bundles pruned. The flashed build used **dev pairing** (Just Works, no MITM), see the "Pairing and access" caveat below |
 | Enrolment and USB provisioning | Shipped, exercised on hardware; the enrolment blob is byte-identical to the Go reference on shared vectors |
 | A/B partition table, rollback marking | Table present; the image marks itself valid only after the card checks out |
 | OTA: update gate (signed descriptor, version order, preconditions) | Host-tested pieces only. **No code fetches or installs an image yet**; delivery is planned over BLE |
@@ -261,7 +261,9 @@ The dongle advertises as `Cairn` with the service UUID `A8E30000-4F5B-11EF-A017-
 
 The Phase 2 characteristics of the contract (`BARO_ALT`, `UTC_SYNC`, `OBD_LIVE`, `DEVICE_STATUS`) and the check-in characteristics `0041` to `0044` are not created, and their capability bits stay clear: a bit for something absent would be a lie the app is told to trust.
 
-**Pairing and access.** LE Secure Connections with bonding and man-in-the-middle protection; the dongle is display-only and uses a static six-digit passkey from `secrets.h`. Every characteristic requires an encrypted, authenticated link, so an unbonded phone can discover the dongle but read, write or subscribe to nothing. One bond is kept (`CONFIG_BT_NIMBLE_MAX_BONDS=1`); a new bond replaces the old. A phone fix is accepted only if it is under 3 s old, flagged position-valid and not a repeated sequence number.
+**Pairing and access** *(target state — the shipping build)*. LE Secure Connections with bonding and man-in-the-middle protection; the dongle is display-only and uses a static six-digit passkey from `secrets.h`. Every characteristic requires an encrypted, authenticated link, so an unbonded phone can discover the dongle but read, write or subscribe to nothing. One bond is kept (`CONFIG_BT_NIMBLE_MAX_BONDS=1`); a new bond replaces the old. A phone fix is accepted only if it is under 3 s old, flagged position-valid and not a repeated sequence number.
+
+> ⚠ **Current flashed build (2026-10-06) is a dev build.** To unblock the first over-the-air offload, this build pairs with **Just Works** (`BOND|SC`, IO cap `NO_INPUT_OUTPUT`, no MITM), drops `READ_AUTHEN`/`WRITE_AUTHEN` from characteristic flags (reads require encryption only), and calls `ble_companion_clear_bonds()` on every boot so a stale bond from a prior passkey can never block the new link. It also auto-detects **bench mode** from the raw co-processor voltage (3–7.5 V = USB-only, no OBD rail) and keeps the radio and MCU up while bench mode is latched. The receipt gate (Ed25519 at the application layer, verified in `ble_offload` against `CAIRN_SERVER_RECEIPT_KEY_HEX`) is unaffected. **Flip MITM + `DISPLAY_ONLY` back, restore the AUTHEN flags, and remove the bond-clear call before any build goes into a car that is not yours** — the dev build is BLE-link weak on purpose.
 
 ### Offload and the receipt-verified prune
 
@@ -415,7 +417,7 @@ The full plan, with the irreversibility table and a verification checklist, is [
 | Integrity | Frame CRC and hash chain, signed manifest (Ed25519, device key), Merkle content root, monotonic device counter against rollback and cloning |
 | Deletion | Receipt gate: pinned server key, matching content root, intent journal |
 | Network | No Wi-Fi, no LTE and no network credentials in this firmware; legacy credentials are erased at boot |
-| Radio | BLE bonding with MITM-protected Secure Connections and a passkey; encrypted and authenticated characteristics; the phone carries ciphertext only |
+| Radio | BLE bonding with MITM-protected Secure Connections and a passkey; encrypted and authenticated characteristics; the phone carries ciphertext only *(target state; current flashed build is a dev build with Just Works pairing — see the "Pairing and access" caveat above)* |
 | Console | USB provisioning never during a trip, 60 s window when assigned, no secret echoed or logged |
 | Updates (design, host-tested gate) | Separate update key; signature before download; hash read back from flash; boot partition switched last; rollback on a failed self-check |
 | Stolen, running dongle | Not solved by hardware. Handled by revocation on the server and a short exposure window |
