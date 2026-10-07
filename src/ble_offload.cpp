@@ -188,14 +188,14 @@ bool ble_offload_register(NimBLEService *svc)
 
     s_chr_control = svc->createCharacteristic(
         "A8E30030-4F5B-11EF-A017-325096B39F47",
-        NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_ENC | NIMBLE_PROPERTY::WRITE_AUTHEN |
-        NIMBLE_PROPERTY::INDICATE | NIMBLE_PROPERTY::READ_ENC | NIMBLE_PROPERTY::READ_AUTHEN);
+        NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_ENC |
+        NIMBLE_PROPERTY::INDICATE | NIMBLE_PROPERTY::READ_ENC);
     s_chr_control->setCallbacks(&s_cbs);
 
     s_chr_data = svc->createCharacteristic(
         "A8E30031-4F5B-11EF-A017-325096B39F47",
         NIMBLE_PROPERTY::NOTIFY | NIMBLE_PROPERTY::WRITE_NR | NIMBLE_PROPERTY::WRITE_ENC |
-        NIMBLE_PROPERTY::WRITE_AUTHEN | NIMBLE_PROPERTY::READ_ENC | NIMBLE_PROPERTY::READ_AUTHEN);
+        NIMBLE_PROPERTY::READ_ENC);
     s_chr_data->setCallbacks(&s_cbs);
 
     /* 12 KB: receipt verification (Ed25519) and manifest decoding are not small. */

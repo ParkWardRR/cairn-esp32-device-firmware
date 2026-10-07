@@ -217,15 +217,13 @@ bool ble_companion_begin(void)
     NimBLECharacteristic *chr_version = svc->createCharacteristic(
         "A8E300F0-4F5B-11EF-A017-325096B39F47",
         NIMBLE_PROPERTY::READ |
-        NIMBLE_PROPERTY::READ_ENC |
-        NIMBLE_PROPERTY::READ_AUTHEN);
+        NIMBLE_PROPERTY::READ_ENC);
     uint8_t ver[2] = {1, 0};   /* capabilities: bit 2 = bundle offload, set below */
 
     NimBLECharacteristic *chr_fix = svc->createCharacteristic(
         "A8E30001-4F5B-11EF-A017-325096B39F47",
         NIMBLE_PROPERTY::WRITE_NR |
-        NIMBLE_PROPERTY::WRITE_ENC |
-        NIMBLE_PROPERTY::WRITE_AUTHEN);
+        NIMBLE_PROPERTY::WRITE_ENC);
     chr_fix->setCallbacks(&s_gnss_fix_cbs);
 
     NimBLECharacteristic *chr_engine = svc->createCharacteristic(
@@ -238,14 +236,12 @@ bool ble_companion_begin(void)
     s_chr_quality = svc->createCharacteristic(
         "A8E30010-4F5B-11EF-A017-325096B39F47",
         NIMBLE_PROPERTY::NOTIFY |
-        NIMBLE_PROPERTY::READ_ENC |
-        NIMBLE_PROPERTY::READ_AUTHEN);
+        NIMBLE_PROPERTY::READ_ENC);
 
     s_chr_status = svc->createCharacteristic(
         "A8E30011-4F5B-11EF-A017-325096B39F47",
         NIMBLE_PROPERTY::NOTIFY |
-        NIMBLE_PROPERTY::READ_ENC |
-        NIMBLE_PROPERTY::READ_AUTHEN);
+        NIMBLE_PROPERTY::READ_ENC);
 
     /* Capabilities: bit 2 = bundle offload (contracts/ble/v1/offload.md). Advertised only
      * if the offload task actually started. */
@@ -264,8 +260,7 @@ bool ble_companion_begin(void)
     NimBLECharacteristic *chr_info = svc->createCharacteristic(
         "A8E30040-4F5B-11EF-A017-325096B39F47",
         NIMBLE_PROPERTY::READ |
-        NIMBLE_PROPERTY::READ_ENC |
-        NIMBLE_PROPERTY::READ_AUTHEN);
+        NIMBLE_PROPERTY::READ_ENC);
     chr_info->setCallbacks(&s_device_info_cbs);
     ver[1] |= 0x08;
     device_info_set_capabilities(caps);
