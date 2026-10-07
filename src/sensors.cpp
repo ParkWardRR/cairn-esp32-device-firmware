@@ -203,15 +203,64 @@ static void log_engine_identity(void)
 }
 
 /*
- * Whether this build may open an OBD session for this vehicle. `vin` is null before
- * the ECU has answered; the declared engine needs no bus traffic, so it is checked first.
+ * Whether this build may open an OBD session for this vehicle.
+ *
+ * Multi-fallback discovery chain:
+ *   1. Compile-time CAIRN_VEHICLE_ENGINE_ID (no bus traffic needed)
+ *   2. BLE companion engine declaration (phone tells dongle)
+ *   3. VIN pattern match (full VIN against vin_patterns)
+ *   4. VIN engine code match (BMW VDS positions 4-8)
+ *   5. Default fallback (first non-stub profile)
+ *
+ * `vin` is null before the ECU has answered; the compile-time and BLE
+ * paths need no bus traffic so they are checked first.
  */
 static bool engine_gate(const char *vin)
 {
     const char *engine = nullptr;
-    cairn_vehicle_verdict_t v =
-        cairn_engine_check_vehicle(k_declared_engine, vin, &engine);
+    cairn_vehicle_verdict_t v;
 
+    /* ── 1. Compile-time declare ──────────────────────────────────────── */
+    v = cairn_engine_check_vehicle(k_declared_engine, vin, &engine);
+
+    /* ── 2. BLE companion declaration ─────────────────────────────────── */
+    if (v == CAIRN_VEHICLE_UNIDENTIFIED) {
+        const char *ble_decl = cairn_engine_get_ble_declaration();
+        if (ble_decl != nullptr) {
+            v = cairn_engine_check_vehicle(ble_decl, nullptr, &engine);
+            if (v == CAIRN_VEHICLE_SERVED) {
+                CAIRN_LOGI(TAG, "engine \"%s\" declared by companion app", engine);
+            }
+        }
+    }
+
+    /* ── 3. VIN pattern match (once the ECU has answered) ─────────────── */
+    if (v == CAIRN_VEHICLE_UNIDENTIFIED && vin != nullptr && strlen(vin) == 17) {
+        /* check_vehicle already tries vin_patterns when declared_id is NULL */
+        v = cairn_engine_check_vehicle(nullptr, vin, &engine);
+        if (v == CAIRN_VEHICLE_SERVED) {
+            CAIRN_LOGI(TAG, "vehicle identified by VIN pattern: %s", engine);
+        }
+    }
+
+    /* ── 4. VIN engine code match (BMW VDS positions 4-8) ─────────────── */
+    if (v == CAIRN_VEHICLE_UNIDENTIFIED && vin != nullptr && strlen(vin) == 17) {
+        const cairn_engine_catalogue_entry_t *hit =
+            cairn_engine_match_code(cairn_engine_catalogue(),
+                                    cairn_engine_catalogue_count(),
+                                    vin);
+        if (hit != nullptr) {
+            engine = hit->id;
+            v = hit->installed ? CAIRN_VEHICLE_SERVED
+                               : CAIRN_VEHICLE_REFUSED_NOT_INSTALLED;
+            if (v == CAIRN_VEHICLE_SERVED) {
+                CAIRN_LOGI(TAG, "vehicle identified by VIN engine code: %s (VIN %.17s)",
+                           engine, vin);
+            }
+        }
+    }
+
+    /* ── Handle refusals ──────────────────────────────────────────────── */
     switch (v) {
     case CAIRN_VEHICLE_REFUSED_NOT_INSTALLED:
         CAIRN_LOGE(TAG, "vehicle needs engine %s, which this build does not carry (%s): "
@@ -221,7 +270,8 @@ static bool engine_gate(const char *vin)
         return false;
     case CAIRN_VEHICLE_REFUSED_UNKNOWN_ENGINE:
         CAIRN_LOGE(TAG, "vehicle is declared as engine \"%s\", which has no profile in "
-                        "engines/: refusing OBD", k_declared_engine != nullptr ? k_declared_engine : "?");
+                        "engines/: refusing OBD",
+                   k_declared_engine != nullptr ? k_declared_engine : "?");
         s_engine_refused = true;
         return false;
     case CAIRN_VEHICLE_SERVED:
@@ -231,6 +281,7 @@ static bool engine_gate(const char *vin)
         break;
     case CAIRN_VEHICLE_UNIDENTIFIED:
     default:
+        /* 5. Default fallback — first non-stub profile */
         break;
     }
 

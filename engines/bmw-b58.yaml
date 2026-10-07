@@ -21,6 +21,7 @@ applies_to:
   models: ["M240i"]
   years: unknown
   vin_patterns: unknown
+  engine_codes: ["2J7C0"]  # BMW VDS positions 4-8 for F22 M240i B58
 
 fuel: unknown
 obd: unknown

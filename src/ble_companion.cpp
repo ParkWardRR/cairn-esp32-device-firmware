@@ -6,6 +6,7 @@
 #include <NimBLEDevice.h>
 #include <string.h>
 
+#include "cairn_engine.h"
 #include "cairn_format.h"
 #include "cairn_log.h"
 #include "config.h"
@@ -103,6 +104,24 @@ class GnssFixCallbacks : public NimBLECharacteristicCallbacks {
     }
 };
 
+class EngineDeclCallbacks : public NimBLECharacteristicCallbacks {
+    void onWrite(NimBLECharacteristic *chr, NimBLEConnInfo &info) override {
+        NimBLEAttValue val = chr->getValue();
+        if (val.size() == 0 || val.size() > 31) {
+            CAIRN_LOGW(TAG, "engine declaration: bad length %d", (int)val.size());
+            return;
+        }
+
+        char engine_id[32];
+        memcpy(engine_id, val.data(), val.size());
+        engine_id[val.size()] = '\0';
+
+        bool known = cairn_engine_set_ble_declaration(engine_id);
+        CAIRN_LOGI(TAG, "companion declared engine \"%s\" (%s)",
+                   engine_id, known ? "known" : "unknown");
+    }
+};
+
 class ServerCallbacks : public NimBLEServerCallbacks {
     void onConnect(NimBLEServer *server, NimBLEConnInfo &info) override {
         s_conn_handle       = info.getConnHandle();
@@ -121,6 +140,7 @@ class ServerCallbacks : public NimBLEServerCallbacks {
                       int reason) override {
         s_connected   = false;
         s_conn_handle = 0xFFFF;
+        cairn_engine_set_ble_declaration(NULL); /* clear stale engine declaration */
         ble_offload_on_disconnect();
         CAIRN_LOGI(TAG, "companion disconnected (reason %d)", reason);
         if (!s_radio_off)
@@ -155,6 +175,7 @@ class DeviceInfoCallbacks : public NimBLECharacteristicCallbacks {
 static ServerCallbacks    s_server_cbs;
 static DeviceInfoCallbacks s_device_info_cbs;
 static GnssFixCallbacks   s_gnss_fix_cbs;
+static EngineDeclCallbacks s_engine_decl_cbs;
 
 void ble_companion_clear_bonds(void)
 {
@@ -195,6 +216,13 @@ bool ble_companion_begin(void)
         NIMBLE_PROPERTY::WRITE_ENC |
         NIMBLE_PROPERTY::WRITE_AUTHEN);
     chr_fix->setCallbacks(&s_gnss_fix_cbs);
+
+    NimBLECharacteristic *chr_engine = svc->createCharacteristic(
+        "A8E30002-4F5B-11EF-A017-325096B39F47",
+        NIMBLE_PROPERTY::WRITE_NR |
+        NIMBLE_PROPERTY::WRITE_ENC |
+        NIMBLE_PROPERTY::WRITE_AUTHEN);
+    chr_engine->setCallbacks(&s_engine_decl_cbs);
 
     s_chr_quality = svc->createCharacteristic(
         "A8E30010-4F5B-11EF-A017-325096B39F47",

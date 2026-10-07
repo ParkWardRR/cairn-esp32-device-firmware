@@ -29,6 +29,14 @@
             { "$ref": "#/$defs/unknown" },
             { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "pattern": "^[A-HJ-NPR-Z0-9?]{17}$" } }
           ]
+        },
+        "engine_codes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[A-Z0-9]{1,8}$" },
+          "$comment": "VIN position 4-8 substring (e.g. BMW VDS). Matches the engine variant encoded in the VIN. Shorter alternative to full vin_patterns."
         }
       }
     },

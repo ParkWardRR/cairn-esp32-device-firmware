@@ -142,6 +142,8 @@ typedef struct {
     const char        *id;
     const char *const *vin_patterns; /* 17 characters, '?' matches any */
     uint8_t            n_vin_patterns;
+    const char *const *engine_codes; /* VIN positions 4-8, e.g. "A5C5" for N20 */
+    uint8_t            n_engine_codes;
     uint8_t            installed;
 } cairn_engine_catalogue_entry_t;
 
@@ -158,6 +160,10 @@ const cairn_engine_identity_t *cairn_engine_identity(void);
 size_t                        cairn_engine_installed_count(void);
 const cairn_engine_profile_t *cairn_engine_installed(size_t i);
 const cairn_engine_profile_t *cairn_engine_find(const char *id); /* installed only */
+
+/* The full catalogue (installed and not-installed engines). */
+const cairn_engine_catalogue_entry_t *cairn_engine_catalogue(void);
+size_t                                cairn_engine_catalogue_count(void);
 
 /* ── the active profile ───────────────────────────────────────────────────── */
 
@@ -258,6 +264,39 @@ cairn_vehicle_verdict_t cairn_engine_check_vehicle(const char *declared_id,
 cairn_vehicle_verdict_t cairn_engine_check_vehicle_in(
     const cairn_engine_catalogue_entry_t *cat, size_t n, const char *declared_id,
     const char *vin, const char **engine_id);
+
+/* ── VIN engine code extraction ──────────────────────────────────────────── */
+
+/*
+ * Extract the engine code substring from a VIN. BMW encodes the engine variant
+ * in VIN positions 4-8 (WMI + VDS, 0-indexed characters 3-7). The caller
+ * provides the start position and length; `out` is always NUL-terminated.
+ * Returns false when the VIN is too short or the position is out of range.
+ */
+bool cairn_vin_extract_code(const char *vin, uint8_t pos, uint8_t len,
+                            char *out, size_t out_cap);
+
+/*
+ * Match a VIN's engine code substring against the catalogue's engine_codes
+ * entries. Returns the first matching engine, or NULL. An engine_codes entry
+ * of "A5C5" matches VIN position 4-8 == "A5C5".
+ */
+const cairn_engine_catalogue_entry_t *cairn_engine_match_code(
+    const cairn_engine_catalogue_entry_t *cat, size_t n, const char *vin);
+
+const cairn_engine_catalogue_entry_t *cairn_engine_match_code_in(
+    const cairn_engine_catalogue_entry_t *cat, size_t n,
+    const char *code, uint8_t code_len);
+
+/* ── BLE companion engine declaration ────────────────────────────────────── */
+
+/*
+ * Set the BLE-declared engine id. The companion app writes this when the user
+ * selects a vehicle. Returns true if the engine id is known in the catalogue.
+ * Pass NULL or empty to clear.
+ */
+bool cairn_engine_set_ble_declaration(const char *engine_id);
+const char *cairn_engine_get_ble_declaration(void);
 
 #ifdef __cplusplus
 }

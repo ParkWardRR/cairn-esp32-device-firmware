@@ -1,5 +1,6 @@
 #include "cairn_engine.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "config.h"
@@ -46,6 +47,16 @@ const cairn_engine_profile_t *cairn_engine_find(const char *id)
         if (strcmp(k_engine_profiles[i]->id, id) == 0) return k_engine_profiles[i];
     }
     return NULL;
+}
+
+const cairn_engine_catalogue_entry_t *cairn_engine_catalogue(void)
+{
+    return k_engine_catalogue;
+}
+
+size_t cairn_engine_catalogue_count(void)
+{
+    return sizeof(k_engine_catalogue) / sizeof(k_engine_catalogue[0]);
 }
 
 /* ── the active profile and its resolved values ──────────────────────────── */
@@ -297,4 +308,94 @@ cairn_vehicle_verdict_t cairn_engine_check_vehicle(const char *declared_id,
         k_engine_catalogue,
         sizeof(k_engine_catalogue) / sizeof(k_engine_catalogue[0]), declared_id, vin,
         engine_id);
+}
+
+/* ── VIN engine code extraction ──────────────────────────────────────────── */
+
+bool cairn_vin_extract_code(const char *vin, uint8_t pos, uint8_t len,
+                            char *out, size_t out_cap)
+{
+    size_t vin_len, i;
+
+    if (vin == NULL || out == NULL || out_cap == 0) return false;
+    vin_len = strlen(vin);
+    if ((size_t)pos + (size_t)len > vin_len) return false;
+    if (len >= out_cap) return false; /* need room for NUL */
+
+    for (i = 0; i < (size_t)len; i++) out[i] = vin[pos + i];
+    out[len] = '\0';
+    return true;
+}
+
+const cairn_engine_catalogue_entry_t *cairn_engine_match_code_in(
+    const cairn_engine_catalogue_entry_t *cat, size_t n,
+    const char *code, uint8_t code_len)
+{
+    size_t i, j;
+
+    if (cat == NULL || code == NULL || code_len == 0) return NULL;
+
+    for (i = 0; i < n; i++) {
+        for (j = 0; j < cat[i].n_engine_codes; j++) {
+            const char *ec = cat[i].engine_codes[j];
+            if (ec == NULL) continue;
+            if ((uint8_t)strlen(ec) == code_len &&
+                memcmp(ec, code, code_len) == 0) {
+                return &cat[i];
+            }
+        }
+    }
+    return NULL;
+}
+
+const cairn_engine_catalogue_entry_t *cairn_engine_match_code(
+    const cairn_engine_catalogue_entry_t *cat, size_t n, const char *vin)
+{
+    /*
+     * Match VIN positions 4-8 (0-indexed 3-7) against the catalogue's
+     * engine_codes entries. Each entry is a short string (typically 4-5 chars)
+     * representing the engine variant in the VIN's VDS section.
+     */
+    size_t i, j;
+
+    if (vin == NULL || strlen(vin) < 8) return NULL;
+
+    for (i = 0; i < n; i++) {
+        for (j = 0; j < cat[i].n_engine_codes; j++) {
+            const char *ec = cat[i].engine_codes[j];
+            if (ec == NULL) continue;
+            uint8_t len = (uint8_t)strlen(ec);
+            if (len == 0 || (size_t)3 + (size_t)len > strlen(vin)) continue;
+            if (memcmp(ec, vin + 3, len) == 0) {
+                return &cat[i];
+            }
+        }
+    }
+    return NULL;
+}
+
+/* ── BLE companion engine declaration ────────────────────────────────────── */
+
+static char s_ble_engine_id[32];
+
+bool cairn_engine_set_ble_declaration(const char *engine_id)
+{
+    if (engine_id == NULL || engine_id[0] == '\0') {
+        s_ble_engine_id[0] = '\0';
+        return false;
+    }
+
+    /* Validate it is a known engine id. */
+    const cairn_engine_catalogue_entry_t *hit = cat_find(
+        k_engine_catalogue,
+        sizeof(k_engine_catalogue) / sizeof(k_engine_catalogue[0]),
+        engine_id);
+
+    snprintf(s_ble_engine_id, sizeof(s_ble_engine_id), "%s", engine_id);
+    return hit != NULL;
+}
+
+const char *cairn_engine_get_ble_declaration(void)
+{
+    return s_ble_engine_id[0] != '\0' ? s_ble_engine_id : NULL;
 }

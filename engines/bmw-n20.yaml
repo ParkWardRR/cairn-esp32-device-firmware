@@ -26,6 +26,7 @@ applies_to:
   models: ["428i (F32)"]   # research note title: "BMW F32 428i (N20/N26, 2014-2016)"
   years: { from: 2014, to: 2016 }
   vin_patterns: unknown     # nothing in the repository says how an N20 VIN reads
+  engine_codes: ["3A5C5"]  # BMW VDS positions 4-8 for F32 428i N20/N26
 
 fuel:
   type: gasoline            # pidtest.cpp: stoichiometry discussed as gasoline vs E85

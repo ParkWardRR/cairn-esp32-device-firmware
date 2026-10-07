@@ -154,6 +154,11 @@ pub struct AppliesTo {
     pub years: Maybe<Years>,
     /// 17 characters, `?` matches any character. How a VIN identifies this engine.
     pub vin_patterns: Maybe<Vec<String>>,
+    /// VIN position 4-8 substring (e.g. "A5C5" for N20, "2J7C" for B58).
+    /// Shorter and simpler than full VIN patterns; matches the engine variant
+    /// encoded in BMW's VDS section.
+    #[serde(default)]
+    pub engine_codes: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -375,6 +380,20 @@ pub fn check(profile: Profile, stem: &str, file_bytes: &[u8]) -> Result<Checked,
             }
             if !seen.insert(p) {
                 bad!("duplicate vin pattern `{p}`");
+            }
+        }
+    }
+    if let Some(codes) = &profile.applies_to.engine_codes {
+        let mut seen = BTreeSet::new();
+        if codes.is_empty() {
+            bad!("applies_to.engine_codes is empty; omit it instead");
+        }
+        for c in codes {
+            if c.is_empty() || c.len() > 8 || !c.bytes().all(|b| b.is_ascii_alphanumeric()) {
+                bad!("engine code `{c}` must be 1-8 alphanumeric characters");
+            }
+            if !seen.insert(c.as_str()) {
+                bad!("duplicate engine code `{c}`");
             }
         }
     }

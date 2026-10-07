@@ -605,15 +605,15 @@ static void test_gate(void)
     static const char *const o_vin[] = { "?????" "?????" "?????" "???" }; /* 18 long: never matches */
     static const char *const z_vin[] = { "XXXYYY" "??????????" "1" };     /* overlaps x */
     const cairn_engine_catalogue_entry_t cat[] = {
-        { "x", x_vin, 2, 1 },
-        { "y", y_vin, 1, 0 },
-        { "w", NULL, 0, 0 },
+        { "x", x_vin, 2, NULL, 0, 1 },
+        { "y", y_vin, 1, NULL, 0, 0 },
+        { "w", NULL, 0, NULL, 0, 0 },
     };
     const cairn_engine_catalogue_entry_t overlap[] = {
-        { "x", x_vin, 2, 1 },
-        { "z", z_vin, 1, 0 },
+        { "x", x_vin, 2, NULL, 0, 1 },
+        { "z", z_vin, 1, NULL, 0, 0 },
     };
-    const cairn_engine_catalogue_entry_t odd[] = { { "o", o_vin, 1, 1 } };
+    const cairn_engine_catalogue_entry_t odd[] = { { "o", o_vin, 1, NULL, 0, 1 } };
     const char *id = NULL;
 
     CHECK(cairn_vin_matches("XXX" Q13 "1", "XXX" A13 "1"));

@@ -212,11 +212,18 @@ pub fn header(all: &[Checked], selected: &[&Checked]) -> String {
     // The catalogue lists every engine the repository knows, installed or not, so a
     // vehicle that needs an engine this build left out can still be recognised.
     for c in all {
+        let n = ident(&c.profile.engine_id);
         if let Maybe::Known(v) = &c.profile.applies_to.vin_patterns {
-            let n = ident(&c.profile.engine_id);
             let _ = writeln!(w, "static const char *const k_vin_{n}[] = {{");
             for p in v {
                 let _ = writeln!(w, "    {},", cstr(p));
+            }
+            let _ = writeln!(w, "}};");
+        }
+        if let Some(codes) = &c.profile.applies_to.engine_codes {
+            let _ = writeln!(w, "static const char *const k_ecode_{n}[] = {{");
+            for code in codes {
+                let _ = writeln!(w, "    {},", cstr(code));
             }
             let _ = writeln!(w, "}};");
         }
@@ -229,7 +236,11 @@ pub fn header(all: &[Checked], selected: &[&Checked]) -> String {
             Maybe::Known(v) => (format!("k_vin_{n}"), v.len()),
             Maybe::Unknown => ("NULL".to_string(), 0),
         };
-        let _ = writeln!(w, "    {{ .id = {}, .vin_patterns = {vp}, .n_vin_patterns = {nv}, .installed = {} }},", cstr(&c.profile.engine_id), inst as u8);
+        let (ec, ne) = match &c.profile.applies_to.engine_codes {
+            Some(v) if !v.is_empty() => (format!("k_ecode_{n}"), v.len()),
+            _ => ("NULL".to_string(), 0),
+        };
+        let _ = writeln!(w, "    {{ .id = {}, .vin_patterns = {vp}, .n_vin_patterns = {nv}, .engine_codes = {ec}, .n_engine_codes = {ne}, .installed = {} }},", cstr(&c.profile.engine_id), inst as u8);
     }
     let _ = writeln!(w, "}};");
     let _ = writeln!(w);
