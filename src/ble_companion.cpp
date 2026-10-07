@@ -191,11 +191,22 @@ bool ble_companion_begin(void)
     NimBLEDevice::init(CAIRN_BLE_NAME);
     NimBLEDevice::setMTU(185);
 
+    /* Dev build: Just Works (SC without MITM). Encryption still negotiates, so the
+     * READ_ENC/WRITE_ENC characteristics still work, but macOS does not need to accept a
+     * passkey dialog. The receipt gate (Ed25519 at the application layer, verified in
+     * ble_offload against CAIRN_SERVER_RECEIPT_KEY_HEX) is unaffected. Flip back to MITM +
+     * DISPLAY_ONLY before shipping. */
     NimBLEDevice::setSecurityAuth(BLE_SM_PAIR_AUTHREQ_BOND |
-                                  BLE_SM_PAIR_AUTHREQ_MITM |
                                   BLE_SM_PAIR_AUTHREQ_SC);
-    NimBLEDevice::setSecurityIOCap(BLE_HS_IO_DISPLAY_ONLY);
+    NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
     NimBLEDevice::setSecurityPasskey(CAIRN_BLE_PASSKEY);
+
+    /* NimBLE persists bonds in NVS (CONFIG_BT_NIMBLE_MAX_BONDS=1), and nothing else clears
+     * them. A reflash that changed the passkey or the auth mode leaves a bond keyed to the
+     * old secret, which macOS tries to re-encrypt with before any dialog — the pair fails
+     * before the user is prompted. Clearing on every boot is cheap (one NVS entry) and
+     * sidesteps that path entirely. */
+    ble_companion_clear_bonds();
 
     s_server = NimBLEDevice::createServer();
     s_server->setCallbacks(&s_server_cbs);

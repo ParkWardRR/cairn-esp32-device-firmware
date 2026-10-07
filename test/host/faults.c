@@ -2366,6 +2366,22 @@ static bool row_standby_never_strands_data(void)
           "device awake whenever the ECU is asleep: %s",
           cairn_power_standby_blocker(&u));
 
+    /* Bench mode (USB power, no OBD rail) must block standby, and be named as such.
+     * Checked before trip_active so a bench "trip" still reports bench-ness. */
+    cairn_power_evidence_t b = e;
+    b.bench_mode = true;
+    CHECK(!cairn_power_should_standby(&b), "stood by on USB bench power");
+    const char *bwhy = cairn_power_standby_blocker(&b);
+    CHECK(bwhy && strstr(bwhy, "USB bench") != NULL,
+          "bench mode blocker not named USB bench: %s", bwhy ? bwhy : "(null)");
+
+    cairn_power_evidence_t bt = b;
+    bt.trip_active = true;
+    CHECK(!cairn_power_should_standby(&bt), "stood by on bench during a trip");
+    const char *btwhy = cairn_power_standby_blocker(&bt);
+    CHECK(btwhy && strstr(btwhy, "USB bench") != NULL,
+          "bench mode must still be reported over trip_active, got: %s", btwhy ? btwhy : "(null)");
+
     return true;
 }
 

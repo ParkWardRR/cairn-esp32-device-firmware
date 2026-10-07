@@ -60,6 +60,7 @@ typedef struct {
     uint16_t battery_mv;         /* CAIRN_U16_UNKNOWN when unreadable */
     uint32_t pending_bundles;    /* sealed bundles awaiting a receipt */
     bool     link_online;        /* a sync is in progress or possible */
+    bool     bench_mode;         /* on USB power with no OBD rail, so staying up for development */
 } cairn_power_evidence_t;
 
 /*

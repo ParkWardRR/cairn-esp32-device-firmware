@@ -28,6 +28,12 @@ bool cairn_power_should_standby(const cairn_power_evidence_t *e)
  */
 const char *cairn_power_standby_blocker(const cairn_power_evidence_t *e)
 {
+    if (e->bench_mode) {
+        /* USB power only, no OBD rail: this is a bench session. Staying awake and keeping
+         * the radio up is the point. Returned before trip_active because a bench "trip" is
+         * a bench event, not a reason to stop reporting bench-ness. */
+        return "USB bench power, no OBD rail";
+    }
     if (e->trip_active) return "a trip is in progress";
 
     /*

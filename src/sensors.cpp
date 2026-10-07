@@ -969,6 +969,17 @@ uint16_t sensors_battery_mv(void)
     return CAIRN_U16_UNKNOWN;
 }
 
+uint16_t sensors_supply_mv_raw(void)
+{
+    if (s_status == nullptr || !s_status->coprocessor) return 0;
+    for (int attempt = 0; attempt < 3; attempt++) {
+        float v = s_obd.getVoltage();
+        if (v > 0.1f && v < 25.0f) return (uint16_t)lroundf(v * 1000.0f);
+        if (attempt < 2) delay(20);
+    }
+    return 0;
+}
+
 void sensors_gnss_power_down(void)
 {
     if (s_status == NULL || !s_status->gnss) return;

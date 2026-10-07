@@ -169,6 +169,16 @@ bool sensors_obd_recover(void);
 /* Battery voltage in millivolts, read through the coprocessor. */
 uint16_t sensors_battery_mv(void);
 
+/*
+ * The raw supply voltage from the OBD-II co-processor, in millivolts, with no
+ * range guard. 0 if the co-processor cannot answer. Unlike sensors_battery_mv()
+ * this returns readings outside a car's normal rail range: a few volts (USB
+ * power on the bench, so OBD pin 16 is floating) or close to zero (co-processor
+ * glitch). Only the bench-mode detector reads this; everyone else wants the
+ * guarded one.
+ */
+uint16_t sensors_supply_mv_raw(void);
+
 void sensors_fill_health(cairn_device_health_t *out, uint8_t health_state,
                          uint8_t reboot_count, int rssi_dbm);
 

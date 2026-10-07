@@ -439,6 +439,28 @@ static void enforce_bus_silence(Lifecycle *lc)
     if ((int32_t)(now - lc->next_battery_read_ms) >= 0) {
         lc->next_battery_read_ms = now + CAIRN_BATTERY_POLL_MS;
         lc->last_battery_mv = sensors_battery_mv();
+
+        /* Bench-mode auto-detect from the raw co-processor voltage. USB-only power leaves
+         * OBD-II pin 16 floating; in the car with ignition off the pin is on unswitched
+         * battery (~12.4 V). The bench range is well below any car reading, so a few
+         * consecutive hits is a safe latch. One-way: once bench, stays bench until reset,
+         * so plugging into a car later does not silently drop into standby mid-development. */
+        lc->last_supply_mv_raw = sensors_supply_mv_raw();
+        if (!lc->bench_mode) {
+            bool in_bench_range = (lc->last_supply_mv_raw >= 3000 &&
+                                   lc->last_supply_mv_raw <= 7500);
+            if (in_bench_range) {
+                if (lc->bench_hits < 3) lc->bench_hits++;
+                if (lc->bench_hits >= 3) {
+                    lc->bench_mode = true;
+                    CAIRN_LOGW(TAG, "bench mode: USB power, raw supply %u mV, no OBD rail; "
+                                    "radio and MCU will stay up until reset",
+                               (unsigned)lc->last_supply_mv_raw);
+                }
+            } else if (lc->last_supply_mv_raw > 0) {
+                lc->bench_hits = 0;
+            }
+        }
     }
 
     /* Dwell tracking for the supply rail. Local measurement; no bus traffic. */
@@ -974,6 +996,7 @@ static void maybe_standby(Lifecycle *lc)
      * radio off, which would drop a transfer in progress and strand the bundles it
      * was carrying. Bounded in ble_offload_active(). */
     e.link_online = (lc->link != LinkState::Offline) || ble_offload_active();
+    e.bench_mode = lc->bench_mode;
 
     /*
      * An open capture holding data is a reason to seal, not a reason to stay

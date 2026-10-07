@@ -135,6 +135,14 @@ struct Lifecycle {
     uint16_t last_battery_mv = CAIRN_U16_UNKNOWN;
     uint32_t next_battery_read_ms = 0;
 
+    /* Bench-mode auto-detect. On USB power with no OBD, sensors_supply_mv_raw() reads
+     * the floating OBD rail (a few volts, inside this threshold); in the car it reads
+     * ~12-14 V and never engages. Latched after a few consecutive readings so one noisy
+     * sample on a cold ADC does not toggle it. Cleared on reboot. */
+    uint16_t last_supply_mv_raw = 0;
+    uint8_t  bench_hits = 0;
+    bool     bench_mode = false;
+
     /*
      * Last-known sensor values, as reported by facts. The controller keeps its
      * own copies rather than reading driver state the sensing task owns, and
