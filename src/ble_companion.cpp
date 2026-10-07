@@ -4,8 +4,10 @@
 
 #include <Arduino.h>
 #include <NimBLEDevice.h>
+#include <Preferences.h>
 #include <string.h>
 
+#include "cairn_blesec.h"
 #include "cairn_engine.h"
 #include "cairn_format.h"
 #include "cairn_log.h"
@@ -177,6 +179,30 @@ static DeviceInfoCallbacks s_device_info_cbs;
 static GnssFixCallbacks   s_gnss_fix_cbs;
 static EngineDeclCallbacks s_engine_decl_cbs;
 
+/* Bonds survive a reboot (a phone keeps its half; forgetting ours at every ignition leaves it
+ * with a key the dongle no longer recognises, and an iPhone then refuses until the person
+ * forgets the dongle in Settings). They are cleared only when the pairing configuration they
+ * were made under has changed, which is what a stale bond after a reflash actually is. */
+static void clear_bonds_if_pairing_changed(uint8_t authreq, uint8_t io_cap, uint32_t passkey)
+{
+    const uint32_t current = cairn_ble_security_fingerprint(authreq, io_cap, passkey);
+    Preferences prefs;
+    if (!prefs.begin("cairn_ble", false)) {
+        /* Cannot read the record: clearing is the safe side, and it is what the dev build did. */
+        ble_companion_clear_bonds();
+        return;
+    }
+    const uint32_t stored = prefs.getUInt("pair_fp", 0);
+    if (cairn_ble_bonds_stale(stored, current)) {
+        ble_companion_clear_bonds();
+        prefs.putUInt("pair_fp", current);
+        CAIRN_LOGI(TAG, "pairing configuration changed: bonds cleared");
+    } else {
+        CAIRN_LOGI(TAG, "pairing configuration unchanged: %d bond(s) kept", NimBLEDevice::getNumBonds());
+    }
+    prefs.end();
+}
+
 void ble_companion_clear_bonds(void)
 {
     int count = NimBLEDevice::getNumBonds();
@@ -196,17 +222,17 @@ bool ble_companion_begin(void)
      * passkey dialog. The receipt gate (Ed25519 at the application layer, verified in
      * ble_offload against CAIRN_SERVER_RECEIPT_KEY_HEX) is unaffected. Flip back to MITM +
      * DISPLAY_ONLY before shipping. */
-    NimBLEDevice::setSecurityAuth(BLE_SM_PAIR_AUTHREQ_BOND |
-                                  BLE_SM_PAIR_AUTHREQ_SC);
-    NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
+    const uint8_t authreq = BLE_SM_PAIR_AUTHREQ_BOND | BLE_SM_PAIR_AUTHREQ_SC;
+    const uint8_t io_cap  = BLE_HS_IO_NO_INPUT_OUTPUT;
+    NimBLEDevice::setSecurityAuth(authreq);
+    NimBLEDevice::setSecurityIOCap(io_cap);
     NimBLEDevice::setSecurityPasskey(CAIRN_BLE_PASSKEY);
 
-    /* NimBLE persists bonds in NVS (CONFIG_BT_NIMBLE_MAX_BONDS=1), and nothing else clears
-     * them. A reflash that changed the passkey or the auth mode leaves a bond keyed to the
-     * old secret, which macOS tries to re-encrypt with before any dialog — the pair fails
-     * before the user is prompted. Clearing on every boot is cheap (one NVS entry) and
-     * sidesteps that path entirely. */
-    ble_companion_clear_bonds();
+    /* NimBLE persists bonds in NVS (CONFIG_BT_NIMBLE_MAX_BONDS=1). A reflash that changed the
+     * passkey or the auth mode leaves a bond keyed to the old secret, which macOS tries to
+     * re-encrypt with before any dialog, so the pair fails before the user is prompted: clear
+     * bonds when (and only when) the pairing configuration changed. */
+    clear_bonds_if_pairing_changed(authreq, io_cap, (uint32_t)CAIRN_BLE_PASSKEY);
 
     s_server = NimBLEDevice::createServer();
     s_server->setCallbacks(&s_server_cbs);

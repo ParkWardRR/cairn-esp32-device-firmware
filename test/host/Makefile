@@ -35,6 +35,7 @@ LOG_DIR     := ../../lib/cairn_log
 PROV_DIR    := ../../lib/cairn_prov
 OFFLOAD_DIR := ../../lib/cairn_offload
 BOOTTIME_DIR := ../../lib/cairn_boottime
+BLESEC_DIR := ../../lib/cairn_blesec
 UPLINK_DIR  := ../../lib/cairn_uplink
 CONFIG_DIR  := ../../lib/cairn_config
 DEVINFO_DIR := ../../lib/cairn_devinfo
@@ -108,7 +109,7 @@ BUILD := build
 # Engine profiles (lib/cairn_engine): see engine.mk.
 include engine.mk
 
-.PHONY: all run asan clean conformance faults ble-vectors mtprobe prov offload offload-sim boottime uplink config devinfo nvswipe
+.PHONY: all run asan clean conformance faults ble-vectors mtprobe prov offload offload-sim boottime blesec uplink config devinfo nvswipe
 
 all: run
 
@@ -168,6 +169,12 @@ $(BUILD)/boottime: $(BOOTTIME_DIR)/cairn_boottime.c boottime_test.c $(HEADERS) |
 boottime: $(BUILD)/boottime
 	$(BUILD)/boottime
 
+$(BUILD)/blesec: $(BLESEC_DIR)/cairn_blesec.h blesec_test.c | $(BUILD)
+	$(CC) $(CFLAGS) -I$(BLESEC_DIR) blesec_test.c -o $@
+
+blesec: $(BUILD)/blesec
+	$(BUILD)/blesec
+
 $(BUILD)/uplink: $(UPLINK_DIR)/cairn_uplink.c uplink_test.c $(HEADERS) | $(BUILD)
 	$(CC) $(CFLAGS) $(UPLINK_DIR)/cairn_uplink.c uplink_test.c -o $@
 
@@ -213,7 +220,7 @@ else
 $(info device-info vectors not in this contracts pin (needs contracts-v0.2.0): devinfo row skipped)
 endif
 
-run: conformance faults ble-vectors mtprobe prov offload boottime uplink config nvswipe
+run: conformance faults ble-vectors mtprobe prov offload boottime blesec uplink config nvswipe
 
 # Undefined behaviour in the scan path would be a parser reading past a torn
 # segment — exactly the case the format exists to handle safely.
