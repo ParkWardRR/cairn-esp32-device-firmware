@@ -159,6 +159,26 @@ bool cairn_modem_ciprxget_header(const char *buf, size_t len, int *link,
  * link: the far end went away and the socket must not be reused. */
 bool cairn_modem_socket_closed(const char *buf, int link);
 
+/*
+ * The network clock from `AT+CCLK?`, as Unix milliseconds UTC.
+ *
+ * The reply is `+CCLK: "yy/MM/dd,hh:mm:ss+zz"`, where `zz` is the local offset
+ * in **quarter hours** and may be negative. The offset is subtracted, so the
+ * result is UTC regardless of where the car is -- storing local time would bake
+ * a timezone into a measurement, and the format's timestamps are UTC throughout.
+ *
+ * Returns false, writing nothing, unless the whole reply is well formed and the
+ * fields are in range. Two failures matter more than the malformed ones:
+ *
+ *   - **The module answers before the network has told it anything.** A SIM7600
+ *     with no NITZ yet reports a build-time default near 1980 ("80/01/06"), which
+ *     parses perfectly and is wrong by four decades. Years below 2000 are refused
+ *     for that reason: this is a clock that lies rather than a clock that fails.
+ *   - **The time zone field can be absent.** Some firmware omits it entirely, in
+ *     which case the reading is already UTC and is taken as such.
+ */
+bool cairn_modem_cclk_unix_ms(const char *buf, uint64_t *out_unix_ms);
+
 #ifdef __cplusplus
 }
 #endif

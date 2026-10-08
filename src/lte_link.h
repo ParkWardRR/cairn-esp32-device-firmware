@@ -64,6 +64,17 @@ const char *lte_link_plmn(void);
 int lte_link_rssi_dbm(void);
 
 /*
+ * The network's wall clock as Unix milliseconds, captured during bring-up, or 0
+ * when the network never told the module the time.
+ *
+ * Reported rather than applied: the caller records it as one time observation
+ * among several and the consumer chooses. It matters because it is the one clock
+ * available without a GNSS fix -- the 2026-10-07 drive attached to LTE fine and
+ * still decoded to 1970, because GNSS was the only source.
+ */
+uint64_t lte_link_network_unix_ms(void);
+
+/*
  * Open a TLS session to the server and close it, reporting only whether the
  * handshake completed and verified.
  *

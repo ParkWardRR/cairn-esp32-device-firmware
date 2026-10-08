@@ -124,6 +124,58 @@ class EngineDeclCallbacks : public NimBLECharacteristicCallbacks {
     }
 };
 
+/*
+ * UTC_SYNC (characteristic 0003): the phone's wall clock, 8 bytes, sent on
+ * connect and about once a minute.
+ *
+ * The contract has defined this since ble/v1; the device simply never exposed
+ * it. That omission is most of why every trip decoded to 1970: GNSS was the only
+ * clock the firmware had, its fix arrives minutes into a drive or never, and the
+ * phone has had the correct time all along.
+ *
+ * Recorded as one observation among several rather than applied directly. During
+ * a trip it lands in the open bundle, so the trip is dated from the moment the
+ * phone connects; parked it lands in the pre-roll and dates the next one.
+ */
+class UtcSyncCallbacks : public NimBLECharacteristicCallbacks {
+    void onWrite(NimBLECharacteristic *chr, NimBLEConnInfo &info) override {
+        NimBLEAttValue val = chr->getValue();
+        if (val.size() != 8) {
+            CAIRN_LOGW(TAG, "utc sync: bad length %d", (int)val.size());
+            return;
+        }
+
+        uint64_t unix_ms = 0;
+        for (int i = 7; i >= 0; i--) unix_ms = (unix_ms << 8) | val.data()[i];
+
+        /*
+         * Refuse anything before 2020. A phone with no clock, or a malformed
+         * write, must not become a bundle's time basis -- a plausible wrong date
+         * is worse than an admitted absence, and the whole point of carrying
+         * several sources is that none of them gets to lie unchallenged.
+         */
+        if (unix_ms < 1577836800000ULL) {
+            CAIRN_LOGW(TAG, "utc sync: %llu ms is before 2020; refused",
+                       (unsigned long long)unix_ms);
+            return;
+        }
+
+        fact_t f;
+        memset(&f, 0, sizeof(f));
+        f.kind = FACT_TIME_OBSERVATION;
+        f.monotonic_ms = millis();
+        f.data.utc.utc_ms = unix_ms;
+        /*
+         * Half a second. The phone's own clock is network-synchronised, so the
+         * uncertainty here is the BLE write latency rather than the clock -- but
+         * claiming better than GNSS would let it win comparisons it should lose.
+         */
+        f.data.utc.acc_ms = 500;
+        f.data.utc.source = CAIRN_TIME_SRC_PHONE;
+        sensor_task_post_fact(&f);
+    }
+};
+
 class ServerCallbacks : public NimBLEServerCallbacks {
     void onConnect(NimBLEServer *server, NimBLEConnInfo &info) override {
         s_conn_handle       = info.getConnHandle();
@@ -208,6 +260,7 @@ static ServerCallbacks    s_server_cbs;
 static DeviceInfoCallbacks s_device_info_cbs;
 static GnssFixCallbacks   s_gnss_fix_cbs;
 static EngineDeclCallbacks s_engine_decl_cbs;
+static UtcSyncCallbacks    s_utc_sync_cbs;
 
 /* Bonds survive a reboot (a phone keeps its half; forgetting ours at every ignition leaves it
  * with a key the dongle no longer recognises, and an iPhone then refuses until the person
@@ -301,6 +354,12 @@ static bool build_gatt_and_advertise(void)
         NIMBLE_PROPERTY::WRITE_ENC |
         NIMBLE_PROPERTY::WRITE_AUTHEN);
     chr_engine->setCallbacks(&s_engine_decl_cbs);
+
+    NimBLECharacteristic *chr_utc = svc->createCharacteristic(
+        "A8E30003-4F5B-11EF-A017-325096B39F47",
+        NIMBLE_PROPERTY::WRITE_NR |
+        NIMBLE_PROPERTY::WRITE_ENC);
+    chr_utc->setCallbacks(&s_utc_sync_cbs);
 
     s_chr_quality = svc->createCharacteristic(
         "A8E30010-4F5B-11EF-A017-325096B39F47",

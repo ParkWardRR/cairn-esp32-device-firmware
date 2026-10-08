@@ -38,6 +38,13 @@ static char            s_addr[48];
 static char            s_plmn[8];
 static int             s_rssi;
 
+/*
+ * The network clock, captured during bring-up. Zero when the network never told
+ * the module the time, which is the common case on a SIM that has just attached
+ * and the reason this is reported rather than relied on.
+ */
+static uint64_t        s_net_unix_ms;
+
 const char *cairn_lte_status_name(cairn_lte_status_t s)
 {
     switch (s) {
@@ -273,6 +280,32 @@ cairn_lte_status_t lte_link_up(void)
         }
     }
 
+    /*
+     * Ask the network what time it is, once the context is up.
+     *
+     * This is the source that would have dated the 2026-10-07 drive. GNSS was
+     * the only clock the device had, its fix arrived 130 s in, and the basis was
+     * lost before the bundle sealed -- while the modem attached fine and the
+     * network knew the time the whole way.
+     *
+     * AT+CTZU=1 asks the module to apply network time automatically; it is
+     * harmless if already set and the read below is what actually matters. A
+     * failure either way is not a bring-up failure: the link works without
+     * knowing the time, and a missing clock is reported as absent rather than
+     * guessed.
+     */
+    s_net_unix_ms = 0;
+    at_ok("AT+CTZU=1", 2000);
+    if (at_cmd("AT+CCLK?", 2000, nullptr) == CAIRN_AT_OK) {
+        uint64_t ms = 0;
+        if (cairn_modem_cclk_unix_ms(s_reply, &ms)) {
+            s_net_unix_ms = ms;
+            CAIRN_LOGI(TAG, "network time: %llu ms", (unsigned long long)ms);
+        } else {
+            CAIRN_LOGI(TAG, "network time not set yet; the clock stays unknown");
+        }
+    }
+
     return CAIRN_LTE_OK;
 }
 
@@ -301,6 +334,7 @@ void lte_link_down(void)
 const char *lte_link_address(void) { return s_addr; }
 const char *lte_link_plmn(void)    { return s_plmn; }
 int         lte_link_rssi_dbm(void){ return s_rssi; }
+uint64_t    lte_link_network_unix_ms(void) { return s_net_unix_ms; }
 
 /* ── the modem socket, as a Client ────────────────────────────────────────── */
 

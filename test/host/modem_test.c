@@ -288,6 +288,60 @@ static void test_sockets(void)
           !cairn_modem_socket_closed("\r\n+CIPSEND: 0,8,8\r\n\r\nOK\r\n", 0));
 }
 
+/*
+ * AT+CCLK? -- the network clock.
+ *
+ * The dangerous case is not a malformed reply but a well-formed lie: a SIM7600
+ * that has had no NITZ answers with its build default in 1980, which parses
+ * perfectly and would be adopted as a bundle's time basis.
+ */
+static void test_cclk(void)
+{
+    uint64_t ms = 0;
+
+    /* 2026-10-08 21:30:00 UTC, reported as 14:30 local with a -7 h offset
+     * (-28 quarter hours), which is what this car's timezone looks like. */
+    CHECK("cclk: a local reading converts to UTC",
+          cairn_modem_cclk_unix_ms("\r\n+CCLK: \"26/10/08,14:30:00-28\"\r\n\r\nOK\r\n", &ms));
+    CHECK("cclk: ...and the offset is subtracted, not added",
+          ms == 1791495000000ULL);
+
+    /*
+     * East of UTC, and a fractional zone: India is +5:30 = +22 quarter hours.
+     * The same instant is 03:00 on the 9th there, so this also covers the
+     * subtraction carrying back across a date boundary.
+     */
+    ms = 0;
+    CHECK("cclk: a positive fractional offset parses",
+          cairn_modem_cclk_unix_ms("+CCLK: \"26/10/09,03:00:00+22\"", &ms));
+    CHECK("cclk: ...to the same instant, carrying back a day", ms == 1791495000000ULL);
+
+    /* No zone field at all: the reading is already UTC. */
+    ms = 0;
+    CHECK("cclk: a reply with no zone is taken as UTC",
+          cairn_modem_cclk_unix_ms("+CCLK: \"26/10/08,21:30:00\"", &ms));
+    CHECK("cclk: ...unshifted", ms == 1791495000000ULL);
+
+    /* The build default. Parses cleanly, and must still be refused. */
+    ms = 0;
+    CHECK("cclk: the module's unset 1980 default is refused",
+          !cairn_modem_cclk_unix_ms("+CCLK: \"80/01/06,00:00:00+00\"", &ms));
+    CHECK("cclk: ...and writes nothing", ms == 0);
+
+    CHECK("cclk: a missing reply is not a time",
+          !cairn_modem_cclk_unix_ms("\r\nOK\r\n", &ms));
+    CHECK("cclk: a truncated reply is refused",
+          !cairn_modem_cclk_unix_ms("+CCLK: \"26/10/0", &ms));
+    CHECK("cclk: an out-of-range month is refused",
+          !cairn_modem_cclk_unix_ms("+CCLK: \"26/13/08,21:30:00+00\"", &ms));
+    CHECK("cclk: an out-of-range hour is refused",
+          !cairn_modem_cclk_unix_ms("+CCLK: \"26/10/08,24:30:00+00\"", &ms));
+    CHECK("cclk: an absurd zone is refused",
+          !cairn_modem_cclk_unix_ms("+CCLK: \"26/10/08,21:30:00+99\"", &ms));
+    CHECK("cclk: a leap second is accepted rather than rejected",
+          cairn_modem_cclk_unix_ms("+CCLK: \"26/10/08,21:29:60+00\"", &ms));
+}
+
 int main(void)
 {
     printf("modem: SIMCom reply parsing, against replies this unit produced\n");
@@ -298,6 +352,7 @@ int main(void)
     test_operator();
     test_signal();
     test_pdp();
+    test_cclk();
     test_sockets();
 
     printf("modem: %d passed, %d failed\n", g_pass, g_fail);

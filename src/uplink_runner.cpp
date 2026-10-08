@@ -12,6 +12,7 @@
 #include "cairn_uplink.h"
 #include "config.h"
 #include "lifecycle.h"
+#include "sensor_task.h"
 #include "sensors.h"
 
 #if CAIRN_WIFI_UPLINK
@@ -289,6 +290,33 @@ static void run_lte_send(Lifecycle *lc)
     bool ok = false;
     cairn_lte_status_t st = lte_link_up();
     if (st == CAIRN_LTE_OK) {
+        /*
+         * Record what the network says the time is, while the modem is up.
+         *
+         * This slot runs parked, after the trip's bundle has sealed, so the
+         * observation cannot date the bundle about to be uploaded -- it lands in
+         * the pre-roll and is written into the *next* capture, which means the
+         * next trip is dated from its first frame instead of waiting on a GNSS
+         * fix. That is the whole gap: the 2026-10-07 drive attached to LTE
+         * perfectly and still decoded to 1970, because GNSS was the only clock
+         * and its fix came 130 s in.
+         *
+         * Two seconds of claimed accuracy, not zero: NITZ is good to about a
+         * second and the AT round trip adds more, and a source that overstates
+         * itself would win comparisons it should lose.
+         */
+        uint64_t net_ms = lte_link_network_unix_ms();
+        if (net_ms != 0) {
+            fact_t t;
+            memset(&t, 0, sizeof(t));
+            t.kind = FACT_TIME_OBSERVATION;
+            t.monotonic_ms = millis();
+            t.data.utc.utc_ms = net_ms;
+            t.data.utc.acc_ms = 2000;
+            t.data.utc.source = CAIRN_TIME_SRC_MODEM_NETWORK;
+            sensor_task_post_fact(&t);
+        }
+
         lte_link_result_t l;
         lte_link_upload_pending(CAIRN_UPLINK_BUNDLES_PER_SLOT, should_abort,
                                 nullptr, &l);

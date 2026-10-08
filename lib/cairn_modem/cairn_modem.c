@@ -2,6 +2,7 @@
 
 #include "cairn_modem.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -345,4 +346,79 @@ bool cairn_modem_socket_closed(const char *buf, int link)
 
     /* Older firmwares emit a bare "CLOSED" with no link number. */
     return has_line(buf, "CLOSED");
+}
+
+bool cairn_modem_cclk_unix_ms(const char *buf, uint64_t *out_unix_ms)
+{
+    const char *p;
+    int yy, mo, dd, hh, mi, ss;
+    int tz_q = 0;        /* local offset in quarter hours */
+    char sign = 0;
+    long days;
+    int  y, m;
+    long era;
+    unsigned yoe, doy, doe;
+
+    if (buf == NULL || out_unix_ms == NULL) return false;
+
+    p = strstr(buf, "+CCLK:");
+    if (p == NULL) return false;
+    p = strchr(p, '"');
+    if (p == NULL) return false;
+    p++;
+
+    if (sscanf(p, "%2d/%2d/%2d,%2d:%2d:%2d", &yy, &mo, &dd, &hh, &mi, &ss) != 6) {
+        return false;
+    }
+
+    /* The zone is optional: some firmware omits it, and the reading is then UTC. */
+    {
+        const char *z = p;
+        while (*z && *z != '"' && *z != '+' && *z != '-') z++;
+        if (*z == '+' || *z == '-') {
+            sign = *z;
+            if (sscanf(z + 1, "%2d", &tz_q) != 1) return false;
+            if (tz_q > 56) return false;   /* +/-14 h, the widest real offset */
+            if (sign == '-') tz_q = -tz_q;
+        }
+    }
+
+    /*
+     * Refuse a clock the network has not set. A SIM7600 with no NITZ answers
+     * with its build default in 1980, which parses cleanly and is wrong by
+     * decades -- far more dangerous than a parse failure, because it would be
+     * adopted as a bundle's time basis and look plausible.
+     */
+    if (yy > 99 || mo < 1 || mo > 12 || dd < 1 || dd > 31) return false;
+    if (hh > 23 || mi > 59 || ss > 60) return false;  /* 60: leap second */
+
+    /*
+     * Two-digit years, split at 80. The module's unset default is "80/01/06" --
+     * the GPS epoch, 1980 -- so mapping every yy to 2000+yy would turn that lie
+     * into a plausible 2080 date and sail past the sanity check below. 80..99
+     * therefore means 1980..1999, which is also the GSM convention, and the
+     * mapping is good until 2080.
+     */
+    y = (yy >= 80) ? 1900 + yy : 2000 + yy;
+    m = mo;
+    if (m <= 2) { y -= 1; m += 12; }
+    era  = (y >= 0 ? y : y - 399) / 400;
+    yoe  = (unsigned)(y - era * 400);
+    doy  = (unsigned)((153 * (m - 3) + 2) / 5 + dd - 1);
+    doe  = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    days = era * 146097 + (long)doe - 719468;
+
+    if (days < 10957) return false;  /* before 2000-01-01: not a network clock */
+
+    {
+        int64_t ms = (int64_t)days * 86400000LL +
+                     (int64_t)hh * 3600000LL +
+                     (int64_t)mi * 60000LL +
+                     (int64_t)ss * 1000LL;
+        /* The reading is local; the offset is quarter hours east of UTC. */
+        ms -= (int64_t)tz_q * 15LL * 60LL * 1000LL;
+        if (ms < 0) return false;
+        *out_unix_ms = (uint64_t)ms;
+    }
+    return true;
 }
