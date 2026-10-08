@@ -107,6 +107,14 @@ probes:
   - { id: 0x46, name: AMBIENT_TEMP,    std_bytes: 1 }
   - { id: 0x06, name: FUEL_TRIM_SHORT, std_bytes: 1 }
   - { id: 0x07, name: FUEL_TRIM_LONG,  std_bytes: 1 }
+  # Driver demand. throttle_pct is 0x11, the throttle plate angle, which on this
+  # drive-by-wire engine does not reach 100% at wide-open throttle: it peaked at
+  # 77% across the 2026-10-07 drive and read 32-34% during the one confirmed boost
+  # event (159 kPa, ~8.6 psi, 4142 rpm). So the capture cannot currently say
+  # whether a pull was WOT. Probed, not claimed: whether this DME answers 0x49 is
+  # unknown, which is why these are here and not in `pids` above.
+  - { id: 0x49, name: PEDAL_POS_D,     std_bytes: 1 }
+  - { id: 0x4A, name: PEDAL_POS_E,     std_bytes: 1 }
   - { id: 0x51, name: FUEL_TYPE,       std_bytes: 1 }
   - { id: 0x52, name: ETHANOL_PCT,     std_bytes: 1 }
   - { id: 0x4F, name: MAX_VALUES,      std_bytes: 4 }

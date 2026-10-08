@@ -751,7 +751,9 @@ static void test_lte_trigger(void)
 
     uint32_t t = 10000;
     cairn_uplink_action_t a = cairn_uplink_tick(&u, &ev, t);
-    CHECK("LTE does not fire when no trip has been seen", a.kind != CAIRN_UL_ACT_LTE_SEND);
+    /* Boot now counts as a trip end (#36), so what holds this back is the settle
+     * delay, not the absence of an edge. test_lte_after_reboot covers that. */
+    CHECK("LTE does not fire the instant the device boots", a.kind != CAIRN_UL_ACT_LTE_SEND);
 
     ev.trip_active = true; ev.parked = false;
     cairn_uplink_tick(&u, &ev, t);
@@ -800,6 +802,61 @@ static void test_lte_trigger(void)
     }
 }
 
+/*
+ * A power cycle while parked, away, with bundles already sealed (#36).
+ *
+ * Before boot counted as a trip end this device could never send: trip_ended_known
+ * is zeroed by init, so the manager had no edge to point at and the bundles waited
+ * for some later drive to finish — in exactly the situation where cellular is the
+ * only way they can leave.
+ */
+static void test_lte_after_reboot(void)
+{
+    cairn_uplink_config_t cfg;
+    cairn_uplink_config_defaults(&cfg);
+
+    cairn_uplink_evidence_t ev;
+    memset(&ev, 0, sizeof ev);
+    ev.parked = true; ev.battery_ok = true; ev.bundles_waiting = 1;
+    ev.path[CAIRN_PATH_LTE] = (cairn_path_info_t){ true, true, true };
+
+    const uint32_t boot = 5000;
+
+    cairn_uplink_t u;
+    cairn_uplink_init(&u, &cfg);
+    CHECK("a fresh boot does not send immediately",
+          cairn_uplink_tick(&u, &ev, boot).kind != CAIRN_UL_ACT_LTE_SEND);
+    CHECK("nor before the settle delay has elapsed, so the phone keeps first refusal",
+          cairn_uplink_tick(&u, &ev, boot + cfg.lte_after_trip_ms - 1).kind
+              != CAIRN_UL_ACT_LTE_SEND);
+    CHECK("but a reboot parked with bundles waiting does send once it has",
+          cairn_uplink_tick(&u, &ev, boot + cfg.lte_after_trip_ms).kind
+              == CAIRN_UL_ACT_LTE_SEND);
+
+    /*
+     * The adopted end must not survive a reboot that lands mid-drive. Capture
+     * takes a few seconds to arm, so the first tick legitimately sees no trip;
+     * once it does arm, the real trip edge has to clear what boot assumed.
+     */
+    cairn_uplink_t v;
+    cairn_uplink_init(&v, &cfg);
+    cairn_uplink_evidence_t e = ev;
+    cairn_uplink_tick(&v, &e, boot);
+    e.trip_active = true; e.parked = false;
+    cairn_uplink_tick(&v, &e, boot + 12000);
+    CHECK("a reboot that lands mid-drive does not send on the adopted end",
+          cairn_uplink_tick(&v, &e, boot + cfg.lte_after_trip_ms).kind
+              != CAIRN_UL_ACT_LTE_SEND);
+
+    /* And once that drive really ends, the normal edge takes over. */
+    uint32_t end = boot + cfg.lte_after_trip_ms + 1000;
+    e.trip_active = false; e.parked = true;
+    cairn_uplink_tick(&v, &e, end);
+    CHECK("and sends after the real trip end instead",
+          cairn_uplink_tick(&v, &e, end + cfg.lte_after_trip_ms).kind
+              == CAIRN_UL_ACT_LTE_SEND);
+}
+
 static void test_wrap(void)
 {
     /* The same schedule with the clock about to wrap. */
@@ -829,6 +886,7 @@ int main(void)
     test_home_scan();
     test_scan_conditions();
     test_lte_trigger();
+    test_lte_after_reboot();
     test_wrap();
 
     printf("uplink manager: %d/%d passed\n", g_pass, g_pass + g_fail);

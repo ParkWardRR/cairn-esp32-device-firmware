@@ -102,6 +102,28 @@ static const pid_probe_t k_probes[] = {
      * Whether an N20 answers is doubtful without a flex-fuel sensor, which is
      * exactly why this prints rather than assumes.
      */
+    /*
+     * Accelerator pedal position, probed because the drive of 2026-10-07 could
+     * not answer "was this a wide-open-throttle pull" from the data it captured.
+     *
+     * throttle_pct is 0x11, the throttle *plate* angle. On this drive-by-wire
+     * engine the ECU opens the plate as far as it wants, not as far as the pedal
+     * went, so the channel does not reach 100% at WOT: it peaked at 77% across
+     * the whole trip, and read 32-34% during the one confirmed boost event
+     * (159 kPa, about 8.6 psi, at 4142 rpm). Pedal position is the driver's
+     * demand and is the signal that actually marks a pull.
+     *
+     * 0x49 is standard and distinct from throttle position (SAE J1979; see
+     * research_notes/BMW B58 OBD PID support/candidate_manifest.md, which rates
+     * it medium confidence). It is *not* in this profile's probed support list,
+     * so whether an N20 DME answers is unknown — which is the reason it is here,
+     * printed, rather than added to engines/bmw-n20.yaml as a claim. 0x4A is
+     * included because vehicles that answer one often answer the other, and
+     * knowing which costs nothing once the probe is running.
+     */
+    { 0x49, "PEDAL_POS_D",      1, "A*100/255 %; driver demand, not plate angle" },
+    { 0x4A, "PEDAL_POS_E",      1, "A*100/255 %" },
+
     { 0x51, "FUEL_TYPE",        1, "enum; 23 = diesel, 1 = gasoline" },
     { 0x52, "ETHANOL_PCT",      1, "A*100/255 %" },
 

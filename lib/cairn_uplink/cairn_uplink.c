@@ -200,6 +200,31 @@ cairn_uplink_action_t cairn_uplink_tick(cairn_uplink_t *u, const cairn_uplink_ev
         u->trip_was_active = false;
         u->trip_ended_known = true;
         u->trip_ended_ms = now;
+    } else if (!u->trip_ended_known) {
+        /*
+         * Cold start with no trip running: adopt boot as the trip end (#36).
+         *
+         * trip_ended_known is zeroed by init, so before this branch existed a
+         * power cycle meant the manager had no trip edge to point at and LTE
+         * would not fire at all. Bundles already sealed on the card sat there
+         * until some *later* drive happened to end — which is the one situation
+         * where the car is parked, away, holding data, and cellular is the only
+         * way it can leave.
+         *
+         * Taking boot as the edge is not a guess about the past. Bundles on the
+         * card are themselves the evidence that a trip happened, and
+         * ev->trip_active already distinguishes parked from driving, so the
+         * refusal was never protecting against a wrong answer — only against an
+         * unobserved one.
+         *
+         * Anchoring at `now` rather than zero keeps the settle delay honest:
+         * lte_after_trip_ms still has to elapse from boot, so the phone keeps
+         * its free first attempt. And a reboot that lands mid-drive corrects
+         * itself — capture arms a few seconds later, trip_active goes true, and
+         * the branch above clears this again.
+         */
+        u->trip_ended_known = true;
+        u->trip_ended_ms = now;
     }
 
     switch (u->state) {
