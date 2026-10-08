@@ -419,6 +419,10 @@ static void journal_path(const cairn_capture_t *cap, char *out, size_t cap_len)
     snprintf(out, cap_len, "%s/journal.seg", cap->dir);
 }
 
+/* Defined with the rest of the basis sidecar, below; declared here because the
+ * resume path needs it and sits above that. */
+static void utc_basis_load(cairn_capture_t *cap);
+
 bool cairn_store_init(void)
 {
     const char *dirs[] = {
@@ -998,6 +1002,11 @@ bool cairn_capture_open_or_resume(cairn_capture_t *cap,
             cairn_segment_cipher_wipe(&cap->journal_cipher);
         }
 
+        /* The basis belongs to this capture, not to the boot that is resuming
+         * it. Without this the trip dates from the epoch even though GNSS found
+         * a date before power was cut. */
+        utc_basis_load(cap);
+
         cap->active = true;
         CAIRN_LOGI(TAG, "resumed: segment %u at %u bytes, next seq %u, "
                         "%u bytes discarded, recovery_state %u, counter %llu",
@@ -1208,11 +1217,131 @@ bool cairn_capture_append(cairn_capture_t *cap, cairn_chain_id_t chain_id,
     return true;
 }
 
-void cairn_capture_set_utc_basis(cairn_capture_t *cap, uint64_t utc_ms,
-                                 uint32_t acc_ms)
+/*
+ * The basis sidecar.
+ *
+ * The basis cannot live only in RAM. It is established the first time GNSS has a
+ * date, which on a cold start is minutes into the drive, and the capture is
+ * normally not sealed in that same boot: the dongle is bus-powered, so switching
+ * the car off cuts power mid-bundle and the seal happens on the next boot from a
+ * resumed capture. cairn_capture_open_or_resume reconstructs segment bytes,
+ * sequence numbers, record counts and ciphers from the card -- there is nowhere
+ * for an in-RAM basis to come back from, so it resumed as zero and every bundle
+ * was signed with utc_basis_ms = 0. Measured: all 15 trips on the server are
+ * dated 1970-01-01, while the device's own health records show DEGRADED_TIME
+ * clearing mid-drive, so the basis was found and then lost.
+ *
+ * This is the same class of bug as the record counts the journal used to forget
+ * across a resume (see the comment in cairn_capture_open_or_resume), and it is
+ * fixed the same way: write it down.
+ *
+ * A sidecar rather than a record in the chain, because the basis is a property of
+ * the capture and not an observation in it. It carries a CRC because a torn write
+ * here would otherwise date a whole trip wrongly, which is worse than having no
+ * basis at all: a zero basis is visibly 1970 and DEGRADED_TIME says why, whereas
+ * a corrupt one looks like a real date.
+ */
+#define UTC_BASIS_FILE_BYTES 16u
+
+/* Little-endian, to match every other integer the format puts on the card. */
+static void basis_put_u64(uint8_t *p, uint64_t v)
 {
-    cap->utc_basis_ms     = utc_ms;
+    for (int i = 0; i < 8; i++) p[i] = (uint8_t)(v >> (8 * i));
+}
+
+static void basis_put_u32(uint8_t *p, uint32_t v)
+{
+    for (int i = 0; i < 4; i++) p[i] = (uint8_t)(v >> (8 * i));
+}
+
+static uint64_t basis_get_u64(const uint8_t *p)
+{
+    uint64_t v = 0;
+    for (int i = 7; i >= 0; i--) v = (v << 8) | p[i];
+    return v;
+}
+
+static uint32_t basis_get_u32(const uint8_t *p)
+{
+    uint32_t v = 0;
+    for (int i = 3; i >= 0; i--) v = (v << 8) | p[i];
+    return v;
+}
+
+static void utc_basis_path(const cairn_capture_t *cap, char *out, size_t cap_len)
+{
+    snprintf(out, cap_len, "%s/utcbasis.bin", cap->dir);
+}
+
+static void utc_basis_store(const cairn_capture_t *cap)
+{
+    uint8_t buf[UTC_BASIS_FILE_BYTES];
+    basis_put_u64(buf, cap->utc_basis_ms);
+    basis_put_u32(buf + 8, cap->utc_basis_acc_ms);
+    basis_put_u32(buf + 12, cairn_crc32(buf, 12));
+
+    char path[PATH_MAX_LEN];
+    utc_basis_path(cap, path, sizeof(path));
+
+    cairn_file_t *f = cairn_fs_open(path, CAIRN_FS_WRITE);
+    if (f == NULL) {
+        CAIRN_LOGW(TAG, "could not record the UTC basis; this trip will date from the epoch");
+        return;
+    }
+    bool ok = cairn_fs_write(f, buf, sizeof(buf)) == sizeof(buf) && cairn_fs_flush(f);
+    cairn_fs_close(f);
+    if (!ok) {
+        CAIRN_LOGW(TAG, "UTC basis write was short; this trip will date from the epoch");
+        cairn_fs_remove(path);
+    }
+}
+
+/* Restore the basis for a resumed capture. Absence is normal and not an error:
+ * the receiver may never have had a date. */
+static void utc_basis_load(cairn_capture_t *cap)
+{
+    char path[PATH_MAX_LEN];
+    utc_basis_path(cap, path, sizeof(path));
+    if (!cairn_fs_exists(path)) return;
+
+    uint8_t buf[UTC_BASIS_FILE_BYTES];
+    cairn_file_t *f = cairn_fs_open(path, CAIRN_FS_READ);
+    if (f == NULL) return;
+    bool read_ok = cairn_fs_read(f, buf, sizeof(buf)) == sizeof(buf);
+    cairn_fs_close(f);
+    if (!read_ok) return;
+
+    if (basis_get_u32(buf + 12) != cairn_crc32(buf, 12)) {
+        CAIRN_LOGW(TAG, "UTC basis sidecar failed its CRC; ignoring it");
+        return;
+    }
+
+    cap->utc_basis_ms     = basis_get_u64(buf);
+    cap->utc_basis_acc_ms = basis_get_u32(buf + 8);
+    CAIRN_LOGI(TAG, "UTC basis recovered: %llu ms (+/- %u ms)",
+               (unsigned long long)cap->utc_basis_ms,
+               (unsigned)cap->utc_basis_acc_ms);
+}
+
+void cairn_capture_set_utc_basis(cairn_capture_t *cap, uint64_t utc_ms,
+                                 uint32_t acc_ms, uint32_t sampled_monotonic_ms)
+{
+    /*
+     * Stored as the UTC of monotonic zero, not the UTC of the sample.
+     *
+     * Consumers reconstruct a frame's wall-clock time as utc_basis_ms plus the
+     * frame's own monotonic_ms (the server's decode.observedAt does exactly
+     * that), and the firmware writes device uptime into monotonic_ms. So the
+     * basis has to be the instant uptime was zero. Storing the sampled UTC
+     * instead put every timestamp in the bundle late by however long the
+     * receiver took to get a date -- on the 2026-10-07 drive, about 130 s.
+     */
+    cap->utc_basis_ms = (utc_ms > (uint64_t)sampled_monotonic_ms)
+                            ? utc_ms - (uint64_t)sampled_monotonic_ms
+                            : 0;
     cap->utc_basis_acc_ms = acc_ms;
+
+    if (cap->utc_basis_ms != 0) utc_basis_store(cap);
 }
 
 bool cairn_capture_flush(cairn_capture_t *cap)

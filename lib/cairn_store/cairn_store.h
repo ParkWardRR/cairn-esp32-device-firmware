@@ -275,10 +275,23 @@ bool cairn_capture_append(cairn_capture_t *cap, cairn_chain_id_t chain,
                           uint16_t flags, uint32_t monotonic_ms,
                           const uint8_t *payload, size_t payload_len);
 
-/* Record the UTC basis for the bundle: a single annotation with its own
- * accuracy, rather than a timestamp per frame that might disagree. */
+/*
+ * Record the UTC basis for the bundle: a single annotation with its own
+ * accuracy, rather than a timestamp per frame that might disagree.
+ *
+ * `utc_ms` is the wall clock as sampled, and `sampled_monotonic_ms` is the
+ * monotonic reading at that same instant. The stored basis is the UTC of
+ * monotonic zero, because that is what a reader needs: a frame's wall-clock time
+ * is utc_basis_ms + the frame's own monotonic_ms. Passing the sampled UTC
+ * straight through dated every frame late by however long the receiver took to
+ * acquire a date.
+ *
+ * Persisted alongside the capture, so a bundle sealed on a later boot — the
+ * normal case, since switching the car off cuts power mid-capture — keeps the
+ * basis this one established.
+ */
 void cairn_capture_set_utc_basis(cairn_capture_t *cap, uint64_t utc_ms,
-                                 uint32_t acc_ms);
+                                 uint32_t acc_ms, uint32_t sampled_monotonic_ms);
 
 /* Push buffered frames to the card. Called on the cadence above and before any
  * state change that must survive power loss. */

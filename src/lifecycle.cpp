@@ -612,10 +612,14 @@ static void on_utc_basis(Lifecycle *lc, const fact_t *f)
 {
     if (lc->have_utc_basis) return;
 
-    cairn_capture_set_utc_basis(&lc->cap, f->data.utc.utc_ms, f->data.utc.acc_ms);
+    /* The fact carries the monotonic reading of the same instant, which is what
+     * turns a sampled wall clock into the basis a reader can add monotonic_ms to. */
+    cairn_capture_set_utc_basis(&lc->cap, f->data.utc.utc_ms, f->data.utc.acc_ms,
+                                f->monotonic_ms);
     lc->have_utc_basis = true;
-    CAIRN_LOGI(TAG, "UTC basis established: %llu ms (+/- %u ms)",
+    CAIRN_LOGI(TAG, "UTC basis established: %llu ms at monotonic %u (+/- %u ms)",
                (unsigned long long)f->data.utc.utc_ms,
+               (unsigned)f->monotonic_ms,
                (unsigned)f->data.utc.acc_ms);
 }
 

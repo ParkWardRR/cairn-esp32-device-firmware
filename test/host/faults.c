@@ -756,6 +756,72 @@ static bool row_torn_tail_mid_frame(void)
 }
 
 /*
+ * The UTC basis has to survive the resume, and has to be anchored at monotonic
+ * zero rather than at the moment the fix arrived.
+ *
+ * Both halves were wrong at once, and together they dated every trip on the
+ * server 1970-01-01 — all fifteen of them. The basis lived only in RAM, and the
+ * capture is normally sealed on a *later* boot than the one that established it:
+ * the dongle is bus-powered, so switching the car off cuts power mid-bundle. And
+ * a reader reconstructs a frame's wall clock as utc_basis_ms + the frame's own
+ * monotonic_ms, so storing the sampled UTC put every timestamp late by however
+ * long the receiver took to find a date.
+ */
+static bool row_utc_basis_survives_resume(void)
+{
+    uint8_t device_id[16], seed[32], pub[32];
+    uint32_t boot = 0;
+    CHECK(cairn_identity_load(device_id, seed, pub, &boot), "identity load failed");
+
+    uint8_t boot_id[16];
+    cairn_new_boot_id(boot_id);
+
+    cairn_capture_t cap;
+    CHECK(cairn_capture_open_or_resume(&cap, device_id, boot_id, &g_ident), "open failed");
+    CHECK(append_samples(&cap, 3) == 3, "not all frames appended");
+
+    /* A date found 130 s in, which is what the real drive measured. */
+    const uint64_t sampled_utc = 1790000130000ULL;
+    const uint32_t sampled_mono = 130000u;
+    const uint64_t want_basis = sampled_utc - (uint64_t)sampled_mono;
+
+    cairn_capture_set_utc_basis(&cap, sampled_utc, 1000u, sampled_mono);
+    CHECK(cap.utc_basis_ms == want_basis,
+          "basis is %llu, want %llu (the sampled UTC minus its monotonic)",
+          (unsigned long long)cap.utc_basis_ms, (unsigned long long)want_basis);
+
+    /* Power cut: nothing is sealed, the next boot resumes from the card. */
+    cairn_capture_t resumed;
+    CHECK(cairn_capture_open_or_resume(&resumed, device_id, boot_id, &g_ident),
+          "resume failed");
+    CHECK(resumed.utc_basis_ms == want_basis,
+          "resumed basis is %llu, want %llu",
+          (unsigned long long)resumed.utc_basis_ms, (unsigned long long)want_basis);
+    CHECK(resumed.utc_basis_acc_ms == 1000u,
+          "resumed accuracy is %u, want 1000", (unsigned)resumed.utc_basis_acc_ms);
+
+    /*
+     * A corrupt sidecar must read as "no basis", not as a plausible date. A zero
+     * basis is visibly 1970 and DEGRADED_TIME explains it; a corrupt one would
+     * date a whole trip wrongly and look real.
+     */
+    char id[27];
+    CHECK(current_capture_id(id, sizeof(id)), "no capture directory");
+    char basis_rel[256];
+    snprintf(basis_rel, sizeof(basis_rel), "%s/%s/utcbasis.bin", CAIRN_DIR_CAPTURE, id);
+    CHECK(tear_file(basis_rel, 4), "cannot tear the basis sidecar");
+
+    cairn_capture_t torn;
+    CHECK(cairn_capture_open_or_resume(&torn, device_id, boot_id, &g_ident),
+          "resume after tearing the basis failed");
+    CHECK(torn.utc_basis_ms == 0,
+          "a torn basis was adopted as %llu; it must be refused",
+          (unsigned long long)torn.utc_basis_ms);
+
+    return true;
+}
+
+/*
  * A cut inside a frame *header* is a different code path: there are not even
  * enough bytes to read a length prefix. It must still be a torn tail rather
  * than an error that condemns the segment.
@@ -3451,6 +3517,7 @@ static const row_t ROWS[] = {
     { "v3",       "the counter survives a power cut mid-seal",   row_counter_durable_across_seal_power_cut },
     { "v3",       "no nonce repeats across a torn-tail rewrite", row_nonce_never_repeats_across_rewrite },
     { "v3",       "a resumed bundle keeps one binding",          row_resumed_bundle_keeps_its_binding },
+    { "time",     "the UTC basis survives a resume, anchored at zero", row_utc_basis_survives_resume },
     { "v3",       "an unassigned device seals, visibly unbound", row_unassigned_is_visible },
 };
 
