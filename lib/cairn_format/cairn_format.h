@@ -301,9 +301,24 @@ void cairn_merkle_root(uint8_t (*leaves)[32], size_t count, uint8_t out[32]);
  * overflowed, exactly as the paragraph above warned it would. 64 slots at the
  * 8 KiB target still covers a bundle up to 512 KiB, more than twice the
  * ~230 KB a trip has actually been measured at, and anything larger adapts to
- * coarser chunks rather than failing. Raising it again means freeing DRAM or
- * moving these buffers to the 4 MB PSRAM, which is what net_upload.cpp does
- * for the largest of them.
+ * coarser chunks rather than failing.
+ *
+ * LOWERING THIS STRANDS SEALED BUNDLES. cairn_manifest_decode refuses a
+ * manifest declaring more chunks than fit (CAIRN_ERR_MALFORMED -- it does not
+ * truncate, which is right), so this constant is part of the on-card
+ * compatibility surface, not just a memory budget. Going 96 -> 64 made a
+ * 1.17 MB bundle already on the card unreadable by every path, exactly as a
+ * pre-v3 manifest is: no reader, therefore no receipt, therefore no prune.
+ * Raise it freely; lower it only knowing what is already sealed, and expect to
+ * clear the card.
+ *
+ * Raising it again needs DRAM freed first. net_upload.cpp already moved the
+ * largest consumers -- the bundle reader and its scratch -- to the otherwise
+ * idle 4 MB PSRAM, and main.cpp moved the controller state. What is left is in
+ * portable C shared with the host tests (lib/cairn_offload's manifest buffer
+ * and decode scratch, lib/cairn_store's encode buffer), which cannot call
+ * heap_caps_malloc without a platform shim. At the time of writing 96 was
+ * 5952 bytes too many.
  */
 #define CAIRN_MAX_CHUNKS       64
 

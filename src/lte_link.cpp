@@ -19,6 +19,9 @@
 #include "net_http.h"
 #include "net_upload.h"
 #include "tls_client.h"
+#if CAIRN_TLS_WRONG_CA
+#include "tls_negative.h"
+#endif
 
 static const char *TAG = "LTE";
 
@@ -549,13 +552,49 @@ private:
 static ModemClient s_modem;
 static TlsClient   s_tls(&s_modem);
 
+bool lte_link_tls_probe(void)
+{
+#if CAIRN_TLS_WRONG_CA
+    CAIRN_LOGW(TAG, "NEGATIVE TEST: pinning a CA the server is not signed by. "
+                    "A completed handshake here is a FAILURE.");
+    s_tls.setCACert(CAIRN_WRONG_CA_PEM);
+#else
+    s_tls.setCACert(CAIRN_SERVER_CA_PEM);
+#endif
+    s_tls.setCertificate(CAIRN_CLIENT_CERT_PEM);
+    s_tls.setPrivateKey(CAIRN_CLIENT_KEY_PEM);
+
+    CAIRN_LOGI(TAG, "TLS probe: connecting to %s:%u", CAIRN_LTE_SERVER_HOST,
+               (unsigned)CAIRN_LTE_SERVER_PORT);
+
+    bool up = (s_tls.connect(CAIRN_LTE_SERVER_HOST, CAIRN_LTE_SERVER_PORT) == 1);
+    if (up) {
+        CAIRN_LOGI(TAG, "TLS probe: handshake COMPLETED and verified");
+    } else {
+        CAIRN_LOGI(TAG, "TLS probe: handshake REJECTED (mbedTLS -0x%04x)",
+                   -s_tls.lastError());
+    }
+    s_tls.stop();
+    return up;
+}
+
 void lte_link_upload_pending(uint32_t max_bundles,
                              bool (*should_abort)(void *), void *abort_ctx,
                              lte_link_result_t *out)
 {
     memset(out, 0, sizeof(*out));
 
+#if CAIRN_TLS_WRONG_CA
+    /*
+     * Deliberately the wrong CA. The handshake MUST be rejected; if it is not,
+     * verification is not happening and the log is lying.
+     */
+    CAIRN_LOGW(TAG, "NEGATIVE TEST: pinning a CA the server is not signed by. "
+                    "A successful handshake here is a FAILURE.");
+    s_tls.setCACert(CAIRN_WRONG_CA_PEM);
+#else
     s_tls.setCACert(CAIRN_SERVER_CA_PEM);
+#endif
     s_tls.setCertificate(CAIRN_CLIENT_CERT_PEM);
     s_tls.setPrivateKey(CAIRN_CLIENT_KEY_PEM);
 

@@ -63,6 +63,18 @@ const char *lte_link_plmn(void);
 
 int lte_link_rssi_dbm(void);
 
+/*
+ * Open a TLS session to the server and close it, reporting only whether the
+ * handshake completed and verified.
+ *
+ * Separate from uploading on purpose: it needs no bundle on the card, so it can
+ * answer "does TLS verify" independently of "is there anything to send". That
+ * matters for env:cairn-tlsneg, where the expected result is a REJECTED
+ * handshake -- a test that needed a readable bundle first would report the
+ * missing bundle and prove nothing about verification.
+ */
+bool lte_link_tls_probe(void);
+
 typedef struct {
     uint32_t considered;
     uint32_t delivered;

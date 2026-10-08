@@ -502,6 +502,16 @@ static bool bring_up_after_mount(void)
         CAIRN_LOGI(TAG, "modem bring-up: %s", cairn_lte_status_name(st));
 
         if (st == CAIRN_LTE_OK) {
+            /*
+             * Prove the handshake before trusting an upload. In
+             * env:cairn-tlsneg this is the whole test and the expected answer
+             * is "rejected"; in env:cairn-lteup it confirms verification is on
+             * before any bytes move.
+             */
+            bool tls_ok = lte_link_tls_probe();
+            CAIRN_LOGI(TAG, "=== TLS handshake %s ===",
+                       tls_ok ? "VERIFIED" : "REJECTED");
+
             lte_link_result_t r;
             lte_link_upload_pending(4, nullptr, nullptr, &r);
 
