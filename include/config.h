@@ -14,11 +14,13 @@
 #endif
 
 /*
- * There is no Wi-Fi, no server address and no TLS client in this
- * firmware. The dongle talks to exactly one thing over the air: the enrolled
- * phone app, over BLE (contracts/ble/v1/offload.md). The app is the only component that
- * talks to the server, so the device holds no network credentials of any kind:
- * no SSID, no password, no client certificate, no private key for a transport.
+ * The phone over BLE is the everyday path, and the only one that needs nothing
+ * from this file (contracts/ble/v1/offload.md). Since the uplink schedule entered
+ * the production build, Wi-Fi mTLS and LTE are compiled in too, so the device
+ * does hold transport credentials: an SSID and PSK, a server address, a CA, a
+ * client certificate and its key. Every one of them has a fail-closed default
+ * below, because this header's promise is that the project builds without a
+ * secrets.h at all — a fresh clone and CI both rely on it.
  *
  * Pinned server enrolment public key (X25519, 32 bytes, hex). The device seals
  * its storage root to this key, so the all-zero placeholder makes it REFUSE to
@@ -38,6 +40,56 @@
 #ifndef CAIRN_SERVER_RECEIPT_KEY_HEX
 #define CAIRN_SERVER_RECEIPT_KEY_HEX \
     "0000000000000000000000000000000000000000000000000000000000000000"
+#endif
+
+/*
+ * ── transport credentials ─────────────────────────────────────────────────────
+ *
+ * CAIRN_WIFI_UPLINK and CAIRN_LTE_UPLINK are both on in the production build, so
+ * wifi_link.cpp and lte_link.cpp need these to compile. Real values belong in
+ * secrets.h, which is gitignored; the repository is public, so nothing real may
+ * appear here.
+ *
+ * Every default fails closed, in the same direction as the receipt key above: an
+ * unconfigured device cannot reach a server and cannot verify one, so a bundle
+ * stays on the card. A full card loses nothing; an upload to an unverified peer
+ * would.
+ *
+ *   - An empty CA cannot be parsed, so TLS verification cannot succeed.
+ *   - An empty client certificate and key cannot satisfy an mTLS handshake.
+ *   - `.invalid` is reserved by RFC 2606 and never resolves.
+ *   - Port 0 is not a connectable port.
+ *   - No network is named `cairn-unconfigured`.
+ *
+ * So the defaults are not merely placeholders that compile: each one makes the
+ * path it belongs to refuse rather than reach somewhere unintended.
+ */
+#ifndef CAIRN_WIFI_SSID
+#define CAIRN_WIFI_SSID "cairn-unconfigured"
+#endif
+#ifndef CAIRN_WIFI_PSK
+#define CAIRN_WIFI_PSK ""
+#endif
+#ifndef CAIRN_SERVER_HOST
+#define CAIRN_SERVER_HOST "cairn.invalid"
+#endif
+#ifndef CAIRN_SERVER_PORT
+#define CAIRN_SERVER_PORT 0
+#endif
+#ifndef CAIRN_LTE_SERVER_HOST
+#define CAIRN_LTE_SERVER_HOST "cairn.invalid"
+#endif
+#ifndef CAIRN_LTE_SERVER_PORT
+#define CAIRN_LTE_SERVER_PORT 0
+#endif
+#ifndef CAIRN_SERVER_CA_PEM
+#define CAIRN_SERVER_CA_PEM ""
+#endif
+#ifndef CAIRN_CLIENT_CERT_PEM
+#define CAIRN_CLIENT_CERT_PEM ""
+#endif
+#ifndef CAIRN_CLIENT_KEY_PEM
+#define CAIRN_CLIENT_KEY_PEM ""
 #endif
 
 #ifndef CAIRN_FIRMWARE_VERSION
