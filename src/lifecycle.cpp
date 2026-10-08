@@ -608,16 +608,41 @@ static void on_gnss_no_fix(Lifecycle *lc, const fact_t *f)
     lc->have_recent_gnss = phone_fresh;
 }
 
-static void on_utc_basis(Lifecycle *lc, const fact_t *f)
+static void on_time_observation(Lifecycle *lc, const fact_t *f)
 {
-    if (lc->have_utc_basis) return;
+    /*
+     * Every observation is recorded; the first one also becomes the basis.
+     *
+     * Those are deliberately separate. The manifest's basis cannot be revised
+     * once samples have been written against it, so it stays first-wins -- but
+     * that is exactly what left every trip dated 1970 when GNSS was the only
+     * source and its fix arrived late or never. The records are the evidence
+     * trail: each carries its source and accuracy, and utc_ms minus the frame's
+     * monotonic_ms is the basis that source implies, so a consumer can compare
+     * them and pick without the device having to guess.
+     */
+    const bool adopt = !lc->have_utc_basis;
+
+    cairn_time_observation_t obs;
+    memset(&obs, 0, sizeof(obs));
+    obs.utc_ms = f->data.utc.utc_ms;
+    obs.acc_ms = f->data.utc.acc_ms;
+    obs.source = f->data.utc.source;
+    if (adopt) obs.flags |= CAIRN_TIME_OBS_ADOPTED;
+
+    uint8_t payload[16];
+    cairn_encode_time_observation(&obs, payload);
+    emit_capture_record(lc, CAIRN_REC_TIME_OBSERVATION, 1, payload, sizeof(payload));
+
+    if (!adopt) return;
 
     /* The fact carries the monotonic reading of the same instant, which is what
      * turns a sampled wall clock into the basis a reader can add monotonic_ms to. */
     cairn_capture_set_utc_basis(&lc->cap, f->data.utc.utc_ms, f->data.utc.acc_ms,
                                 f->monotonic_ms);
     lc->have_utc_basis = true;
-    CAIRN_LOGI(TAG, "UTC basis established: %llu ms at monotonic %u (+/- %u ms)",
+    CAIRN_LOGI(TAG, "UTC basis established from source %u: %llu ms at monotonic %u (+/- %u ms)",
+               (unsigned)f->data.utc.source,
                (unsigned long long)f->data.utc.utc_ms,
                (unsigned)f->monotonic_ms,
                (unsigned)f->data.utc.acc_ms);
@@ -920,6 +945,11 @@ static void seal_and_reopen(Lifecycle *lc, uint8_t reason)
     char fw[32];
     const cairn_engine_profile_t *prof = cairn_engine_active();
     if (prof != nullptr) {
+        /* Manifest key 29. The firmware_version suffix below stays for readers
+         * that have not learned the key yet, but this is the one with room for
+         * the full digest and no risk of being dropped to fit. */
+        cairn_capture_set_engine_profile(&lc->cap, prof->id, (uint8_t)prof->version,
+                                         prof->sha256);
         int n = snprintf(fw, sizeof(fw), "%s+%s@%02x%02x%02x",
                          CAIRN_FIRMWARE_VERSION, prof->id,
                          prof->sha256[0], prof->sha256[1], prof->sha256[2]);
@@ -1256,7 +1286,7 @@ void lifecycle_tick(Lifecycle *lc)
         switch (f.kind) {
         case FACT_GNSS_SAMPLE:   on_gnss_sample(lc, &f); break;
         case FACT_GNSS_NO_FIX:   on_gnss_no_fix(lc, &f); break;
-        case FACT_GNSS_UTC_BASIS: on_utc_basis(lc, &f); break;
+        case FACT_TIME_OBSERVATION: on_time_observation(lc, &f); break;
         case FACT_IMU_SUMMARY:   on_imu_summary(lc, &f); break;
         case FACT_OBD_SNAPSHOT:  on_obd_snapshot(lc, &f); break;
         case FACT_OBD_EXTENDED:  on_obd_extended(lc, &f); break;

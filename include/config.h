@@ -393,6 +393,18 @@
  */
 #define CAIRN_UPLINK_SLOT_MAX_MS 240000u
 
+/*
+ * How often a source that has the time repeats its observation.
+ *
+ * Two minutes: often enough that a trip carries a series rather than a single
+ * point -- which is what makes drift visible and lets a consumer compare sources
+ * -- and rare enough that it costs 16 bytes per source per two minutes against a
+ * bundle measured in megabytes. The first observation from each source is always
+ * posted immediately, because on a cold start that is the moment the trip becomes
+ * datable at all.
+ */
+#define CAIRN_TIME_OBS_PERIOD_MS 120000u
+
 /* Associating is bounded separately: a network that is not there should cost
  * seconds, not the whole slot. */
 #define CAIRN_UPLINK_ASSOCIATE_MS 25000u

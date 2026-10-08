@@ -31,8 +31,7 @@
 
 /*
  * Keys 24-28 are mandatory. They sit after the optional trip_seq so the encoder
- * emits keys in ascending order with a single conditional, and a manifest has
- * 27 or 28 fields.
+ * emits keys in ascending order.
  */
 #define K_VEHICLE_ID       24
 #define K_ASSIGNMENT_ID    25
@@ -40,8 +39,22 @@
 #define K_KEY_VERSION      27
 #define K_ENCRYPTION_SUITE 28
 
+/*
+ * Optional, and last: the engine profile that produced the bundle. The profile
+ * decides the OBD request, every conversion, the cadences and the thresholds, so
+ * a bundle that does not name it cannot be checked against the rules that made
+ * it. The digest rather than only a name, because a profile edited without a
+ * version bump is a different profile and only the digest says so.
+ */
+#define K_ENGINE_PROFILE   29 /* optional */
+
+/*
+ * trip_seq and engine_profile are independently optional, so the count is the
+ * mandatory set plus however many are present -- 27, 28 or 29 are all
+ * well-formed. Not a choice between two totals.
+ */
 #define MANIFEST_FIELD_COUNT_BASE 27
-#define MANIFEST_FIELD_COUNT_MAX  28
+#define MANIFEST_FIELD_COUNT_MAX  29
 
 /* Receipt keys. 1..10 are covered by the signature; 11 is the signature. */
 #define RK_VERSION      1
@@ -77,8 +90,12 @@ cairn_err_t cairn_manifest_encode(const cairn_manifest_t *m,
     cairn_cbor_enc_t e;
     cairn_cbor_init(&e, out, out_cap);
 
-    cairn_cbor_map(&e, m->has_trip_seq ? MANIFEST_FIELD_COUNT_MAX
-                                      : MANIFEST_FIELD_COUNT_BASE);
+    {
+        unsigned fields = MANIFEST_FIELD_COUNT_BASE;
+        if (m->has_trip_seq) fields++;
+        if (m->has_engine_profile) fields++;
+        cairn_cbor_map(&e, fields);
+    }
 
     cairn_cbor_key(&e, K_MANIFEST_VERSION);
     cairn_cbor_uint(&e, m->manifest_version);
@@ -178,6 +195,14 @@ cairn_err_t cairn_manifest_encode(const cairn_manifest_t *m,
     cairn_cbor_key(&e, K_ENCRYPTION_SUITE);
     cairn_cbor_text(&e, m->encryption_suite);
 
+    if (m->has_engine_profile) {
+        cairn_cbor_key(&e, K_ENGINE_PROFILE);
+        cairn_cbor_array(&e, 3);
+        cairn_cbor_text(&e, m->engine_profile_id);
+        cairn_cbor_uint(&e, m->engine_profile_version);
+        cairn_cbor_bytes(&e, m->engine_profile_sha256, 32);
+    }
+
     if (e.overflow) return CAIRN_ERR_BUFFER_TOO_SMALL;
     if (written) *written = e.len;
     return CAIRN_OK;
@@ -196,7 +221,7 @@ static cairn_err_t manifest_decode_raw(const uint8_t *buf, size_t len,
     size_t n;
     cairn_err_t err = cairn_cbor_map_header(&d, &n);
     if (err != CAIRN_OK) return err;
-    if (n != MANIFEST_FIELD_COUNT_BASE && n != MANIFEST_FIELD_COUNT_MAX)
+    if (n < MANIFEST_FIELD_COUNT_BASE || n > MANIFEST_FIELD_COUNT_MAX)
         return CAIRN_ERR_MALFORMED;
 
     for (size_t i = 0; i < n; i++) {
@@ -375,6 +400,21 @@ static cairn_err_t manifest_decode_raw(const uint8_t *buf, size_t len,
                 return CAIRN_ERR_MALFORMED;
             }
             break;
+        case K_ENGINE_PROFILE: {
+            size_t fields = 0;
+            if ((err = cairn_cbor_array_header(&d, &fields)) != CAIRN_OK) return err;
+            if (fields != 3) return CAIRN_ERR_MALFORMED;
+            err = cairn_cbor_text_read(&d, m->engine_profile_id,
+                                       sizeof(m->engine_profile_id));
+            if (err != CAIRN_OK) return err;
+            if ((err = cairn_cbor_uint_read(&d, &v)) != CAIRN_OK) return err;
+            if (v > UINT8_MAX) return CAIRN_ERR_MALFORMED;
+            m->engine_profile_version = (uint8_t)v;
+            err = cairn_cbor_bytes_n(&d, m->engine_profile_sha256, 32);
+            if (err != CAIRN_OK) return err;
+            m->has_engine_profile = true;
+            break;
+        }
         default:
             return CAIRN_ERR_MALFORMED;
         }

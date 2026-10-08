@@ -85,7 +85,8 @@ static void sensor_task(void *arg)
     uint32_t next_motion = millis();
     uint32_t next_retry  = millis() + 60000;
 
-    bool have_utc_basis = false;
+    bool     have_utc_basis = false;
+    uint32_t last_time_obs_ms = 0;
 
     /* Gap reporting state; see the GNSS branch below. */
     uint32_t last_gap_report_ms = millis();
@@ -147,18 +148,32 @@ static void sensor_task(void *arg)
                 have_reported_gap = false;
 
                 /*
-                 * The basis is reported once, the first time the receiver has a
-                 * date it considers valid. Re-reporting it would let a later,
-                 * worse fix move the bundle's time reference after samples had
-                 * already been written against the original.
+                 * Time observations are reported on a slow cadence for as long
+                 * as the receiver has a date, not once.
+                 *
+                 * The *basis* is still first-wins -- re-reporting it would move
+                 * the bundle's time reference after samples had been written
+                 * against the original -- but the observations themselves are
+                 * evidence, and one of them is not enough to be checkable. A
+                 * series shows whether the receiver's clock drifts, and it lets
+                 * a consumer compare GNSS against the phone and the network
+                 * instead of taking whichever source happened to answer first.
+                 *
+                 * Rate-limited because a 1 Hz receiver would otherwise add a
+                 * record per second for a figure that moves predictably; the
+                 * first one is posted immediately, since on a cold start that is
+                 * the moment the trip becomes datable at all.
                  */
-                if (!have_utc_basis) {
+                if (!have_utc_basis ||
+                    (int32_t)(now - last_time_obs_ms) >= CAIRN_TIME_OBS_PERIOD_MS) {
                     fact_t u;
                     memset(&u, 0, sizeof(u));
-                    u.kind = FACT_GNSS_UTC_BASIS;
+                    u.kind = FACT_TIME_OBSERVATION;
                     u.monotonic_ms = now;
+                    u.data.utc.source = CAIRN_TIME_SRC_GNSS;
                     if (sensors_gnss_utc(&u.data.utc.utc_ms, &u.data.utc.acc_ms)) {
                         have_utc_basis = true;
+                        last_time_obs_ms = now;
                         post(&u);
                     }
                 }

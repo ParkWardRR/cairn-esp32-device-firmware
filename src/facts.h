@@ -30,7 +30,7 @@
 typedef enum : uint8_t {
     FACT_GNSS_SAMPLE = 1,  /* a new fix */
     FACT_GNSS_NO_FIX,      /* a sample period passed with no new fix */
-    FACT_GNSS_UTC_BASIS,   /* the receiver produced a usable date for the first time */
+    FACT_TIME_OBSERVATION, /* some source produced a wall clock; every reading, not just the first */
     FACT_IMU_SUMMARY,      /* one completed accumulation window */
     FACT_MOTION,           /* live accelerometer RMS, for scoring between windows */
     FACT_OBD_SNAPSHOT,     /* at least one PID answered */
@@ -59,7 +59,8 @@ typedef struct {
 
         struct {
             uint64_t utc_ms;
-            uint32_t acc_ms;
+            uint32_t acc_ms;  /* 0xFFFFFFFF = the source stated none */
+            uint8_t  source;  /* cairn_time_source_t */
         } utc;
 
         struct {

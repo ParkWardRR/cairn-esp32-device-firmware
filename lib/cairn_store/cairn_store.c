@@ -1323,6 +1323,17 @@ static void utc_basis_load(cairn_capture_t *cap)
                (unsigned)cap->utc_basis_acc_ms);
 }
 
+void cairn_capture_set_engine_profile(cairn_capture_t *cap, const char *id,
+                                      uint8_t version, const uint8_t sha256[32])
+{
+    if (cap == NULL || id == NULL || sha256 == NULL) return;
+
+    snprintf(cap->engine_profile_id, sizeof(cap->engine_profile_id), "%s", id);
+    cap->engine_profile_version = version;
+    memcpy(cap->engine_profile_sha256, sha256, 32);
+    cap->has_engine_profile = true;
+}
+
 void cairn_capture_set_utc_basis(cairn_capture_t *cap, uint64_t utc_ms,
                                  uint32_t acc_ms, uint32_t sampled_monotonic_ms)
 {
@@ -1622,6 +1633,14 @@ bool cairn_capture_seal(cairn_capture_t *cap, const uint8_t seed[32],
     m.capture_ended_monotonic_us   = cap->capture_ended_monotonic_us;
     m.utc_basis_ms                 = cap->utc_basis_ms;
     m.utc_basis_acc_ms             = cap->utc_basis_acc_ms;
+
+    m.has_engine_profile = cap->has_engine_profile;
+    if (cap->has_engine_profile) {
+        snprintf(m.engine_profile_id, sizeof(m.engine_profile_id), "%s",
+                 cap->engine_profile_id);
+        m.engine_profile_version = cap->engine_profile_version;
+        memcpy(m.engine_profile_sha256, cap->engine_profile_sha256, 32);
+    }
     m.first_seq                    = cap->first_seq;
     m.last_seq                     = cap->last_seq;
 

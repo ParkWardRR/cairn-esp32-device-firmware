@@ -80,7 +80,7 @@ static uint64_t get_u64(const uint8_t *p)
 
 bool cairn_record_type_known(uint8_t t)
 {
-    return t >= CAIRN_REC_GNSS_SAMPLE && t <= CAIRN_REC_OBD_EXTENDED;
+    return t >= CAIRN_REC_GNSS_SAMPLE && t <= CAIRN_REC_TIME_OBSERVATION;
 }
 
 const char *cairn_record_type_name(uint8_t t)
@@ -96,6 +96,7 @@ const char *cairn_record_type_name(uint8_t t)
     case CAIRN_REC_GNSS_GAP:         return "GNSS_GAP";
     case CAIRN_REC_POLICY_SNAPSHOT:  return "POLICY_SNAPSHOT";
     case CAIRN_REC_OBD_EXTENDED:     return "OBD_EXTENDED";
+    case CAIRN_REC_TIME_OBSERVATION: return "TIME_OBSERVATION";
     default:                         return "UNKNOWN";
     }
 }
@@ -689,6 +690,15 @@ void cairn_encode_obd_extended(const cairn_obd_extended_t *s, uint8_t out[24])
     put_u16(out + 20, s->poll_cadence_ms);
     out[22] = s->fuel_level_pct;
     out[23] = s->pedal_pct;
+}
+
+void cairn_encode_time_observation(const cairn_time_observation_t *s, uint8_t out[16])
+{
+    memset(out, 0, 16);
+    put_u64(out + 0, s->utc_ms);
+    put_u32(out + 8, s->acc_ms);
+    out[12] = s->source;
+    out[13] = s->flags;
 }
 
 void cairn_encode_device_health(const cairn_device_health_t *s, uint8_t out[16])

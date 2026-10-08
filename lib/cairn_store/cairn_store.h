@@ -172,6 +172,12 @@ typedef struct {
     uint64_t utc_basis_ms;
     uint32_t utc_basis_acc_ms;
 
+    /* The engine profile that produced this bundle, for manifest key 29. */
+    bool     has_engine_profile;
+    char     engine_profile_id[32];
+    uint8_t  engine_profile_version;
+    uint8_t  engine_profile_sha256[32];
+
     /* Recovery outcome, reported in the manifest rather than hidden. */
     uint8_t  recovery_state;
     uint32_t discarded_tail_bytes;
@@ -292,6 +298,16 @@ bool cairn_capture_append(cairn_capture_t *cap, cairn_chain_id_t chain,
  */
 void cairn_capture_set_utc_basis(cairn_capture_t *cap, uint64_t utc_ms,
                                  uint32_t acc_ms, uint32_t sampled_monotonic_ms);
+
+/*
+ * Name the engine profile that produced this capture, for manifest key 29.
+ *
+ * Takes the digest as well as the identity because a profile edited without a
+ * version bump is a different profile and only the digest says so. Safe to call
+ * repeatedly with the same values; the profile cannot change within a boot.
+ */
+void cairn_capture_set_engine_profile(cairn_capture_t *cap, const char *id,
+                                      uint8_t version, const uint8_t sha256[32]);
 
 /* Push buffered frames to the card. Called on the cadence above and before any
  * state change that must survive power loss. */

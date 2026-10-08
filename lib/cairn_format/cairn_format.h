@@ -105,6 +105,7 @@ typedef enum {
     CAIRN_REC_GNSS_GAP         = 0x08,
     CAIRN_REC_POLICY_SNAPSHOT  = 0x09,
     CAIRN_REC_OBD_EXTENDED     = 0x0A,
+    CAIRN_REC_TIME_OBSERVATION = 0x0B,
 } cairn_record_type_t;
 
 bool cairn_record_type_known(uint8_t t);
@@ -715,6 +716,20 @@ typedef struct {
     uint32_t trip_seq;
 
     /*
+     * The engine profile that produced this bundle. Optional: a device with no
+     * profile, or one built before the key existed, still seals a valid manifest,
+     * and a reader must not require it.
+     *
+     * The digest is of the profile document, not merely its name, because a
+     * profile edited without a version bump is a different profile and only the
+     * digest says so.
+     */
+    bool     has_engine_profile;
+    char     engine_profile_id[32];
+    uint8_t  engine_profile_version;
+    uint8_t  engine_profile_sha256[32];
+
+    /*
      * Keys 24-28, all mandatory. They bind the bundle to a vehicle, to the
      * device-to-vehicle assignment active when it was captured, to a position
      * in the device's monotonic bundle sequence, and to the root its segments
@@ -1011,6 +1026,41 @@ typedef struct {
 } cairn_obd_extended_t;
 
 void cairn_encode_obd_extended(const cairn_obd_extended_t *s, uint8_t out[24]);
+
+/*
+ * TIME_OBSERVATION (section 4.12) -- one wall-clock reading from one source,
+ * 16 bytes.
+ *
+ * Recorded as evidence, not as a decision. The manifest still carries one
+ * utc_basis_ms chosen on the device; these records make that choice checkable and
+ * make a bundle datable when the basis is absent. Measured need: every trip on
+ * one deployment carried utc_basis_ms = 0 and decoded to 1970-01-01, because GNSS
+ * was the only source and a fix can arrive minutes into a drive or never -- while
+ * the phone and the cellular network had the time the whole way.
+ *
+ * The monotonic reading of the same instant is the *frame's* monotonic_ms, not a
+ * field here. That pairing is the point: utc_ms minus the frame monotonic is the
+ * UTC of monotonic zero this source implies, so sources can be compared directly
+ * and drift within one is visible across a trip.
+ */
+typedef enum {
+    CAIRN_TIME_SRC_GNSS          = 1,
+    CAIRN_TIME_SRC_PHONE         = 2,
+    CAIRN_TIME_SRC_MODEM_NETWORK = 3,
+    CAIRN_TIME_SRC_RTC           = 4  /* reserved: no current hardware fits one */
+} cairn_time_source_t;
+
+/* Bit 0 of flags: this observation is the one adopted as the manifest's basis. */
+#define CAIRN_TIME_OBS_ADOPTED 0x01u
+
+typedef struct {
+    uint64_t utc_ms;
+    uint32_t acc_ms;   /* 0xFFFFFFFF = the source stated no accuracy */
+    uint8_t  source;   /* cairn_time_source_t */
+    uint8_t  flags;
+} cairn_time_observation_t;
+
+void cairn_encode_time_observation(const cairn_time_observation_t *s, uint8_t out[16]);
 
 typedef struct {
     uint16_t battery_mv;
