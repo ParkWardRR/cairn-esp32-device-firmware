@@ -10,8 +10,106 @@
 
 static const char *TAG = "SENS";
 
+/*
+ * How long one PID read may wait for the ECU, and how many consecutive misses
+ * end a cycle. Both exist to stop a quiet DME from blocking the sensing task.
+ *
+ * COBD::readPID waits out OBD_TIMEOUT_SHORT (1000 ms) and does not retry, and a
+ * capture cycle walks about nine reads: the batch request, four hot channels and
+ * a cold slot for the snapshot, then MAP, lambda and another cold slot for the
+ * extended record. When the ECU stops answering, each of those nine waits its
+ * full second in turn, so the task blocks for most of ten seconds and cannot
+ * reach the GNSS poll either.
+ *
+ * Measured on the 2026-10-07 drive: 25 OBD outages, quantised to ~23 s and small
+ * multiples of it, covering 766 s of a 1002 s trip, with position dark in exactly
+ * the same windows. The IMU is read on its own path and kept sampling at ~8.5 Hz
+ * throughout, which is how we know the device was healthy and the blocking was
+ * self-inflicted. It also cost the pulls the car was driven for: a single miss
+ * mid-sweep stretched the effective cadence to ~1.2 s, and a 4-6 s pull leaves
+ * one or two samples at that rate.
+ *
+ * 350 ms is comfortably clear of this DME's measured 110-140 ms reply
+ * (engines/bmw-n20.yaml, cadence.measured.single_request_ms) while cutting the
+ * cost of a miss to a third. OBD_TIMEOUT_SHORT itself cannot simply be lowered:
+ * the same constant bounds ATZ and the rest of COBD::init(), where a reset
+ * legitimately takes most of a second.
+ *
+ * Two consecutive misses is enough to conclude the ECU is not answering this
+ * cycle; asking the remaining PIDs cannot learn anything the first two did not
+ * already say, and skipping them keeps requests off the bus rather than adding
+ * them. A dead cycle now costs ~700 ms instead of ~9 s.
+ */
+#define OBD_READ_TIMEOUT_MS  350u
+#define OBD_CYCLE_MISS_LIMIT 2u
+
+/*
+ * COBD with a per-read timeout.
+ *
+ * Subclassed rather than reimplemented because normalizeData() and
+ * checkErrorMessage() are protected, and reusing the library's own conversion is
+ * the whole point: the shorter timeout then changes timing and nothing else. The
+ * alternative was to convert through the engine profile's formula, which
+ * test/host/engine_test.c proves equivalent over every input byte — true, but it
+ * is an argument this way does not have to make.
+ */
+class CairnOBD : public COBD {
+public:
+    bool readPIDTimed(byte pid, int &result, uint32_t timeout_ms);
+};
+
+bool CairnOBD::readPIDTimed(byte pid, int &result, uint32_t timeout_ms)
+{
+    if (link == nullptr) return false;
+
+    char buffer[64];
+    snprintf(buffer, sizeof(buffer), "%02X%02X\r", (unsigned)dataMode, (unsigned)pid);
+    link->send(buffer);
+    idleTasks();
+
+    int ret = link->receive(buffer, sizeof(buffer), (int)timeout_ms);
+    if (ret <= 0 || checkErrorMessage(buffer)) {
+        errors++;
+        return false;
+    }
+
+    /*
+     * The same reply scan COBD::readPID does: find a "41" echo whose PID matches
+     * and take the first data field after it. The PID has to be checked because a
+     * reply to an earlier request can still be sitting in the buffer, and reading
+     * that as this PID's value is how a stale number becomes a fresh-looking
+     * sample.
+     */
+    char *p = buffer;
+    while ((p = strstr(p, "41 ")) != nullptr) {
+        p += 3;
+        if (hex2uint8(p) != pid) continue;
+        while (*p && *p != ' ') p++;
+        while (*p == ' ') p++;
+        if (*p == '\0') break;
+        errors = 0;
+        result = normalizeData(pid, p);
+        return true;
+    }
+
+    errors++;
+    return false;
+}
+
+/* Consecutive misses within the current cycle. */
+static uint8_t s_cycle_misses;
+
+static inline void obd_cycle_begin(void) { s_cycle_misses = 0; }
+static inline bool obd_cycle_spent(void) { return s_cycle_misses >= OBD_CYCLE_MISS_LIMIT; }
+
+static inline void obd_cycle_note(bool answered)
+{
+    if (answered) s_cycle_misses = 0;
+    else if (s_cycle_misses < 0xFF) s_cycle_misses++;
+}
+
 static FreematicsESP32 s_sys;
-static COBD            s_obd;
+static CairnOBD        s_obd;
 static MEMS_I2C       *s_mems = nullptr;
 static GPS_DATA       *s_gps = nullptr;
 
@@ -549,10 +647,20 @@ bool sensors_imu_summarize(uint32_t window_ms, cairn_imu_summary_t *out)
 
 /* ── OBD ──────────────────────────────────────────────────────────────────── */
 
-/* Read one PID, mapping a non-answer onto the specification's sentinel. */
+/*
+ * Read one PID, mapping a non-answer onto the specification's sentinel.
+ *
+ * Returns false without touching the bus once the cycle's miss budget is spent,
+ * so the caller's own "else -> UNKNOWN" branch records the field as unknown,
+ * which is exactly what it is.
+ */
 static bool pid_value(byte pid, int *value)
 {
-    return s_obd.readPID(pid, *value);
+    if (obd_cycle_spent()) return false;
+
+    bool answered = s_obd.readPIDTimed(pid, *value, OBD_READ_TIMEOUT_MS);
+    obd_cycle_note(answered);
+    return answered;
 }
 
 /*
@@ -575,12 +683,14 @@ static bool pid_value(byte pid, int *value)
 static bool pid_raw_u16(uint8_t pid, uint16_t *out)
 {
     if (s_obd.link == nullptr) return false;
+    if (obd_cycle_spent()) return false;
 
     char cmd[16];
     snprintf(cmd, sizeof(cmd), "01%02X\r", (unsigned)pid);
 
     char buf[128];
-    if (s_obd.link->sendCommand(cmd, buf, sizeof(buf), OBD_TIMEOUT_SHORT) == 0) {
+    if (s_obd.link->sendCommand(cmd, buf, sizeof(buf), OBD_READ_TIMEOUT_MS) == 0) {
+        obd_cycle_note(false);
         return false;
     }
 
@@ -590,18 +700,23 @@ static bool pid_raw_u16(uint8_t pid, uint16_t *out)
     snprintf(want, sizeof(want), "41 %02X", (unsigned)pid);
 
     const char *p = strstr(buf, want);
-    if (p == nullptr) return false;
+    if (p == nullptr) {
+        obd_cycle_note(false);
+        return false;
+    }
     p += strlen(want);
 
     /* Two hex bytes, space separated, as the ELM-style reply formats them. */
     if (!(p[0] == ' ' && isxdigit((unsigned char)p[1]) && isxdigit((unsigned char)p[2]) &&
           p[3] == ' ' && isxdigit((unsigned char)p[4]) && isxdigit((unsigned char)p[5]))) {
+        obd_cycle_note(false);
         return false;
     }
 
     uint8_t a = hex2uint8(p + 1);
     uint8_t b = hex2uint8(p + 4);
     *out = (uint16_t)((uint16_t)a << 8 | b);
+    obd_cycle_note(true);
     return true;
 }
 
@@ -626,6 +741,16 @@ bool sensors_read_obd_batch(obd_batch_t *out)
 {
     memset(out, 0, sizeof(*out));
 
+    /*
+     * First bus access of the cycle, so this is where the miss budget resets.
+     * A failed batch deliberately does not count against it: the batch being
+     * unsupported says nothing about whether sequential reads will answer, and
+     * on the 2026-10-07 drive that was the actual situation — 225 of 239 samples
+     * came from the sequential fallback. Charging the budget here would abandon
+     * cycles that were about to succeed.
+     */
+    obd_cycle_begin();
+
     if (s_status == nullptr || !s_status->obd || s_obd.link == nullptr)
         return false;
 
@@ -636,7 +761,7 @@ bool sensors_read_obd_batch(obd_batch_t *out)
         return false;
 
     char buf[192];
-    if (s_obd.link->sendCommand(cmd, buf, sizeof(buf), OBD_TIMEOUT_SHORT) == 0)
+    if (s_obd.link->sendCommand(cmd, buf, sizeof(buf), OBD_READ_TIMEOUT_MS) == 0)
         return false;
 
     const char *p = strstr(buf, "41 ");

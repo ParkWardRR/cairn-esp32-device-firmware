@@ -345,9 +345,22 @@
  * seconds, not the whole slot. */
 #define CAIRN_UPLINK_ASSOCIATE_MS 25000u
 
-/* An LTE send is given longer than a Wi-Fi slot because the link is slower and
- * the attach alone can take 20 s from cold. */
-#define CAIRN_UPLINK_LTE_LIMIT_MS 300000u
+/*
+ * An LTE send is given longer than a Wi-Fi slot because the link is slower and
+ * the attach alone can take 20 s from cold.
+ *
+ * Sized on measurement, not estimate. The 2026-10-07 test drive sealed a
+ * 1,295,714-byte bundle and it took 386 s to deliver over cellular — 3.35 KB/s,
+ * 0.23% protocol overhead. The previous 300 s limit was therefore below the cost
+ * of one real bundle: the slot aborted mid-transfer every time, and progress came
+ * only through resume, which pays the attach again for nothing.
+ *
+ * 15 minutes covers the attach plus roughly 2.5 MB, so a bundle from an ordinary
+ * drive finishes inside one slot. Anything larger still completes across slots —
+ * the abort is checked between chunks, so it is always resume-safe — but that is
+ * now the exception rather than every single transfer.
+ */
+#define CAIRN_UPLINK_LTE_LIMIT_MS 900000u
 
 /* Bundles attempted per slot. Bounded so one enormous backlog cannot hold the
  * radio for an unbounded time; the rest wait for the next parked session. */
