@@ -9,8 +9,11 @@ ASan/UBSan clean, 15 mutations of the safety rules all caught).
 
 **Built and host-tested. Not wired into the firmware**, because there is nothing to
 schedule yet: Wi-Fi (#15) and LTE (#16) are blocked on flash and NVS encryption (#7, gate
-#18), and the BLE path is phone-driven by `lib/cairn_offload`. When a Wi-Fi or LTE
-transport exists it implements `cairn_transport_t` and the lifecycle calls `tick()`.
+#18), and the BLE path is phone-driven by `lib/cairn_offload`. That block does not expire
+on its own — encryption is an eFuse burn the car's revision v1.0 unit may not take, so the
+transports wait on a replacement unit or on #18 being decided again (see
+[esp32-hardening.md](esp32-hardening.md)). When a Wi-Fi or LTE transport exists it
+implements `cairn_transport_t` and the lifecycle calls `tick()`.
 
 ## The schedule (the owner's, decided in #17)
 

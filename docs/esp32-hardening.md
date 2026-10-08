@@ -100,8 +100,20 @@ esptool flash_id
   number of plaintext re-flashes in development mode is the tightly limited
   7-bit counter; do not spend it casually.
 
-The spare unit's revision is still **unmeasured**; a revision v3.0+ part would
-make the whole V2 path available.
+**There is no spare unit.** Steps 5 and 6 above assume a sacrificial ONE+ to
+rehearse on; one has never been bought, and the car's dongle is the only one.
+A second unit of revision v3.0 or later would make the whole V2 path available —
+until it exists, steps 5 and 6 cannot start.
+
+**What that does to the network gate.** Issue #18 decided that network
+credentials wait for flash and NVS encryption (#7). On this unit that condition
+is unreachable, not merely unfinished: the burns are ruled out, there is nothing
+to rehearse on, and secure boot V2 is unavailable on revision v1.0 in any case.
+Wi-Fi (#15) and LTE (#16) therefore stay blocked on this dongle for as long as
+both facts hold. Clearing it needs a deliberate move, either a replacement unit
+that is allowed to take the burns, or #18 reopened and settled on one of its
+other answers (low-value revocable credentials in plaintext NVS, or a
+server-assisted key so a dumped chip yields ciphertext).
 
 ## Device identity and what still protects a *running* device
 
