@@ -14,6 +14,22 @@ static SensorStatus  *s_status;
 static volatile uint32_t s_dropped;
 static volatile bool  s_retry_requested;
 
+/*
+ * Consecutive cycles in which the ECU answered nothing, and the shape of the
+ * backoff that follows.
+ *
+ * The grace period exists because a brief silence is normal — a gear change, a
+ * busy bus — and the first few misses are cheap now that a dead cycle costs
+ * ~700 ms rather than ~9 s. The cap is deliberately low: the backoff is there to
+ * stop a silent ECU starving the GNSS poll that shares this loop, not to protect
+ * the car, so there is nothing to gain from long intervals and a few seconds of
+ * lost OBD on recovery is the whole downside.
+ */
+#define OBD_SILENT_GRACE_CYCLES   3u
+#define OBD_SILENT_MAX_PERIOD_MS  5000u
+
+static uint8_t s_obd_silent_cycles;
+
 /* Current periods, set by the controller. Initialized to the policy defaults so
  * the first pass before any update samples at nominal rather than at zero. */
 static volatile uint16_t s_gnss_period_ms = CAIRN_GNSS_PERIOD_MS;
@@ -205,16 +221,6 @@ static void sensor_task(void *arg)
                 bool have_batch = sensors_read_obd_batch(&batch);
                 if (!have_batch) batch.valid = false;
 
-                /*
-                 * The fast period belongs to a *complete* batch. That is the
-                 * ~56 ms cycle it was measured against; a partial batch leaves
-                 * the read functions fetching the rest one request at a time, so
-                 * the cycle costs what a sequential sweep costs and asking again
-                 * in 200 ms would just mean polling continuously.
-                 */
-                next_obd = now + (batch.complete ? cairn_engine_params()->obd_batch_period_ms
-                                                 : s_obd_period_ms);
-
                 fact_t f;
                 memset(&f, 0, sizeof(f));
 
@@ -252,6 +258,52 @@ static void sensor_task(void *arg)
                     fe.kind = FACT_OBD_EXTENDED;
                     post(&fe);
                 }
+
+                /*
+                 * When to ask again.
+                 *
+                 * The fast period belongs to a *complete* batch: that is the
+                 * ~56 ms cycle it was measured against. A partial batch leaves
+                 * the read functions fetching the rest one request at a time, so
+                 * the cycle costs what a sequential sweep costs and asking again
+                 * in 200 ms would just mean polling continuously.
+                 *
+                 * On top of that, back off while the ECU says nothing at all.
+                 * Before fail-fast landed, a silent ECU cost ~9 s per cycle of
+                 * blocked timeouts, which was accidentally acting as a backoff; a
+                 * dead cycle now costs ~700 ms, so at a 1.2 s period the task
+                 * would spend more than half its time blocked on an ECU that is
+                 * not answering — and that time is taken from the GNSS poll in the
+                 * same loop, which is exactly how the 2026-10-07 drive lost its
+                 * position data.
+                 *
+                 * So the backoff is here to stop starving the other sensors, not
+                 * to protect the car: a parked car is already covered by the
+                 * silence gate above, and this only runs when a drive is
+                 * confirmed. That is why it is deliberately shallow — doubling
+                 * from the base and capped — and why it recovers on the *first*
+                 * answer rather than ramping down. The cost of being wrong is
+                 * losing a few seconds of OBD when the ECU comes back, and on a
+                 * car being driven for tune data those seconds are the product.
+                 */
+                if (got_snapshot || got_ext) {
+                    s_obd_silent_cycles = 0;
+                } else if (s_obd_silent_cycles < 0xFF) {
+                    s_obd_silent_cycles++;
+                }
+
+                uint32_t period = batch.complete ? cairn_engine_params()->obd_batch_period_ms
+                                                 : s_obd_period_ms;
+                if (s_obd_silent_cycles > OBD_SILENT_GRACE_CYCLES) {
+                    uint8_t  steps = (uint8_t)(s_obd_silent_cycles - OBD_SILENT_GRACE_CYCLES);
+                    uint32_t scaled = period;
+                    for (uint8_t s = 0; s < steps && scaled < OBD_SILENT_MAX_PERIOD_MS; s++) {
+                        scaled *= 2u;
+                    }
+                    period = (scaled > OBD_SILENT_MAX_PERIOD_MS) ? OBD_SILENT_MAX_PERIOD_MS
+                                                                 : scaled;
+                }
+                next_obd = now + period;
             }
         }
 
@@ -300,6 +352,7 @@ bool sensor_task_start(SensorStatus *status)
     s_status = status;
     s_dropped = 0;
     s_retry_requested = false;
+    s_obd_silent_cycles = 0;
     s_obd_period_ms = cairn_engine_params()->obd_period_ms;
 
     s_queue = xQueueCreate(CAIRN_FACT_QUEUE_DEPTH, sizeof(fact_t));
