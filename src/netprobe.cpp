@@ -4,6 +4,7 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <string.h>
 
 #include <FreematicsPlus.h>
 
@@ -191,6 +192,10 @@ static int at(const char *cmd, unsigned int timeout_ms)
     return got;
 }
 
+/* Defined below: the data-session test runs at the end of the modem probe, once
+ * the module has had time to register. */
+static void probe_lte_data(void);
+
 static void probe_modem(void)
 {
     CAIRN_LOGI(TAG, "--- cellular modem (BEE socket, PWR %d, RX %d, TX %d) ---",
@@ -247,6 +252,16 @@ static void probe_modem(void)
 
     at("ATE0", 1000);          /* echo off, so replies are not doubled */
 
+    /*
+     * Descriptive errors, before anything that can fail.
+     *
+     * Without this the module answers a refused command with a bare "ERROR",
+     * which names neither the cause nor the subsystem. With it the same refusal
+     * arrives as "+CME ERROR: SIM not inserted" or similar, which is the
+     * difference between a diagnosis and another flash cycle.
+     */
+    at("AT+CMEE=2", 1000);
+
     /* Identity. */
     at("ATI", 2000);           /* manufacturer and model, free-form */
     at("AT+CGMI", 1000);       /* manufacturer */
@@ -282,7 +297,361 @@ static void probe_modem(void)
     at("AT+CSQ", 2000);
     at("AT+CGREG?", 2000);
     at("AT+CEREG?", 2000);
-    at("AT+COPS?", 10000);
+
+    probe_lte_data();
+}
+
+/* ── the LTE data path ────────────────────────────────────────────────────── */
+
+/*
+ * One AT exchange, with the reply kept so it can be inspected.
+ *
+ * `want` is a substring that must appear for this to count as success. Using a
+ * substring rather than requiring a bare "OK" is deliberate: several of the
+ * commands below answer with the information first and OK afterwards, and some
+ * answer OK while reporting a failure in the payload.
+ */
+static bool at_expect(const char *cmd, const char *want, unsigned int timeout_ms,
+                      char *reply, size_t reply_cap)
+{
+    static char buf[1024];
+
+    s_sys.xbPurge();
+    s_sys.xbWrite(cmd);
+    s_sys.xbWrite("\r\n");
+
+    int got = s_sys.xbRead(buf, sizeof(buf) - 1, timeout_ms);
+    if (got < 0) got = 0;
+    buf[got] = '\0';
+
+    if (reply != NULL && reply_cap > 0) {
+        snprintf(reply, reply_cap, "%s", buf);
+    }
+
+    /* One line, printable, for the log. */
+    char out[1024];
+    size_t o = 0;
+    for (int i = 0; i < got && o + 5 < sizeof(out); i++) {
+        unsigned char c = (unsigned char)buf[i];
+        if (c == '\r' || c == '\n') {
+            if (o > 0 && out[o - 1] != '|') out[o++] = '|';
+        } else if (c >= 0x20 && c < 0x7f) {
+            out[o++] = (char)c;
+        } else {
+            o += (size_t)snprintf(out + o, sizeof(out) - o, "\\x%02x", c);
+        }
+    }
+    out[o] = '\0';
+
+    /*
+     * "A reply arrived and the module did not refuse" — not merely "a reply
+     * arrived". An earlier version returned true whenever `want` was NULL,
+     * which made a timeout and an ERROR both read as success; the APN write
+     * that silently did not happen was exactly that bug's shape.
+     */
+    bool ok = (got > 0) && (strstr(buf, "ERROR") == NULL);
+    if (ok && want != NULL) ok = (strstr(buf, want) != NULL);
+
+    CAIRN_LOGI(TAG, "  %-34s -> %s%s", cmd, out, ok ? "" : "   [FAILED]");
+    return ok;
+}
+
+/*
+ * The APN candidates, best first.
+ *
+ * EIOTCLUB keys the APN off the ICCID prefix rather than publishing one value,
+ * and this card's prefix (891030) matches their "North America" row, which
+ * names altanwifi. That is the documented answer but not a proven one — the
+ * same prefix maps elsewhere by region with no finer discriminator — so the
+ * device tries a list rather than trusting a single string. An empty APN is
+ * last: letting the network choose does work on some cards and is worth having
+ * as a fallback, but it is the least diagnosable outcome.
+ */
+static const char *const APN_CANDIDATES[] = {
+    "altanwifi",      /* EIOTCLUB's documented value for the 891030 North America row */
+    "bicsapn",        /* their documented all-regions fallback */
+    "america.bics",
+    "mobile",
+    "globaldata",
+    ""                /* network-chosen */
+};
+
+/* Registered on the packet domain? Accepts 1 (home) and 5 (roaming).
+ *
+ * Both are usable data states, and on this SIM 5 is the ONLY reachable one: the
+ * home network is in Hong Kong, so "registered, home" cannot happen in the US.
+ * Note that AT+CREG? is deliberately not consulted — it reports the
+ * circuit-switched domain, which this data-only plan has no subscription for,
+ * so it answers 0,3 ("denied") on a perfectly healthy link. Gating on CREG is a
+ * real and already-shipped class of bug.
+ */
+/*
+ * The <stat> field of a "+CxREG: <n>,<stat>" reply, or -1.
+ *
+ * Parsed rather than substring-matched: searching the whole reply for ",5"
+ * would also match a cell id, a timestamp or the echo of another command, and a
+ * registration check that can be fooled by unrelated digits is worse than none.
+ */
+static int reg_state(const char *reply, const char *tag)
+{
+    const char *p = strstr(reply, tag);
+    if (p == NULL) return -1;
+
+    p = strchr(p, ',');
+    if (p == NULL) return -1;
+    p++;
+
+    while (*p == ' ') p++;
+    if (*p < '0' || *p > '9') return -1;
+    return *p - '0';
+}
+
+static bool packet_registered(void)
+{
+    char reply[256];
+
+    if (at_expect("AT+CEREG?", NULL, 3000, reply, sizeof(reply))) {
+        int s = reg_state(reply, "+CEREG:");
+        if (s == 1 || s == 5) return true;
+        if (s == 3) CAIRN_LOGW(TAG, "EPS registration DENIED (stat 3)");
+    }
+    if (at_expect("AT+CGREG?", NULL, 3000, reply, sizeof(reply))) {
+        int s = reg_state(reply, "+CGREG:");
+        if (s == 1 || s == 5) return true;
+    }
+    return false;
+}
+
+/* Wait for the SIM to finish initialising after an RF cycle.
+ *
+ * The module answers AT long before the SIM is ready, and an attach that races
+ * SIM init is refused by the network — which shows up as registration state 3
+ * (denied) and looks exactly like a subscription problem. */
+static bool wait_sim_ready(unsigned int budget_ms)
+{
+    char reply[256];
+    uint32_t t0 = millis();
+
+    while (millis() - t0 < budget_ms) {
+        if (at_expect("AT+CPIN?", NULL, 3000, reply, sizeof(reply)) &&
+            strstr(reply, "READY") != NULL) {
+            return true;
+        }
+        delay(1000);
+    }
+    CAIRN_LOGW(TAG, "SIM did not report READY within %u ms", budget_ms);
+    return false;
+}
+
+/* True when AT+CGPADDR reports an address that is not the unassigned 0.0.0.0.
+ * An address here is the gate for everything else: without one the problem is
+ * the APN, the plan or the subscription, and no amount of socket work will
+ * help. */
+static bool have_ip(char *ip, size_t cap)
+{
+    char reply[256];
+    if (!at_expect("AT+CGPADDR=1", "+CGPADDR", 5000, reply, sizeof(reply))) return false;
+
+    /* +CGPADDR: 1,"10.1.2.3" — take what is between the quotes. */
+    const char *q = strchr(reply, '"');
+    if (q == NULL) {
+        /* Some builds answer unquoted: +CGPADDR: 1,10.1.2.3 */
+        q = strstr(reply, ",");
+        if (q == NULL) return false;
+        q++;
+    } else {
+        q++;
+    }
+
+    size_t n = 0;
+    while (*q != '\0' && *q != '"' && *q != '\r' && *q != '\n' && n + 1 < cap) {
+        ip[n++] = *q++;
+    }
+    ip[n] = '\0';
+
+    if (n == 0) return false;
+    if (strcmp(ip, "0.0.0.0") == 0) return false;
+    return true;
+}
+
+/* Try one TCP connect through the modem's own stack, to settle whether the
+ * carrier passes this port at all. */
+static bool tcp_reaches(const char *host, int port)
+{
+    char cmd[160], reply[320];
+
+    snprintf(cmd, sizeof(cmd), "AT+CIPOPEN=0,\"TCP\",\"%s\",%d", host, port);
+
+    /* The connect result arrives as +CIPOPEN: 0,0 (0 = success), which may come
+     * well after the OK, so allow a generous window. */
+    bool sent = at_expect(cmd, NULL, 30000, reply, sizeof(reply));
+    bool ok   = sent && strstr(reply, "+CIPOPEN: 0,0") != NULL;
+
+    if (!ok && sent && strstr(reply, "+CIPOPEN: 0,") != NULL) {
+        CAIRN_LOGW(TAG, "port %d: the modem reported a connect error", port);
+    }
+
+    at_expect("AT+CIPCLOSE=0", NULL, 10000, NULL, 0);
+    return ok;
+}
+
+/*
+ * Bring up a data session and prove the server is reachable over cellular.
+ *
+ * This exists because every question that actually blocks the LTE transport is
+ * one no datasheet can answer: which APN this card wants, whether the prepaid
+ * plan is live (an expired plan still registers, so the attach above proves
+ * nothing about data), and whether the carrier passes the ingest port. Finding
+ * out takes one flash; guessing costs a redesign.
+ */
+static void probe_lte_data(void)
+{
+#if !defined(CAIRN_SERVER_HOST)
+    CAIRN_LOGW(TAG, "no CAIRN_SERVER_HOST compiled in; skipping the LTE data test");
+#else
+    CAIRN_LOGI(TAG, "--- LTE data path ---");
+
+    char reply[320];
+
+    /* Identity of the card, from the modem rather than the printed label: the
+     * APN is keyed off this prefix. */
+    at_expect("AT+CICCID", NULL, 3000, reply, sizeof(reply));
+
+    /*
+     * LTE only. The sole pre-LTE radio on this part is WCDMA B2/B5, and every
+     * US network that carried WCDMA there is switched off, so leaving the
+     * default automatic mode only spends time and power scanning technologies
+     * that cannot succeed anywhere in the country.
+     */
+    at_expect("AT+CNMP=38", "OK", 5000, NULL, 0);
+
+    /* Who are we actually on? The alphanumeric name is a string stored on the
+     * SIM and is not evidence of the serving network. */
+    at_expect("AT+COPS=3,2", "OK", 3000, NULL, 0);
+    if (at_expect("AT+COPS?", NULL, 10000, reply, sizeof(reply))) {
+        if (strstr(reply, "\"310") != NULL || strstr(reply, "\"311") != NULL ||
+            strstr(reply, "\"312") != NULL) {
+            CAIRN_LOGI(TAG, "serving PLMN is a US one, as expected");
+        } else {
+            CAIRN_LOGW(TAG, "serving PLMN is not a US MCC — check the numeric "
+                            "value above before trusting any allow-list");
+        }
+    }
+
+    at_expect("AT+CPSI?", NULL, 5000, NULL, 0);   /* band, cell, RSRP, RSRQ */
+
+    bool got_session = false;
+
+    for (size_t i = 0; i < sizeof(APN_CANDIDATES) / sizeof(APN_CANDIDATES[0]) &&
+                       !got_session; i++) {
+        const char *apn = APN_CANDIDATES[i];
+        CAIRN_LOGI(TAG, "trying APN \"%s\" (%u of %u)",
+                   apn[0] ? apn : "<network-chosen>", (unsigned)(i + 1),
+                   (unsigned)(sizeof(APN_CANDIDATES) / sizeof(APN_CANDIDATES[0])));
+
+        /*
+         * Detach to edit the context: AT+CGDCONT is refused while the context
+         * is active. Context 1 currently holds nxtgenphone, the AT&T
+         * certification APN burned into this module's firmware at the factory —
+         * stale, and an APN the home network will not accept fails the default
+         * bearer while registration still reads healthy. Contexts 2 (ims) and 3
+         * (sos) are left alone; they carry no user data and editing them can
+         * destabilise an IMS-certified build.
+         *
+         * "IP" rather than "IPV4V6": a dual-stack request that only one side
+         * honours is a known source of a context that activates but passes no
+         * traffic on wholesale roaming APNs.
+         */
+        /*
+         * CFUN=4, not CFUN=0. Minimum functionality powers the SIM interface
+         * down — the module answers "+SIMCARD: NOT AVAILABLE" and then refuses
+         * AT+CGDCONT, so the APN write silently does not happen and the next
+         * attach uses the stale one. CFUN=4 turns the radio off and leaves the
+         * SIM alive, which is what editing a context actually needs.
+         */
+        at_expect("AT+CFUN=4", "OK", 10000, NULL, 0);
+        delay(500);
+
+        char cmd[160];
+        snprintf(cmd, sizeof(cmd), "AT+CGDCONT=1,\"IP\",\"%s\"", apn);
+        if (!at_expect(cmd, "OK", 5000, NULL, 0)) {
+            /* Continuing here would test the previous APN again and report the
+             * result against this one. */
+            CAIRN_LOGE(TAG, "the APN write was refused; not testing this "
+                            "candidate, because the context still holds the "
+                            "previous value");
+            at_expect("AT+CFUN=1", "OK", 10000, NULL, 0);
+            continue;
+        }
+        at_expect("AT+CGDCONT?", NULL, 5000, NULL, 0);   /* prove it landed */
+
+        at_expect("AT+CFUN=1", "OK", 10000, NULL, 0);
+        wait_sim_ready(15000);
+
+        /* Re-attach. A cold attach under steering of roaming can take a while,
+         * so this waits rather than deciding early. */
+        bool reg = false;
+        for (int k = 0; k < 15 && !reg; k++) {
+            delay(2000);
+            reg = packet_registered();
+        }
+        if (!reg) {
+            CAIRN_LOGW(TAG, "did not re-register on this APN");
+            continue;
+        }
+
+        at_expect("AT+CGACT=1,1", NULL, 30000, NULL, 0);
+
+        char ip[64];
+        if (have_ip(ip, sizeof(ip))) {
+            CAIRN_LOGI(TAG, "APN \"%s\" WORKS: assigned IP %s",
+                       apn[0] ? apn : "<network-chosen>", ip);
+            at_expect("AT+CGCONTRDP=1", NULL, 5000, NULL, 0);  /* DNS, gateway, MTU */
+            got_session = true;
+        } else {
+            CAIRN_LOGW(TAG, "APN \"%s\": no address assigned",
+                       apn[0] ? apn : "<network-chosen>");
+        }
+    }
+
+    if (!got_session) {
+        CAIRN_LOGE(TAG, "VERDICT: no APN produced a data session.");
+        CAIRN_LOGE(TAG, "The attach is healthy, so this is very likely the "
+                        "prepaid plan, not the radio: an expired or unpurchased "
+                        "plan still registers while all data fails. Check the "
+                        "EIOTCLUB portal for an active plan on the ICCID above "
+                        "before changing any code.");
+        return;
+    }
+
+    /*
+     * The port question. 8443 is the configured ingest listener; 443 is the
+     * fallback the deployment also serves precisely because carrier filtering
+     * of a non-standard port cannot be settled from documentation.
+     */
+    at_expect("AT+NETOPEN", NULL, 30000, NULL, 0);
+
+    bool p8443 = tcp_reaches(CAIRN_SERVER_HOST, CAIRN_SERVER_PORT);
+    CAIRN_LOGI(TAG, "port %d over LTE: %s", (int)CAIRN_SERVER_PORT,
+               p8443 ? "REACHABLE" : "not reachable");
+
+    bool p443 = tcp_reaches(CAIRN_SERVER_HOST, 443);
+    CAIRN_LOGI(TAG, "port 443 over LTE: %s", p443 ? "REACHABLE" : "not reachable");
+
+    at_expect("AT+NETCLOSE", NULL, 15000, NULL, 0);
+
+    if (p8443) {
+        CAIRN_LOGI(TAG, "VERDICT: LTE carries data and the ingest port is open. "
+                        "The transport can use %d directly.", (int)CAIRN_SERVER_PORT);
+    } else if (p443) {
+        CAIRN_LOGW(TAG, "VERDICT: LTE carries data but %d is blocked; the "
+                        "transport must fall back to 443.", (int)CAIRN_SERVER_PORT);
+    } else {
+        CAIRN_LOGE(TAG, "VERDICT: a data session exists but neither port "
+                        "connected. Check the server is reachable from outside "
+                        "the home network at all.");
+    }
+#endif
 }
 
 /* ── entry point ──────────────────────────────────────────────────────────── */
