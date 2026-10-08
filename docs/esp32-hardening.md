@@ -105,15 +105,32 @@ rehearse on; one has never been bought, and the car's dongle is the only one.
 A second unit of revision v3.0 or later would make the whole V2 path available —
 until it exists, steps 5 and 6 cannot start.
 
-**What that does to the network gate.** Issue #18 decided that network
+**What that does to the network gate.** Issue #18 first decided that network
 credentials wait for flash and NVS encryption (#7). On this unit that condition
 is unreachable, not merely unfinished: the burns are ruled out, there is nothing
 to rehearse on, and secure boot V2 is unavailable on revision v1.0 in any case.
-Wi-Fi (#15) and LTE (#16) therefore stay blocked on this dongle for as long as
-both facts hold. Clearing it needs a deliberate move, either a replacement unit
-that is allowed to take the burns, or #18 reopened and settled on one of its
-other answers (low-value revocable credentials in plaintext NVS, or a
-server-assisted key so a dumped chip yields ciphertext).
+Left as written it blocked Wi-Fi (#15) and LTE (#16) forever.
+
+**Decided 2026-10-07 — #18's third option replaces it.** Network credentials
+will be held under a key the chip cannot reconstruct on its own, derived with
+the server's help from the already-escrowed device root, so a flash dump yields
+ciphertext instead of an SSID, a password, an APN and a SIM PIN. This is a
+narrower claim than flash encryption and must not be described as more: `K_root`
+and the Ed25519 seed stay readable from an extracted chip, and a physically
+present attacker can still reflash over serial. Nothing above in this document
+is cancelled; it becomes the plan for whatever hardware follows this unit.
+
+The open question, which has to be answered in a contract before any credential
+is stored on a device:
+
+- **Where does the unwrapping key live between boots?** RAM only is the honest
+  answer and costs autonomy: a dongle that reboots in a car park cannot rejoin
+  a network until a phone or the server hands the key back. Persisting it in
+  NVS re-creates the plaintext secret under another name and gives up the whole
+  point. A phone-assisted unwrap over the bonded BLE link fits the uplink
+  schedule (BLE is the home state, the phone is usually there) and is the
+  likeliest shape, but no wire format, no replay rule and no recovery path for
+  "no phone for a week" exist yet.
 
 ## Device identity and what still protects a *running* device
 
