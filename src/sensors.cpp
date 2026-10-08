@@ -801,6 +801,15 @@ bool sensors_read_obd_batch(obd_batch_t *out)
     out->lambda_e4    = (uint16_t)v[CAIRN_FIELD_LAMBDA_E4];
     out->present      = present;
     out->valid        = true;
+
+    /*
+     * Only a complete batch earns the fast cadence. A complete one is the ~56 ms
+     * cycle the fast period was measured against; a partial one means the caller
+     * has to go and fetch the rest one request at a time, so the cycle costs what
+     * a sequential sweep costs and the period should reflect that.
+     */
+    const uint32_t hot = cairn_engine_hot_field_mask(prof);
+    out->complete = (hot != 0) && ((present & hot) == hot);
     return true;
 }
 
@@ -933,16 +942,25 @@ bool sensors_read_obd(cairn_obd_snapshot_t *out, const obd_batch_t *batch)
     byte     pid = 0;
 
     const bool have_batch = (batch != nullptr && batch->valid);
+    const bool batch_complete = (batch != nullptr && batch->complete);
 
     /*
-     * The four hot channels of the snapshot. From the batch when it answered, else
-     * one request each through the library. A channel the active profile does not
-     * carry is its sentinel and is not counted as requested, because it was not.
+     * The four hot channels of the snapshot. From the batch when it carried that
+     * field, else one request each through the library. A channel the active
+     * profile does not carry is its sentinel and is not counted as requested,
+     * because it was not.
+     *
+     * The fallback is now per field rather than all-or-nothing. It used to be
+     * gated on `!have_batch`, so a batch that came back carrying five of six PIDs
+     * left the sixth as unknown even though a single request would have had it —
+     * the batch was treated as the only source once it existed at all. Each field
+     * is asked for exactly once either way, and the cycle's miss budget still
+     * bounds what a quiet ECU can cost.
      */
     if (have_batch && batch_has(batch, CAIRN_FIELD_SPEED_KPH)) {
         out->speed_kph = batch->speed_kph;
         requested++; answered++;
-    } else if (!have_batch && field_pid(CAIRN_FIELD_SPEED_KPH, &pid)) {
+    } else if (field_pid(CAIRN_FIELD_SPEED_KPH, &pid)) {
         requested++;
         if (pid_value(pid, &v)) {
             out->speed_kph = (int16_t)v;
@@ -958,7 +976,7 @@ bool sensors_read_obd(cairn_obd_snapshot_t *out, const obd_batch_t *batch)
     if (have_batch && batch_has(batch, CAIRN_FIELD_RPM)) {
         out->rpm = batch->rpm;
         requested++; answered++;
-    } else if (!have_batch && field_pid(CAIRN_FIELD_RPM, &pid)) {
+    } else if (field_pid(CAIRN_FIELD_RPM, &pid)) {
         requested++;
         if (pid_value(pid, &v)) {
             out->rpm = (int16_t)((v > 32767) ? 32767 : v);
@@ -974,7 +992,7 @@ bool sensors_read_obd(cairn_obd_snapshot_t *out, const obd_batch_t *batch)
     if (have_batch && batch_has(batch, CAIRN_FIELD_THROTTLE_PCT)) {
         out->throttle_pct = batch->throttle_pct;
         requested++; answered++;
-    } else if (!have_batch && field_pid(CAIRN_FIELD_THROTTLE_PCT, &pid)) {
+    } else if (field_pid(CAIRN_FIELD_THROTTLE_PCT, &pid)) {
         requested++;
         if (pid_value(pid, &v)) {
             out->throttle_pct = (uint8_t)v;
@@ -990,7 +1008,7 @@ bool sensors_read_obd(cairn_obd_snapshot_t *out, const obd_batch_t *batch)
     if (have_batch && batch_has(batch, CAIRN_FIELD_TIMING_ADVANCE_DEG)) {
         out->timing_advance_deg = batch->timing_deg;
         requested++; answered++;
-    } else if (!have_batch && field_pid(CAIRN_FIELD_TIMING_ADVANCE_DEG, &pid)) {
+    } else if (field_pid(CAIRN_FIELD_TIMING_ADVANCE_DEG, &pid)) {
         requested++;
         if (pid_value(pid, &v)) {
             out->timing_advance_deg = sat_i8(v);
@@ -1041,8 +1059,10 @@ bool sensors_read_obd(cairn_obd_snapshot_t *out, const obd_batch_t *batch)
     out->pids_requested  = requested;
     out->pids_answered   = answered;
     out->pid_error_count = errors;
-    out->poll_cadence_ms = have_batch ? cairn_engine_params()->obd_batch_period_ms
-                                      : cairn_engine_params()->obd_period_ms;
+    /* The cadence this record was actually taken at, which is the fast one only
+     * when the batch was complete -- the same rule the scheduler uses. */
+    out->poll_cadence_ms = batch_complete ? cairn_engine_params()->obd_batch_period_ms
+                                          : cairn_engine_params()->obd_period_ms;
 
     return answered > 0;
 }
@@ -1207,6 +1227,7 @@ bool sensors_read_obd_extended(cairn_obd_extended_t *out,
     byte     pid = 0;
 
     const bool have_batch = (batch != nullptr && batch->valid);
+    const bool batch_complete = (batch != nullptr && batch->complete);
     const cairn_engine_profile_t *prof = cairn_engine_active();
 
     /* Manifold pressure: from the batch, else one request. */
@@ -1217,7 +1238,7 @@ bool sensors_read_obd_extended(cairn_obd_extended_t *out,
                        (unsigned)out->map_kpa);
         requested++;
         answered++;
-    } else if (!have_batch && field_pid(CAIRN_FIELD_MAP_KPA, &pid)) {
+    } else if (field_pid(CAIRN_FIELD_MAP_KPA, &pid)) {
         requested++;
         if (pid_value(pid, &v)) {
             out->map_kpa = (v < 0) ? 0 : (uint16_t)((v > 65534) ? 65534 : v);
@@ -1241,7 +1262,7 @@ bool sensors_read_obd_extended(cairn_obd_extended_t *out,
         out->lambda_e4 = batch->lambda_e4;
         requested++;
         answered++;
-    } else if (!have_batch && field_pid(CAIRN_FIELD_LAMBDA_E4, &pid)) {
+    } else if (field_pid(CAIRN_FIELD_LAMBDA_E4, &pid)) {
         requested++;
         out->lambda_e4 = CAIRN_U16_UNKNOWN;
         uint16_t raw = 0;
@@ -1339,8 +1360,10 @@ bool sensors_read_obd_extended(cairn_obd_extended_t *out,
 
     out->pids_requested = requested;
     out->pids_answered  = answered;
-    out->poll_cadence_ms = have_batch ? cairn_engine_params()->obd_batch_period_ms
-                                      : cairn_engine_params()->obd_period_ms;
+    /* The cadence this record was actually taken at, which is the fast one only
+     * when the batch was complete -- the same rule the scheduler uses. */
+    out->poll_cadence_ms = batch_complete ? cairn_engine_params()->obd_batch_period_ms
+                                          : cairn_engine_params()->obd_period_ms;
 
     s_cold_phase = (uint8_t)((s_cold_phase + 1u) % cold_slots());
 

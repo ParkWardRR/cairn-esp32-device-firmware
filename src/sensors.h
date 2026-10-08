@@ -109,7 +109,8 @@ bool sensors_gnss_freshness(uint32_t *age_ms, uint8_t *sats);
  * Confirmed working on the N20 DME (2026-10-03 drive, boot 155).
  */
 typedef struct {
-    bool     valid;
+    bool     valid;          /* at least one hot field came back */
+    bool     complete;       /* every hot field the profile declares came back */
     int16_t  rpm;
     int16_t  speed_kph;
     uint8_t  throttle_pct;

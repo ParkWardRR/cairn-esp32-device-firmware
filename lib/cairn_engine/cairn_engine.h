@@ -221,11 +221,20 @@ size_t cairn_engine_batch_request(const cairn_engine_profile_t *p, char *buf,
                                   size_t cap);
 
 /*
- * Parse the reply bytes that follow the "41" service echo: for each hot PID in
- * request order, the PID byte (which must echo) and its data bytes. Fills
- * values[field] for every field the batch carries and sets bit `field` of *present.
- * Returns false, with no useful output, on a short reply or a PID that does not echo.
+ * Parse the reply bytes that follow the "41" service echo: a sequence of
+ * (PID byte, its data bytes) pairs. Fills values[field] for every field the reply
+ * actually carries and sets bit `field` of *present for each.
+ *
+ * A partial or reordered reply is accepted — five of six PIDs is five good
+ * simultaneous measurements, and `present` tells the caller exactly which. Parsing
+ * stops at the first pair that cannot be read safely: a PID the profile does not
+ * list as hot (its length is unknown, so the next pair cannot be located) or one
+ * whose data bytes are truncated. Returns false only when nothing was parsed.
  */
+/* Bitmask of every field the profile's hot PIDs cover, so a caller can tell a
+ * complete batch from a partial one. */
+uint32_t cairn_engine_hot_field_mask(const cairn_engine_profile_t *p);
+
 bool cairn_engine_batch_parse(const cairn_engine_profile_t *p, const uint8_t *bytes,
                               size_t n, int32_t values[CAIRN_FIELD_COUNT],
                               uint32_t *present);

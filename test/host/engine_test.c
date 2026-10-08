@@ -462,6 +462,71 @@ static bool L_batch_parse(const uint8_t *bytes, int nbytes, legacy_batch_t *out)
     return true;
 }
 
+/*
+ * An independent reference for the *relaxed* parse, mirroring the documented
+ * contract: walk (PID, data...) pairs keyed on the PID byte, stop at a PID the
+ * profile does not list as hot or at a truncated pair, report whatever was read.
+ *
+ * The strict legacy parser stays below as the reference for a complete, in-order
+ * reply — that is the equivalence that matters for the conversions. It cannot be
+ * the reference for a partial one, because refusing partial replies is the bug
+ * being fixed: on the 2026-10-07 drive it discarded 225 of 239 batches and forced
+ * the 1200 ms sequential fallback.
+ */
+static bool L_batch_parse_relaxed(const uint8_t *bytes, size_t n,
+                                  int32_t out[CAIRN_FIELD_COUNT], uint32_t *present)
+{
+    static const int fields[6] = {
+        CAIRN_FIELD_RPM, CAIRN_FIELD_SPEED_KPH, CAIRN_FIELD_THROTTLE_PCT,
+        CAIRN_FIELD_TIMING_ADVANCE_DEG, CAIRN_FIELD_MAP_KPA, CAIRN_FIELD_LAMBDA_E4,
+    };
+    size_t pos = 0;
+    int    f;
+
+    for (f = 0; f < CAIRN_FIELD_COUNT; f++) out[f] = 0;
+    *present = 0;
+
+    while (pos < n) {
+        size_t  slot;
+        bool    found = false;
+        uint8_t d[2] = { 0, 0 };
+        size_t  j;
+
+        for (slot = 0; slot < sizeof(L_BATCH_PIDS); slot++) {
+            if (L_BATCH_PIDS[slot] == bytes[pos]) { found = true; break; }
+        }
+        if (!found) break;
+        if (n - pos < (size_t)1u + L_BATCH_DBYTES[slot]) break;
+
+        pos++;
+        for (j = 0; j < L_BATCH_DBYTES[slot]; j++) d[j] = bytes[pos++];
+
+        switch (slot) {
+        case 0: out[fields[0]] = (int16_t)(((uint16_t)d[0] << 8 | d[1]) / 4u); break;
+        case 1: out[fields[1]] = (int16_t)d[0]; break;
+        case 2: out[fields[2]] = (uint8_t)((uint16_t)d[0] * 100u / 255u); break;
+        case 3: out[fields[3]] = L_sat_i8((int)d[0] / 2 - 64); break;
+        case 4: out[fields[4]] = d[0]; break;
+        default: {
+            uint16_t raw = (uint16_t)((uint16_t)d[0] << 8 | d[1]);
+            uint32_t e4  = ((uint32_t)raw * 10000u) / 32768u;
+            out[fields[5]] = (uint16_t)((e4 > 65534u) ? 65534u : e4);
+            break;
+        }
+        }
+        *present |= 1u << fields[slot];
+    }
+    return *present != 0;
+}
+
+/* The six hot fields the N20 profile declares, as a bitmask. */
+static uint32_t full_hot_mask(void)
+{
+    return (1u << CAIRN_FIELD_RPM) | (1u << CAIRN_FIELD_SPEED_KPH) |
+           (1u << CAIRN_FIELD_THROTTLE_PCT) | (1u << CAIRN_FIELD_TIMING_ADVANCE_DEG) |
+           (1u << CAIRN_FIELD_MAP_KPA) | (1u << CAIRN_FIELD_LAMBDA_E4);
+}
+
 static uint32_t g_rng = 0x2545F491u;
 static uint32_t rnd(void)
 {
@@ -513,25 +578,89 @@ static void test_n20_batch(const cairn_engine_profile_t *n20)
         default: break;
         }
 
+        const uint32_t full = (1u << CAIRN_FIELD_RPM) | (1u << CAIRN_FIELD_SPEED_KPH) |
+                              (1u << CAIRN_FIELD_THROTTLE_PCT) |
+                              (1u << CAIRN_FIELD_TIMING_ADVANCE_DEG) |
+                              (1u << CAIRN_FIELD_MAP_KPA) | (1u << CAIRN_FIELD_LAMBDA_E4);
+        int32_t  rv[CAIRN_FIELD_COUNT];
+        uint32_t rpresent = 0;
+        bool     rok;
+
         lok = L_batch_parse(buf, (int)len, &lb);
         nok = cairn_engine_batch_parse(n20, buf, len, v, &present);
-        if (lok != nok) { CHECK(lok == nok); break; }
+        rok = L_batch_parse_relaxed(buf, len, rv, &rpresent);
+
+        /* The relaxed reference is the contract: same verdict, same fields, same
+         * values, for every reply shape including the corrupted ones. */
+        if (rok != nok || rpresent != present) {
+            CHECK(!"batch parse differs from the relaxed reference");
+            break;
+        }
+        if (nok) {
+            int f;
+            for (f = 0; f < CAIRN_FIELD_COUNT; f++) {
+                if ((present & (1u << f)) && rv[f] != v[f]) {
+                    CHECK(!"a parsed field differs from the relaxed reference");
+                    break;
+                }
+            }
+        }
+
+        /*
+         * And where the strict legacy parser accepted the reply — a complete,
+         * in-order one — the new parser must still produce exactly what it did.
+         * That is what keeps the conversions pinned to the original code path.
+         */
         if (lok) {
-            if (lb.rpm != v[CAIRN_FIELD_RPM] || lb.speed != v[CAIRN_FIELD_SPEED_KPH] ||
+            if (!nok || present != full ||
+                lb.rpm != v[CAIRN_FIELD_RPM] || lb.speed != v[CAIRN_FIELD_SPEED_KPH] ||
                 lb.throttle != v[CAIRN_FIELD_THROTTLE_PCT] ||
                 lb.timing != v[CAIRN_FIELD_TIMING_ADVANCE_DEG] ||
-                lb.map != v[CAIRN_FIELD_MAP_KPA] || lb.lambda_e4 != v[CAIRN_FIELD_LAMBDA_E4] ||
-                present != ((1u << CAIRN_FIELD_RPM) | (1u << CAIRN_FIELD_SPEED_KPH) |
-                            (1u << CAIRN_FIELD_THROTTLE_PCT) |
-                            (1u << CAIRN_FIELD_TIMING_ADVANCE_DEG) |
-                            (1u << CAIRN_FIELD_MAP_KPA) | (1u << CAIRN_FIELD_LAMBDA_E4))) {
-                CHECK(!"batch parse differs from the legacy parse");
+                lb.map != v[CAIRN_FIELD_MAP_KPA] || lb.lambda_e4 != v[CAIRN_FIELD_LAMBDA_E4]) {
+                CHECK(!"batch parse differs from the legacy parse on a complete reply");
                 break;
             }
         }
     }
     g_checks++;
-    printf("  N20 batch: request string and %ld random replies (some corrupt) match the legacy parse\n", frames);
+    printf("  N20 batch: request string and %ld random replies (some corrupt) match the "
+           "relaxed reference, and the legacy parse wherever it accepted\n", frames);
+
+    /* The cases the drive actually produced, named rather than left to the fuzz. */
+    {
+        int32_t  v[CAIRN_FIELD_COUNT];
+        uint32_t present = 0;
+
+        /* Five of six: rpm, speed, throttle, timing, map — lambda absent. */
+        static const uint8_t short_reply[] = {
+            0x0C, 0x1A, 0xF8, 0x0D, 0x52, 0x11, 0x4F, 0x0E, 0x7C, 0x0B, 0x63,
+        };
+        CHECK(cairn_engine_batch_parse(n20, short_reply, sizeof(short_reply), &v[0], &present));
+        CHECK_EQ(present & (1u << CAIRN_FIELD_LAMBDA_E4), 0u);
+        CHECK(present & (1u << CAIRN_FIELD_MAP_KPA));
+        CHECK_EQ(v[CAIRN_FIELD_MAP_KPA], 0x63);
+        CHECK_EQ(v[CAIRN_FIELD_RPM], (int32_t)((0x1AF8u) / 4u));
+
+        /* Reordered: map first, then rpm. Both are still good measurements. */
+        static const uint8_t reordered[] = { 0x0B, 0x63, 0x0C, 0x1A, 0xF8 };
+        CHECK(cairn_engine_batch_parse(n20, reordered, sizeof(reordered), &v[0], &present));
+        CHECK_EQ(v[CAIRN_FIELD_MAP_KPA], 0x63);
+        CHECK_EQ(v[CAIRN_FIELD_RPM], (int32_t)((0x1AF8u) / 4u));
+
+        /* A truncated final pair contributes nothing but does not void the rest. */
+        static const uint8_t truncated[] = { 0x0B, 0x63, 0x0C, 0x1A };
+        CHECK(cairn_engine_batch_parse(n20, truncated, sizeof(truncated), &v[0], &present));
+        CHECK(present & (1u << CAIRN_FIELD_MAP_KPA));
+        CHECK_EQ(present & (1u << CAIRN_FIELD_RPM), 0u);
+
+        /* Nothing parseable is still a failure, so the caller falls back. */
+        static const uint8_t junk[] = { 0x99, 0x01, 0x02 };
+        CHECK(!cairn_engine_batch_parse(n20, junk, sizeof(junk), &v[0], &present));
+        CHECK_EQ(present, 0u);
+
+        /* The hot mask is what tells a complete batch from a partial one. */
+        CHECK_EQ(cairn_engine_hot_field_mask(n20), full_hot_mask());
+    }
 }
 
 /* ── resolved values, with and without a profile's data ───────────────────── */

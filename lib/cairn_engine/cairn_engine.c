@@ -194,9 +194,7 @@ bool cairn_engine_batch_parse(const cairn_engine_profile_t *p, const uint8_t *by
                               size_t n, int32_t values[CAIRN_FIELD_COUNT],
                               uint32_t *present)
 {
-    size_t  expected = 0;
     size_t  pos = 0;
-    uint8_t i;
     int     f;
 
     if (p == NULL || bytes == NULL || values == NULL || present == NULL ||
@@ -207,26 +205,70 @@ bool cairn_engine_batch_parse(const cairn_engine_profile_t *p, const uint8_t *by
     for (f = 0; f < CAIRN_FIELD_COUNT; f++) values[f] = 0;
     *present = 0;
 
-    for (i = 0; i < p->n_hot; i++) expected += 1u + p->pids[i].nbytes;
-    if (n < expected) return false;
-
-    for (i = 0; i < p->n_hot; i++) {
-        const cairn_pid_t *pid = &p->pids[i];
+    /*
+     * Walk whatever the ECU sent, keyed on the PID byte, rather than asserting
+     * the reply mirrors the request.
+     *
+     * This used to demand the full expected byte count and each PID in request
+     * order, failing the whole batch otherwise. On the 2026-10-07 drive that
+     * threw away almost every batch: 225 of 239 samples came from the sequential
+     * fallback at 1200 ms, against the 56 ms this path costs when it is accepted.
+     * A reply carrying five of six PIDs, or carrying them reordered, is still
+     * five good simultaneous measurements, and discarding them bought nothing.
+     *
+     * `present` already describes the result per field and every caller tests it
+     * per field, so a partial batch has always been representable -- only this
+     * function refused to produce one.
+     *
+     * Still strict about the things that would corrupt data rather than thin it:
+     * a PID the active profile does not list as hot ends the parse, because
+     * without knowing its length there is no way to find the next pair and
+     * everything after it would be read at the wrong offset. Same for a pair
+     * whose data bytes are not all present.
+     */
+    while (pos < n) {
+        const cairn_pid_t *pid = NULL;
         uint8_t data[4] = { 0, 0, 0, 0 };
         int32_t v;
-        uint8_t j;
+        uint8_t i, j;
 
-        if (bytes[pos] != (uint8_t)pid->pid) return false;
+        for (i = 0; i < p->n_hot; i++) {
+            if ((uint8_t)p->pids[i].pid == bytes[pos]) {
+                pid = &p->pids[i];
+                break;
+            }
+        }
+        if (pid == NULL) break;
+        if (n - pos < (size_t)1u + pid->nbytes) break;
+
         pos++;
         for (j = 0; j < pid->nbytes && j < 4; j++) data[j] = bytes[pos++];
 
-        if (cairn_engine_eval_pid(p, pid, data, &v) != CAIRN_EXPR_OK) return false;
+        if (cairn_engine_eval_pid(p, pid, data, &v) != CAIRN_EXPR_OK) break;
         if (pid->field != CAIRN_FIELD_NONE && pid->field < CAIRN_FIELD_COUNT) {
             values[pid->field] = v;
             *present |= 1u << pid->field;
         }
     }
-    return true;
+
+    /* One field is a usable batch; none is not. */
+    return *present != 0;
+}
+
+uint32_t cairn_engine_hot_field_mask(const cairn_engine_profile_t *p)
+{
+    uint32_t mask = 0;
+    uint8_t  i;
+
+    if (p == NULL || p->pids == NULL) return 0;
+
+    for (i = 0; i < p->n_hot; i++) {
+        if (p->pids[i].field != CAIRN_FIELD_NONE &&
+            p->pids[i].field < CAIRN_FIELD_COUNT) {
+            mask |= 1u << p->pids[i].field;
+        }
+    }
+    return mask;
 }
 
 /* ── vehicle gate ─────────────────────────────────────────────────────────── */

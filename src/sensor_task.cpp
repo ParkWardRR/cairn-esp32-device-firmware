@@ -205,8 +205,15 @@ static void sensor_task(void *arg)
                 bool have_batch = sensors_read_obd_batch(&batch);
                 if (!have_batch) batch.valid = false;
 
-                next_obd = now + (batch.valid ? cairn_engine_params()->obd_batch_period_ms
-                                              : s_obd_period_ms);
+                /*
+                 * The fast period belongs to a *complete* batch. That is the
+                 * ~56 ms cycle it was measured against; a partial batch leaves
+                 * the read functions fetching the rest one request at a time, so
+                 * the cycle costs what a sequential sweep costs and asking again
+                 * in 200 ms would just mean polling continuously.
+                 */
+                next_obd = now + (batch.complete ? cairn_engine_params()->obd_batch_period_ms
+                                                 : s_obd_period_ms);
 
                 fact_t f;
                 memset(&f, 0, sizeof(f));

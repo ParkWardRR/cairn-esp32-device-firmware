@@ -885,9 +885,47 @@ static void seal_and_reopen(Lifecycle *lc, uint8_t reason)
     emit_transition(lc, CAIRN_REGION_BUNDLE, (uint8_t)BundleState::Open,
                     (uint8_t)BundleState::Sealing, 0, reason);
 
+    /*
+     * Stamp the active engine profile into the manifest's firmware_version.
+     *
+     * Nothing in a bundle said which profile produced its numbers. The profile
+     * decides the OBD request, every value conversion, the cadence and the
+     * engine-on and dwell thresholds, so a reader holding the data could not tell
+     * whether a timing figure came through clamp(A/2-64) or something else — in a
+     * format whose whole purpose is being checkable later, that is a hole.
+     *
+     * It rides in firmware_version rather than a manifest key of its own because
+     * key 29 would be a contracts/format/v3 change, and v3 is pinned here at
+     * contracts-v0.2.0 (the spec states a manifest has 27 or 28 fields). This is
+     * honest in the field it uses: the profile tables are compiled into the image,
+     * so they are part of what this firmware *is*. The first-class key is the
+     * right end state and is tracked separately.
+     *
+     * The profile's own sha256 is the stamp rather than just the name, because it
+     * pins the formulas and cadences too — a profile edited without a version bump
+     * is a different profile, and the digest says so. Six hex digits of it, which
+     * is what fits beside the version in 32 bytes.
+     */
+    char fw[32];
+    const cairn_engine_profile_t *prof = cairn_engine_active();
+    if (prof != nullptr) {
+        int n = snprintf(fw, sizeof(fw), "%s+%s@%02x%02x%02x",
+                         CAIRN_FIRMWARE_VERSION, prof->id,
+                         prof->sha256[0], prof->sha256[1], prof->sha256[2]);
+        if (n < 0 || (size_t)n >= sizeof(fw)) {
+            /* Truncated: the stamp would be a lie, so record the version alone.
+             * Loud, because silently losing provenance is the failure this guards. */
+            CAIRN_LOGW(TAG, "engine stamp does not fit in firmware_version; "
+                            "sealing without it");
+            snprintf(fw, sizeof(fw), "%s", CAIRN_FIRMWARE_VERSION);
+        }
+    } else {
+        snprintf(fw, sizeof(fw), "%s", CAIRN_FIRMWARE_VERSION);
+    }
+
     uint8_t sealed_id[16];
     bool ok = cairn_capture_seal(&lc->cap, lc->key_seed, lc->key_public,
-                                 CAIRN_FIRMWARE_VERSION, CAIRN_POLICY_VERSION,
+                                 fw, CAIRN_POLICY_VERSION,
                                  lc->trip_seq, sealed_id);
 
     /*
