@@ -560,7 +560,12 @@ static void test_n20_batch(const cairn_engine_profile_t *n20)
         uint8_t        buf[16];
         size_t         len = 0;
         uint32_t       r = rnd();
-        legacy_batch_t lb;
+        /* Zeroed because GCC cannot see that lb is read only under `if (lok)`, and
+         * L_batch_parse fills it whenever it returns true. Zeroing is the honest fix
+         * rather than silencing the warning: were the legacy parser ever to return true
+         * without setting a field, the comparison below would now fail loudly instead of
+         * reading an indeterminate value. */
+        legacy_batch_t lb = { 0 };
         int32_t        v[CAIRN_FIELD_COUNT];
         uint32_t       present = 0;
         bool           lok, nok;
