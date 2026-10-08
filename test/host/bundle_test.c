@@ -56,7 +56,10 @@ static void rm_rf(const char *path)
 {
     char cmd[700];
     snprintf(cmd, sizeof(cmd), "rm -rf '%s'", path);
-    (void)system(cmd);
+    /* The shape the other host tests use. A (void) cast does not suppress glibc's
+     * warn_unused_result on system(), which is why this file built on a Mac and not on
+     * the Linux runner. */
+    if (system(cmd) != 0) { /* nothing to remove is fine */ }
 }
 
 static bool fresh_tree(void)
