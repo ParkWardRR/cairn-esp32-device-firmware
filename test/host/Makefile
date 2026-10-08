@@ -40,6 +40,7 @@ UPLINK_DIR  := ../../lib/cairn_uplink
 CONFIG_DIR  := ../../lib/cairn_config
 DEVINFO_DIR := ../../lib/cairn_devinfo
 CHECKIN_DIR := ../../lib/cairn_checkin
+INTAKE_DIR  := ../../lib/cairn_intake
 
 FORMAT_SRC := $(wildcard $(FORMAT_DIR)/*.c)
 STORE_SRC  := $(wildcard $(STORE_DIR)/*.c)
@@ -93,14 +94,14 @@ CFLAGS  ?= -std=c11 -O1 -g -D_DEFAULT_SOURCE \
            -Wall -Wextra -Werror -Wno-format-truncation \
            -Wshadow -Wpointer-arith -Wcast-qual -Wstrict-prototypes \
            -Wmissing-prototypes -Wno-unused-parameter \
-           -I$(FORMAT_DIR) -I$(STORE_DIR) -I$(FS_DIR) -I$(LOG_DIR) -I$(PROV_DIR) -I$(INCLUDE_DIR) -I$(SRC_DIR) -I$(OTA_DIR) -I$(POWER_DIR) -I$(OFFLOAD_DIR) -I$(BOOTTIME_DIR) -I$(UPLINK_DIR) -I$(CONFIG_DIR) -I$(DEVINFO_DIR) -I$(CHECKIN_DIR) -I.
+           -I$(FORMAT_DIR) -I$(STORE_DIR) -I$(FS_DIR) -I$(LOG_DIR) -I$(PROV_DIR) -I$(INCLUDE_DIR) -I$(SRC_DIR) -I$(OTA_DIR) -I$(POWER_DIR) -I$(OFFLOAD_DIR) -I$(BOOTTIME_DIR) -I$(UPLINK_DIR) -I$(CONFIG_DIR) -I$(DEVINFO_DIR) -I$(CHECKIN_DIR) -I$(INTAKE_DIR) -I.
 
 # Every header the sources can include. Without this a change to a shared header
 # (config.h, cairn_platform.h, policy.h) leaves a stale binary in build/ and a
 # result that describes yesterday's code — which already produced one false
 # failure and could as easily produce a false pass.
 HEADERS := $(wildcard $(OFFLOAD_DIR)/*.h $(PROV_DIR)/*.h $(FORMAT_DIR)/*.h $(STORE_DIR)/*.h $(FS_DIR)/*.h $(LOG_DIR)/*.h \
-                      $(INCLUDE_DIR)/*.h $(SRC_DIR)/*.h $(OTA_DIR)/*.h $(POWER_DIR)/*.h $(BOOTTIME_DIR)/*.h $(UPLINK_DIR)/*.h $(CONFIG_DIR)/*.h $(DEVINFO_DIR)/*.h $(CHECKIN_DIR)/*.h *.h)
+                      $(INCLUDE_DIR)/*.h $(SRC_DIR)/*.h $(OTA_DIR)/*.h $(POWER_DIR)/*.h $(BOOTTIME_DIR)/*.h $(UPLINK_DIR)/*.h $(CONFIG_DIR)/*.h $(DEVINFO_DIR)/*.h $(CHECKIN_DIR)/*.h $(INTAKE_DIR)/*.h *.h)
 
 SAN := -fsanitize=address,undefined -fno-omit-frame-pointer
 
@@ -109,7 +110,7 @@ BUILD := build
 # Engine profiles (lib/cairn_engine): see engine.mk.
 include engine.mk
 
-.PHONY: all run asan clean conformance faults ble-vectors mtprobe prov offload offload-sim boottime blesec uplink config devinfo nvswipe
+.PHONY: all run asan clean conformance faults ble-vectors mtprobe prov offload offload-sim boottime blesec uplink config devinfo nvswipe intake
 
 all: run
 
@@ -181,6 +182,16 @@ $(BUILD)/uplink: $(UPLINK_DIR)/cairn_uplink.c uplink_test.c $(HEADERS) | $(BUILD
 uplink: $(BUILD)/uplink
 	$(BUILD)/uplink
 
+# The intake client: the module over a simulated server and a simulated card.
+# It needs the format primitives for SHA-256 and nothing else.
+INTAKE_SRC := $(FORMAT_SRC) $(INTAKE_DIR)/cairn_intake.c log_host.c intake_test.c
+
+$(BUILD)/intake: $(INTAKE_SRC) $(HEADERS) | $(BUILD)
+	$(CC) $(CFLAGS) $(INTAKE_SRC) -o $@
+
+intake: $(BUILD)/intake
+	$(BUILD)/intake
+
 CONFIG_SRC := $(FORMAT_SRC) $(FS_DIR)/cairn_kv_posix.c $(CONFIG_DIR)/cairn_config.c config_test.c
 
 $(BUILD)/config: $(CONFIG_SRC) $(HEADERS) | $(BUILD)
@@ -220,7 +231,7 @@ else
 $(info device-info vectors not in this contracts pin (needs contracts-v0.2.0): devinfo row skipped)
 endif
 
-run: conformance faults ble-vectors mtprobe prov offload boottime blesec uplink config nvswipe
+run: conformance faults ble-vectors mtprobe prov offload boottime blesec uplink config nvswipe intake
 
 # Undefined behaviour in the scan path would be a parser reading past a torn
 # segment — exactly the case the format exists to handle safely.
@@ -247,6 +258,8 @@ asan: | $(BUILD)
 	$(BUILD)/config-asan
 	$(if $(wildcard $(DEVINFO_VECTORS)),$(CC) $(DEVINFO_CFLAGS) $(SAN) $(DEVINFO_SRC) -o $(BUILD)/devinfo-asan && $(BUILD)/devinfo-asan $(DEVINFO_VECTORS))
 	$(if $(wildcard $(DEVINFO_VECTORS)),$(CC) $(DEVINFO_CFLAGS) $(SAN) $(CHECKIN_SRC) -o $(BUILD)/checkin-asan && $(BUILD)/checkin-asan $(DEVINFO_VECTORS))
+	$(CC) $(CFLAGS) $(SAN) $(INTAKE_SRC) -o $(BUILD)/intake-asan
+	$(BUILD)/intake-asan
 	$(MAKE) asan-lte
 
 clean:
