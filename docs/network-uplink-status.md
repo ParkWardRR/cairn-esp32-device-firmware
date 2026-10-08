@@ -1,26 +1,51 @@
 # Network uplink: what is proven, what is not, and is it ready to drive
 
-State as of 2026-10-07, all of it measured on the car's dongle (ESP32-D0WDQ6 rev 1,
+State as of 2026-10-08, all of it measured on the car's dongle (ESP32-D0WDQ6 rev 1,
 device `8777228e31648b23f6f783d28eee3e26`) against the live server. Nothing below is
 inferred from a datasheet unless it says so.
 
-## Short answer: yes, drive it
+## Short answer: the drive happened, and the network half worked
 
-The capture, seal, BLE and LTE paths have each been exercised on this hardware. The one
-link that has never run is the *automatic* LTE trigger, and a bench cannot test it — it
-needs a trip-end edge, which only a drive produces. That makes a drive the right next
-step rather than a risk.
+Updated 2026-10-08. The previous verdict here was "yes, drive it", with the automatic
+LTE trigger as the one thing a bench could not test. It was driven on 2026-10-07 and
+that trigger worked, unattended, end to end:
 
-What a drive should produce, in order:
+1. the trip was captured and sealed on parking (11,202 frames)
+2. the trip-end edge fired, the settle delay elapsed, and LTE sent
+3. **1,295,714 bytes in 386 s — 3.35 KB/s, 0.23% protocol overhead**, pruned on a
+   verified receipt
+4. the trip decoded on the server (`reproduced: true`) and appeared in the sync log
 
-1. a trip captured and sealed when you park (proven many times)
-2. about ten minutes later, parked and away from home, an LTE send that uploads the
-   bundle and prunes it on a verified receipt (**never yet triggered automatically**)
-3. the trip visible on the dashboard
+So every transport is now proven on this hardware, including the schedule that drives
+them. Two things the drive exposed, both since fixed and neither in the network path:
 
-If step 2 does not happen, the first thing to check is the serial log for
-`[UPLINK] LTE send`. If that line never appears the schedule's preconditions were not
-met; if it appears and fails, the reason is logged.
+- **The 300 s LTE slot limit was below the cost of one real bundle** (386 s measured),
+  so the slot aborted mid-transfer every time and progress came only through resume,
+  paying the attach again for nothing. Now 900 s.
+- **A reboot stranded pending bundles.** `trip_ended_known` is zeroed by init, so with
+  no trip edge to point at LTE would not fire until some later drive ended. Boot now
+  counts as a trip end (#36), still behind the full settle delay.
+
+### What the drive did *not* produce: usable OBD data
+
+This matters more than anything above, because it is the point of the device. The trip
+captured **239 OBD samples across 1002 s**, with 766 s of it holding no OBD data at all
+in 25 outages quantised to ~23 s and small multiples. GNSS went dark in the same
+windows; the IMU, read on its own path, kept sampling at ~8.5 Hz throughout — so the
+device was healthy and the sensing task was blocking on itself.
+
+`COBD::readPID` waits out `OBD_TIMEOUT_SHORT` (1000 ms) and does not retry, and a cycle
+walks about nine reads. Once the DME goes quiet each one waits its full second in turn
+and the loop cannot reach the GNSS poll. Bounded in `0c55fb0` to 350 ms per read plus
+fail-fast after two consecutive misses — a dead cycle now costs ~700 ms rather than ~9 s.
+
+**That fix is not verified.** Bench power reports `obd=absent`, so the read path never
+runs on the desk and only a drive can confirm it. See #37, which also records two things
+still open: why the six-PID batch stopped answering (225 of 239 samples fell back to the
+1200 ms sequential path, against 56 ms measured for the batch on 2026-10-03), and that
+wide-open throttle cannot be identified from `throttle_pct` at all — it is PID 0x11,
+the throttle *plate* angle, which peaked at 77% across the whole drive and read 32-34%
+during the one confirmed 8.6 psi boost event.
 
 ## Proven on this hardware
 
@@ -29,22 +54,22 @@ met; if it appears and fails, the reason is logged.
 | Capture and seal | Bundles sealed repeatedly, including a 1.17 MB one. `resuming interrupted capture` works across reboots. |
 | BLE -> phone -> server | **9 bundles** receipted on the server, all `"path":"ble-relay"`. |
 | Wi-Fi -> server, mTLS | **4 bundles** delivered and pruned, `env:cairn-wifiup`. |
-| LTE -> server, mTLS over Funnel | **1 bundle**, 158,906 bytes, delivered and pruned. T-Mobile US (PLMN 311480), PDP address assigned, TLSv1.2 ECDHE-ECDSA-AES128-GCM in 5.2 s, 3 requests over 1 connection. |
+| LTE -> server, mTLS over Funnel | **1 bundle on the bench**, 158,906 bytes, delivered and pruned. T-Mobile US (PLMN 311480), PDP address assigned, TLSv1.2 ECDHE-ECDSA-AES128-GCM in 5.2 s, 3 requests over 1 connection. Then **a real drive, unattended**: 1,295,714 bytes in 386 s, 3.35 KB/s, 0.23% overhead. |
+| The automatic LTE trigger | **Proven 2026-10-07.** Trip-end edge, settle delay, send, receipted prune — no console, no bench env. This was the last thing a bench could not test. |
 | TLS actually verifies | Correct CA -> VERIFIED. Wrong CA (`env:cairn-tlsneg`) -> REJECTED, flags `0x8` NOT_TRUSTED, mbedTLS `-0x2700`. |
 | Server rejects bad clients | No client cert -> TLS failure. Cert with the right CommonName from an untrusted CA -> TLS failure. |
 | Uplink schedule in production | Arms, scans, opens a slot, honours the abort, holds standby. Boots clean, no panics. |
 
 ## Not proven
 
-- **The automatic LTE trigger.** Needs a trip-end edge. `cairn_uplink` deliberately does
-  not start LTE after a power cycle because it has not seen a trip end — the conservative
-  direction, and the reason a bench cannot exercise it.
-- **Per-chunk LTE cost at the 8 KiB production chunk size** (#35). The one datapoint is a
-  single-chunk bundle: ~3 KB/s. Do not extrapolate from the UART's 11.5 kB/s.
+- **The OBD fail-fast bound** (#37). Bench power reports `obd=absent`, so the read path
+  never runs on the desk. Only a drive can show whether the outages are gone.
 - **Resume across two sessions over cellular.** The code path is host-tested (a killed
   link resends only what is missing) but has not been exercised on a real interrupted
-  cellular transfer.
+  cellular transfer. Less likely to be hit now the slot limit exceeds a whole bundle.
 - **Parked current draw** with the modem in the loop (#10 — needs a meter).
+- **Whether this DME answers pedal position** (0x49/0x4A). Added to the `env:cairn-pidtest`
+  probe list, not to the profile's `pids`, precisely because it is unknown.
 
 ## Known limitations you will meet
 
@@ -91,6 +116,15 @@ antenna and is unaffected, which is why LTE succeeded on a bundle Wi-Fi lost.
   reported 36% while the link was failing.
 - **Sealed bundles do not compress.** Measured: `gzip -9` reaches 90% of raw, `xz -9` 87%,
   because the payloads are AEAD ciphertext. There is nothing to win.
+- **A blocking read in the sensing task costs every other sensor too.** The OBD outages
+  took GNSS down with them, and nothing in the record said so — the `obd` and `position`
+  tables just stopped. What identified it was the IMU continuing at full rate in the same
+  windows. When a channel goes quiet, check whether its neighbours went quiet with it
+  before suspecting the channel.
+- **`OBD_TIMEOUT_SHORT` cannot be lowered globally.** The same 1000 ms bounds `ATZ` and
+  the rest of `COBD::init()`, where a reset legitimately takes most of a second. Override
+  it per read (`CairnOBD::readPIDTimed`), which is also the only way to reach the
+  protected `normalizeData()` so the library's conversion is reused unchanged.
 
 ## Architecture, briefly
 
