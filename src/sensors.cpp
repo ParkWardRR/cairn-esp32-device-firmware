@@ -1358,6 +1358,26 @@ bool sensors_read_obd_extended(cairn_obd_extended_t *out,
         }
     }
 
+    /*
+     * Cold slot 10. Accelerator pedal position: the driver's demand, and the only
+     * channel that can mark a pull wide open — throttle_pct is the plate angle,
+     * which this DME does not take to 100% at WOT.
+     *
+     * Asked for before support is established, because asking is the only way to
+     * find out: the library's support bitmap is memset to 0xff before its query,
+     * so it cannot distinguish "supported" from "the query failed". An unanswered
+     * request records the sentinel and lands in pids_requested but not
+     * pids_answered, which says exactly what happened.
+     */
+    out->pedal_pct = CAIRN_U8_UNKNOWN;
+    if (cold_pid(CAIRN_FIELD_PEDAL_PCT, &pid)) {
+        requested++;
+        if (pid_value(pid, &v)) {
+            out->pedal_pct = (uint8_t)((v < 0) ? 0 : ((v > 100) ? 100 : v));
+            answered++;
+        }
+    }
+
     out->pids_requested = requested;
     out->pids_answered  = answered;
     /* The cadence this record was actually taken at, which is the fast one only

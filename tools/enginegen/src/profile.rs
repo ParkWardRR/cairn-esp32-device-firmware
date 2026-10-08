@@ -86,10 +86,11 @@ pub enum Field {
     BaroKpa,
     AbsLoadRaw,
     FuelLevelPct,
+    PedalPct,
 }
 
 impl Field {
-    pub const ALL: [Field; 16] = [
+    pub const ALL: [Field; 17] = [
         Field::Rpm,
         Field::SpeedKph,
         Field::ThrottlePct,
@@ -106,6 +107,7 @@ impl Field {
         Field::BaroKpa,
         Field::AbsLoadRaw,
         Field::FuelLevelPct,
+        Field::PedalPct,
     ];
 
     /// Index into ALL, plus one: 0 is reserved for "no field" in the C enum.
@@ -135,6 +137,7 @@ impl Field {
             Field::BaroKpa => "baro_kpa",
             Field::AbsLoadRaw => "abs_load_raw",
             Field::FuelLevelPct => "fuel_level_pct",
+            Field::PedalPct => "pedal_pct",
         }
     }
 }

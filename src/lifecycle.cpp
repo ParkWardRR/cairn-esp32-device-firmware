@@ -652,7 +652,18 @@ static void on_obd_extended(Lifecycle *lc, const fact_t *f)
 {
     uint8_t payload[24];
     cairn_encode_obd_extended(&f->data.obd_ext, payload);
-    emit_capture_record(lc, CAIRN_REC_OBD_EXTENDED, 1, payload, sizeof(payload));
+    /*
+     * schema_version 2: byte 23 carries pedal_pct, where version 1 had a
+     * reserved zero.
+     *
+     * The version is what makes reclaiming that byte safe. A version 1 record's
+     * zero there is indistinguishable by value from a genuine 0% pedal, and the
+     * obvious discriminator does not work — pids_requested is documented as a
+     * bitmap but the firmware has always written a plain count, so it cannot say
+     * *which* PIDs were asked for. Per-record schema versioning is exactly the
+     * mechanism for this, so a reader keyed on it never has to guess.
+     */
+    emit_capture_record(lc, CAIRN_REC_OBD_EXTENDED, 2, payload, sizeof(payload));
 }
 
 static void on_obd_silent(Lifecycle *lc)

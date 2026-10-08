@@ -991,7 +991,23 @@ typedef struct {
     uint32_t pids_answered;
     uint16_t poll_cadence_ms;
     uint8_t  fuel_level_pct;     /* PID 0x2F, 0-100 %; 0xFF = absent */
-    uint8_t  _reserved_ext;
+    /*
+     * Accelerator pedal position, PID 0x49; 0xFF = absent.
+     *
+     * This is the driver's demand, and it is not throttle_pct. That field is PID
+     * 0x11, the throttle *plate* angle, which on a drive-by-wire engine the ECU
+     * opens as far as it wants rather than as far as the pedal went: on the
+     * 2026-10-07 drive it peaked at 77% across the whole trip and read 32-34%
+     * during the one confirmed 8.6 psi boost event. So nothing in the capture
+     * could say whether a pull was wide open, which is the first question any
+     * tune analysis asks.
+     *
+     * It took the record's last reserved byte, which is why it is a u8 and why
+     * the record is still 24 bytes. Bundles sealed before this carry 0 here, so
+     * a reader must decide from the pids_requested bitmap whether the field means
+     * anything at all — a zero that was never asked for is not 0% pedal.
+     */
+    uint8_t  pedal_pct;
 } cairn_obd_extended_t;
 
 void cairn_encode_obd_extended(const cairn_obd_extended_t *s, uint8_t out[24]);

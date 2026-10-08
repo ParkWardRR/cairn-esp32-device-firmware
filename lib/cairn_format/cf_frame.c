@@ -688,6 +688,7 @@ void cairn_encode_obd_extended(const cairn_obd_extended_t *s, uint8_t out[24])
     put_u32(out + 16, s->pids_answered);
     put_u16(out + 20, s->poll_cadence_ms);
     out[22] = s->fuel_level_pct;
+    out[23] = s->pedal_pct;
 }
 
 void cairn_encode_device_health(const cairn_device_health_t *s, uint8_t out[16])

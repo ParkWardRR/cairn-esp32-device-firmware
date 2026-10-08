@@ -283,6 +283,31 @@ static const legacy_pid_t L_PIDS[] = {
 
 /* sensors.cpp: CAIRN_OBD_COLD_SLOTS, k_batch_pids[], k_batch_dbytes[] */
 #define L_COLD_SLOTS 10
+
+/*
+ * PIDs the profile has gained *since* the hard-coded tables above.
+ *
+ * L_PIDS is an oracle: it is what sensors.cpp hard-coded before the profile
+ * existed, and the point of comparing against it is to catch the profile silently
+ * drifting away from the behaviour the firmware shipped with. A deliberate
+ * addition is not drift, but it would read as drift against a count — so the
+ * oracle stays frozen at the original sixteen, the profile's first sixteen are
+ * still held to it entry by entry, and anything beyond them has to be named here
+ * with its slot. A PID added without being listed still fails.
+ */
+typedef struct {
+    cairn_field_t field;
+    uint8_t       pid;
+    uint8_t       nbytes;
+    uint8_t       slot;
+    const char   *why;
+} added_pid_t;
+
+static const added_pid_t L_ADDED_PIDS[] = {
+    { CAIRN_FIELD_PEDAL_PCT, 0x49, 1, 10,
+      "driver demand; throttle_pct is the plate angle and does not reach 100% at WOT" },
+};
+#define L_NADDED (sizeof(L_ADDED_PIDS) / sizeof(L_ADDED_PIDS[0]))
 static const uint8_t L_BATCH_PIDS[]   = { 0x0C, 0x0D, 0x11, 0x0E, 0x0B, 0x44 };
 static const uint8_t L_BATCH_DBYTES[] = {    2,    1,    1,    1,    1,    2 };
 
@@ -293,9 +318,21 @@ static void test_n20_pid_table(const cairn_engine_profile_t *n20)
     size_t i;
 
     CHECK_EQ(n20->status, CAIRN_ENGINE_DERIVED);
-    CHECK_EQ(n20->n_pids, L_NPIDS);
+    CHECK_EQ(n20->n_pids, L_NPIDS + L_NADDED);
     CHECK_EQ(n20->n_hot, sizeof(L_BATCH_PIDS));
-    CHECK_EQ(n20->cold_slots, L_COLD_SLOTS);
+    /* One cold slot per cold PID: the oracle's, plus each named addition. */
+    CHECK_EQ(n20->cold_slots, L_COLD_SLOTS + L_NADDED);
+
+    /* Every addition beyond the oracle, exactly as declared above. */
+    for (i = 0; i < L_NADDED; i++) {
+        const cairn_pid_t *p = &n20->pids[L_NPIDS + i];
+        CHECK_EQ(p->field, L_ADDED_PIDS[i].field);
+        CHECK_EQ(p->pid, L_ADDED_PIDS[i].pid);
+        CHECK_EQ(p->nbytes, L_ADDED_PIDS[i].nbytes);
+        CHECK_EQ(p->tier, CAIRN_TIER_COLD);
+        CHECK_EQ(p->cold_slot, L_ADDED_PIDS[i].slot);
+        CHECK_EQ(p->service, 0x01);
+    }
 
     /* The batch request: same PIDs, same order, same data lengths. */
     for (i = 0; i < sizeof(L_BATCH_PIDS); i++) {
@@ -678,7 +715,7 @@ static void test_params_follow_active(const cairn_engine_profile_t *n20, const c
         p = cairn_engine_params();
         CHECK_EQ(p->obd_period_ms, CAIRN_OBD_PERIOD_MS);
         CHECK_EQ(p->obd_batch_period_ms, CAIRN_OBD_BATCH_PERIOD_MS);
-        CHECK_EQ(p->cold_slots, L_COLD_SLOTS);
+        CHECK_EQ(p->cold_slots, L_COLD_SLOTS + L_NADDED);
         CHECK_EQ(p->engine_on_mv, CAIRN_ENGINE_ON_MV);
         CHECK_EQ(p->standby_idle_ms, CAIRN_STANDBY_IDLE_MS);
         CHECK_EQ(p->standby_heartbeat_ms, CAIRN_STANDBY_HEARTBEAT_MS);

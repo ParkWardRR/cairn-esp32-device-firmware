@@ -64,11 +64,25 @@ pids:
   # (100/255 of the 16-bit value) is applied at decode (sensors.cpp, pid_raw_u16).
   - { id: 0x43, name: absolute_load,       field: abs_load_raw,        unit: raw,  bytes: 2, tier: cold, cold_slot: 8, formula: "A*256+B",                range: [0, 65535],  log: true }
   - { id: 0x2F, name: fuel_level,          field: fuel_level_pct,      unit: "%",  bytes: 1, tier: cold, cold_slot: 9, formula: "A*100/255",              range: [0, 100],    log: true }
+  # Driver demand, and the only way to mark a pull wide open. throttle_pct is 0x11,
+  # the throttle *plate* angle, which this drive-by-wire DME opens as far as it
+  # wants rather than as far as the pedal went: on the 2026-10-07 drive it peaked at
+  # 77% across the whole trip and read 32-34% during the one confirmed 8.6 psi boost
+  # event, so the capture could not answer the first question a tune analysis asks.
+  #
+  # Cold rather than hot because it is new and unproven on this DME, and cold costs
+  # one request per rotation instead of one per cycle. Whether this ECU answers 0x49
+  # at all is NOT established -- the support bitmap cannot settle it, because
+  # COBD::init() memsets pidmap to 0xff before querying, so a failed query reads as
+  # everything supported. An unanswered request simply records the sentinel and is
+  # counted in pids_requested but not pids_answered, which is the honest answer and
+  # is why this is safe to ask for before it is proven.
+  - { id: 0x49, name: pedal_position,      field: pedal_pct,           unit: "%",  bytes: 1, tier: cold, cold_slot: 10, formula: "A*100/255",             range: [0, 100],    log: true }
 
 cadence:
   obd_period_ms: 1200          # CAIRN_OBD_PERIOD_MS: the sequential-read period
   obd_batch_period_ms: 200     # CAIRN_OBD_BATCH_PERIOD_MS: the period when the multi-PID batch answers
-  cold_slots: 10               # CAIRN_OBD_COLD_SLOTS
+  cold_slots: 11               # CAIRN_OBD_COLD_SLOTS, plus one for pedal position (0x49)
   measured:                    # config.h / sensors.cpp comments, 2026-10-03 drive; informational
     single_request_ms: [110, 140]
     batch_6pid_ms: 56
