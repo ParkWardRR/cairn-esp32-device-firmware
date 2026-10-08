@@ -19,7 +19,9 @@
 
 #include <Arduino.h>
 #include <SD.h>
+#include <esp_heap_caps.h>
 #include <esp_ota_ops.h>
+#include <new>
 #include <esp_sleep.h>
 
 #include "board_config.h"
@@ -54,7 +56,19 @@ static const char *TAG = "BOOT";
  */
 SET_LOOP_TASK_STACK_SIZE(CAIRN_LOOP_STACK_BYTES);
 
-static Lifecycle g_lifecycle;
+/*
+ * In PSRAM, not the static DRAM segment.
+ *
+ * The controller's state is about 8 KB -- mostly the last-known sensor samples
+ * and the open capture -- and it is allocated once and never freed, which makes
+ * it the easiest large object to move off the segment that actually binds. With
+ * both network transports, NimBLE and the Wi-Fi stack in one image, DRAM is the
+ * scarce resource and PSRAM's 4 MB is otherwise idle.
+ *
+ * Allocated in setup() rather than statically, because a static initialiser
+ * cannot be placed in PSRAM: the heap only exists once the runtime is up.
+ */
+static Lifecycle *g_lifecycle;
 static bool      g_running = false;
 
 /* Non-zero while a deferred SD mount retry is pending; see setup(). */
@@ -511,7 +525,27 @@ static bool bring_up_after_mount(void)
     return false;
 #endif
 
-    if (!lifecycle_begin(&g_lifecycle)) {
+    if (g_lifecycle == nullptr) {
+        g_lifecycle = (Lifecycle *)heap_caps_calloc(1, sizeof(Lifecycle),
+                                                    MALLOC_CAP_SPIRAM);
+        if (g_lifecycle == nullptr) {
+            /* Fall back to the internal heap rather than refusing to capture:
+             * recording the drive matters more than where the struct lives. */
+            CAIRN_LOGW(TAG, "no PSRAM for the controller state; using internal heap");
+            g_lifecycle = (Lifecycle *)calloc(1, sizeof(Lifecycle));
+        }
+        if (g_lifecycle == nullptr) {
+            CAIRN_LOGE(TAG, "cannot allocate %u bytes for the controller",
+                       (unsigned)sizeof(Lifecycle));
+            return false;
+        }
+        /* calloc gives zeroed memory, but Lifecycle has member initialisers, so
+         * the constructor has to run over it. */
+        g_lifecycle = new (g_lifecycle) Lifecycle();
+        CAIRN_LOGI(TAG, "controller state: %u bytes", (unsigned)sizeof(Lifecycle));
+    }
+
+    if (!lifecycle_begin(g_lifecycle)) {
         CAIRN_LOGE(TAG, "lifecycle failed to start");
         return false;
     }
@@ -613,10 +647,10 @@ void loop()
         return;
     }
 
-    lifecycle_tick(&g_lifecycle);
+    lifecycle_tick(g_lifecycle);
 
     /* Provisioning is refused whenever the controller is past Idle. */
-    prov_console_poll(g_lifecycle.capture != CaptureState::Idle);
+    prov_console_poll(g_lifecycle->capture != CaptureState::Idle);
 
 #if CAIRN_PIDTEST
     pidtest_tick();

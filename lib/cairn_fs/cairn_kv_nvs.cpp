@@ -108,7 +108,9 @@ int cairn_kv_zero_erased(void)
     if (p == nullptr) return -1;
 
     static uint8_t  page[CAIRN_NVS_PAGE_SIZE];
-    static uint8_t  zeros[CAIRN_NVS_PAGE_SIZE];   /* zero-initialised, never written */
+    /* const, so it lives in flash rather than the static DRAM segment: it is
+     * only ever a source of zero bytes, and DRAM is the segment that binds. */
+    static const uint8_t zeros[CAIRN_NVS_PAGE_SIZE] = { 0 };
     uint16_t        slots[CAIRN_NVS_ENTRY_COUNT];
     int             zeroed = 0;
 

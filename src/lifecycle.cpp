@@ -20,6 +20,8 @@
 #include "policy.h"
 #include "preroll.h"
 #include "sensor_task.h"
+#include "sensors.h"
+#include "uplink_runner.h"
 
 static const char *TAG = "LIFE";
 
@@ -346,6 +348,8 @@ bool lifecycle_begin(Lifecycle *lc)
     CAIRN_LOGI(TAG, "lifecycle up: boot %u, wake cause %d, sensors obd=%d imu=%d gnss=%d",
                (unsigned)lc->boot_count, (int)esp_sleep_get_wakeup_cause(),
                (int)lc->sensors.obd, (int)lc->sensors.imu, (int)lc->sensors.gnss);
+
+    uplink_runner_begin();
 
     return true;
 }
@@ -1022,6 +1026,21 @@ static void maybe_standby(Lifecycle *lc)
          * Compared by pointer, not strcmp: cairn_power_standby_blocker returns
          * string literals, so identity is both sufficient and exact.
          */
+        /*
+         * A transfer in progress holds standby by itself. The power module
+         * knows nothing about the uplink, and sleeping mid-upload would drop a
+         * TLS session and an open offer for no gain -- the slot is already
+         * bounded, so waiting for it costs at most that bound.
+         */
+        if (uplink_runner_busy()) {
+            static const char *const k_uplinking = "an uplink transfer is in progress";
+            if (lc->last_standby_blocker != k_uplinking) {
+                CAIRN_LOGI(TAG, "not standing by: %s", k_uplinking);
+                lc->last_standby_blocker = k_uplinking;
+            }
+            return;
+        }
+
         const char *why = cairn_power_standby_blocker(&e);
         if (why != nullptr && why != lc->last_standby_blocker) {
             CAIRN_LOGI(TAG, "not standing by: %s", why);
@@ -1404,6 +1423,13 @@ void lifecycle_tick(Lifecycle *lc)
     }
 
     refresh_pending(lc);
+
+    /*
+     * After refresh_pending, so the schedule sees the current count rather than
+     * last minute's, and before maybe_standby, so a slot that is about to run
+     * is not raced by the device deciding to sleep.
+     */
+    uplink_runner_tick(lc);
 
     /*
      * Last, so a sync has already had its chance this pass. Standing by before

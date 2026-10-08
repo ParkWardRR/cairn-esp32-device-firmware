@@ -10,15 +10,14 @@
 #include <string.h>
 
 #include "board_config.h"
-#include "cairn_bundle.h"
 #include "cairn_fs.h"
 #include "cairn_intake.h"
 #include "cairn_log.h"
 #include "cairn_modem.h"
-#include "cairn_prune.h"
 #include "cairn_store.h"
 #include "config.h"
 #include "net_http.h"
+#include "net_upload.h"
 #include "tls_client.h"
 
 static const char *TAG = "LTE";
@@ -500,7 +499,10 @@ private:
 
         /* Read header plus payload. The payload is binary, so the terminator
          * cannot be looked for until `have` bytes are in hand. */
-        static char raw[2048 + 128];
+        /* Header plus payload. Sized for a 1 KB fetch rather than 2: the
+         * responses on this protocol are a few hundred bytes, and DRAM is the
+         * segment that binds in this image. */
+        static char raw[1024 + 128];
         size_t   n        = 0;
         uint32_t deadline = millis() + 15000;
         raw[0] = '\0';
@@ -532,148 +534,49 @@ private:
     }
 
     bool    _open = false;
-    uint8_t _rx[2048];
+    uint8_t _rx[1024];
     size_t  _len = 0;
     size_t  _pos = 0;
 };
 
 /* ── uploading ────────────────────────────────────────────────────────────── */
 
-static ModemClient   s_modem;
-static TlsClient     s_tls(&s_modem);
-static cairn_http_t  s_http;
-static cairn_bundle_t s_bundle;
-static uint8_t       s_scratch[2048];
-static uint8_t       s_receipt[CAIRN_INTAKE_MAX_RECEIPT];
-
-static bool hex32(const char *hex, uint8_t out[32])
-{
-    if (strlen(hex) != 64) return false;
-    for (int i = 0; i < 64; i++) {
-        char    c = hex[i];
-        uint8_t v;
-        if      (c >= '0' && c <= '9') v = (uint8_t)(c - '0');
-        else if (c >= 'a' && c <= 'f') v = (uint8_t)(c - 'a' + 10);
-        else if (c >= 'A' && c <= 'F') v = (uint8_t)(c - 'A' + 10);
-        else return false;
-        if (i % 2 == 0) out[i / 2] = (uint8_t)(v << 4);
-        else            out[i / 2] |= v;
-    }
-    return true;
-}
+/*
+ * The modem socket and the TLS over it. Static for the same reason as the
+ * Wi-Fi side; the bundle, HTTP and scratch buffers are in net_upload.cpp,
+ * shared between the two transports because the schedule never runs both.
+ */
+static ModemClient s_modem;
+static TlsClient   s_tls(&s_modem);
 
 void lte_link_upload_pending(uint32_t max_bundles,
                              bool (*should_abort)(void *), void *abort_ctx,
                              lte_link_result_t *out)
 {
     memset(out, 0, sizeof(*out));
-    uint32_t t0 = millis();
 
     s_tls.setCACert(CAIRN_SERVER_CA_PEM);
     s_tls.setCertificate(CAIRN_CLIENT_CERT_PEM);
     s_tls.setPrivateKey(CAIRN_CLIENT_KEY_PEM);
 
-    cairn_http_init(&s_http, &s_tls, CAIRN_LTE_SERVER_HOST, CAIRN_LTE_SERVER_PORT);
+    /*
+     * The Funnel hostname, not the LAN one: that name has no public DNS record
+     * and resolves only on the home network, to a private address. The
+     * hostname is also what mbedTLS sends as SNI, which the Funnel edge needs
+     * in order to route at all.
+     */
+    net_upload_result_t r;
+    net_upload_pending(&s_tls, CAIRN_LTE_SERVER_HOST, CAIRN_LTE_SERVER_PORT,
+                       "lte", max_bundles, should_abort, abort_ctx, &r);
 
-    char     names[16][28];
-    uint32_t found = 0;
-
-    cairn_dir_t *d = cairn_fs_opendir(CAIRN_DIR_BUNDLES);
-    if (d == nullptr) {
-        CAIRN_LOGW(TAG, "cannot list %s", CAIRN_DIR_BUNDLES);
-        return;
-    }
-    char name[64];
-    bool is_dir = false;
-    while (found < 16 && cairn_fs_readdir(d, name, sizeof(name), &is_dir, nullptr)) {
-        if (!is_dir || strlen(name) != 26) continue;
-        snprintf(names[found], sizeof(names[0]), "%s", name);
-        found++;
-    }
-    cairn_fs_closedir(d);
-
-    out->considered = found;
-    CAIRN_LOGI(TAG, "%u sealed bundle(s) on the card; uploading up to %u over LTE",
-               (unsigned)found, (unsigned)max_bundles);
-
-    uint8_t pinned[32];
-    bool have_key = hex32(CAIRN_SERVER_RECEIPT_KEY_HEX, pinned);
-    if (!have_key) {
-        CAIRN_LOGE(TAG, "the pinned receipt key is not 64 hex characters; "
-                        "nothing will be pruned");
-    }
-
-    uint32_t done = 0;
-    for (uint32_t i = 0; i < found && done < max_bundles; i++) {
-        if (should_abort != nullptr && should_abort(abort_ctx)) break;
-
-        char dir[CAIRN_BUNDLE_DIR_MAX];
-        snprintf(dir, sizeof(dir), "%s/%s", CAIRN_DIR_BUNDLES, names[i]);
-
-        if (!cairn_bundle_open(&s_bundle, dir)) {
-            /*
-             * Unreadable, so nothing went over the air: this must not spend the
-             * transfer budget. The card still holds seven legacy v2 bundles
-             * that no v3 reader can open, and they sort first, so counting them
-             * against max_bundles meant the budget was exhausted before a
-             * uploadable bundle was ever reached.
-             */
-            out->failed++;
-            continue;
-        }
-
-        cairn_intake_http_t   http;
-        cairn_intake_bundle_t src;
-        cairn_http_as_intake(&s_http, &http);
-        cairn_bundle_as_intake_source(&s_bundle, &src);
-
-        size_t               rlen = 0;
-        cairn_intake_stats_t st;
-        cairn_intake_outcome_t r = cairn_intake_deliver(
-            &http, &src, s_bundle.m.chunks, s_bundle.m.chunk_count,
-            s_scratch, sizeof(s_scratch), should_abort, abort_ctx,
-            s_receipt, sizeof(s_receipt), &rlen, &st);
-
-        out->bytes_up   += st.bytes_up;
-        out->bytes_down += st.bytes_down;
-
-        if (r == CAIRN_INTAKE_RECEIPT && have_key) {
-            cairn_prune_result_t pr =
-                cairn_prune_if_receipted(names[i], s_receipt, rlen, pinned,
-                                         s_bundle.m.content_root);
-            if (pr == CAIRN_PRUNE_OK) {
-                out->delivered++;
-                CAIRN_LOGI(TAG, "%s: delivered over LTE and pruned (%u bytes up)",
-                           names[i], (unsigned)st.bytes_up);
-            } else {
-                out->retained++;
-                CAIRN_LOGW(TAG, "%s: receipted but NOT pruned: %s", names[i],
-                           cairn_prune_result_name(pr));
-            }
-        } else if (r == CAIRN_INTAKE_REFUSED) {
-            out->refused++;
-        } else if (r == CAIRN_INTAKE_ABORTED) {
-            cairn_bundle_close(&s_bundle);
-            break;
-        } else {
-            out->failed++;
-            CAIRN_LOGW(TAG, "%s: %s (HTTP %d)", names[i],
-                       cairn_intake_outcome_name(r), st.last_status);
-        }
-
-        cairn_bundle_close(&s_bundle);
-        done++;
-    }
-
-    cairn_http_disconnect(&s_http);
-    out->ms = millis() - t0;
-
-    CAIRN_LOGI(TAG, "LTE session: %u delivered, %u retained, %u refused, "
-                    "%u failed, %u up, %u down, %u ms",
-               (unsigned)out->delivered, (unsigned)out->retained,
-               (unsigned)out->refused, (unsigned)out->failed,
-               (unsigned)out->bytes_up, (unsigned)out->bytes_down,
-               (unsigned)out->ms);
+    out->considered = r.considered;
+    out->delivered  = r.delivered;
+    out->retained   = r.retained;
+    out->refused    = r.refused;
+    out->failed     = r.failed + r.unreadable;
+    out->bytes_up   = r.bytes_up;
+    out->bytes_down = r.bytes_down;
+    out->ms         = r.ms;
 }
 
 #endif /* CAIRN_LTE_UPLINK */

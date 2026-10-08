@@ -297,12 +297,15 @@ void cairn_merkle_root(uint8_t (*leaves)[32], size_t count, uint8_t out[32]);
  * RAM percentage PlatformIO prints is NOT the binding limit; the static DRAM
  * segment is, and it fails at link time rather than at runtime.
  *
- * So raising this needs DRAM freed first, or the buffers moved to the 4 MB
- * PSRAM. 96 slots at the 8 KiB target covers a bundle up to 768 KiB, about
- * three times the ~230 KB a trip has actually been measured at, and anything
- * larger adapts to coarser chunks instead of failing.
+ * Back to 64 once both network transports were in one image: the segment
+ * overflowed, exactly as the paragraph above warned it would. 64 slots at the
+ * 8 KiB target still covers a bundle up to 512 KiB, more than twice the
+ * ~230 KB a trip has actually been measured at, and anything larger adapts to
+ * coarser chunks rather than failing. Raising it again means freeing DRAM or
+ * moving these buffers to the 4 MB PSRAM, which is what net_upload.cpp does
+ * for the largest of them.
  */
-#define CAIRN_MAX_CHUNKS       96
+#define CAIRN_MAX_CHUNKS       64
 
 /*
  * An upper bound on a manifest's canonical CBOR, derived from the ceilings

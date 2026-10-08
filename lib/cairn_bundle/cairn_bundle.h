@@ -66,12 +66,19 @@ typedef struct {
  * and canonically re-verify the manifest, and check the member lengths against
  * the files actually on the card.
  *
+ * `scratch` is borrowed, not kept: cairn_manifest_decode re-encodes to prove
+ * canonical form, so it needs as much room as the manifest itself
+ * (CAIRN_MANIFEST_ENCODED_MAX). It is only used during this call, so the caller
+ * can and should lend it the same buffer it streams chunk bytes through —
+ * owning a second one here cost 8 KB of static DRAM for nothing.
+ *
  * That last check matters. A member shorter than the manifest says is a torn or
  * truncated file, and without the check every offset past it would silently
  * read the wrong bytes — the transport would then hash a chunk, find it does not
  * match its descriptor, and blame the card read rather than the layout.
  */
-bool cairn_bundle_open(cairn_bundle_t *b, const char *dir);
+bool cairn_bundle_open(cairn_bundle_t *b, const char *dir,
+                       uint8_t *scratch, size_t scratch_len);
 
 void cairn_bundle_close(cairn_bundle_t *b);
 

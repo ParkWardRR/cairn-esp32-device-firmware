@@ -247,7 +247,15 @@ void ble_companion_clear_bonds(void)
         CAIRN_LOGI(TAG, "cleared %d bond(s)", count);
 }
 
-bool ble_companion_begin(void)
+/*
+ * Build the GATT server and start advertising.
+ *
+ * Separate from ble_companion_begin so a Wi-Fi slot can tear the whole BLE
+ * stack down and this can put it back. Everything it touches -- the server, the
+ * service, every characteristic pointer -- is recreated here, because
+ * NimBLEDevice::deinit frees all of it.
+ */
+static bool build_gatt_and_advertise(void)
 {
     NimBLEDevice::init(CAIRN_BLE_NAME);
     NimBLEDevice::setMTU(185);
@@ -380,6 +388,29 @@ void ble_companion_notify_status(void)
     s_chr_status->notify();
 }
 
+bool ble_companion_begin(void)
+{
+    return build_gatt_and_advertise();
+}
+
+/*
+ * Give Wi-Fi the quiet it needs for a slot.
+ *
+ * Stopping advertising alone is not enough: with the Bluetooth controller still
+ * initialised, Wi-Fi association fails in the WPA2 four-way handshake
+ * (STA_DISCONNECTED reason 204, HANDSHAKE_TIMEOUT) because coexistence
+ * time-shares the radio and the handshake cannot meet its timing.
+ *
+ * Deinitialising the stack was tried and is NOT the answer here: after
+ * NimBLEDevice::deinit(true) the next scan panicked with InstrFetchProhibited
+ * at PC 0, a call through a pointer into the freed GATT objects. Rebuilding the
+ * stack per slot is not worth that fragility on the one path already proven to
+ * carry trips.
+ *
+ * So the controller stays up and src/wifi_link.cpp biases the coexistence
+ * arbiter toward Wi-Fi for the duration instead. Advertising still stops, which
+ * removes the periodic transmissions that compete most directly.
+ */
 void ble_companion_radio_off(void)
 {
     if (s_radio_off) return;
@@ -387,9 +418,20 @@ void ble_companion_radio_off(void)
 
     if (s_connected && s_conn_handle != 0xFFFF) {
         s_server->disconnect(s_conn_handle);
+        /* Let the disconnect leave the controller, so the phone sees a
+         * disconnect rather than a silent disappearance. */
+        delay(80);
     }
+
     NimBLEDevice::getAdvertising()->stop();
-    CAIRN_LOGI(TAG, "BLE radio released");
+    /*
+     * Advertising only. The controller stays initialised and still owns the
+     * radio, so this is contention relief rather than a release -- saying
+     * "released" sent a reader looking for a Wi-Fi bug that was really
+     * coexistence. A true release would be NimBLEDevice::deinit, which would
+     * also tear down the GATT server and have to rebuild it.
+     */
+    CAIRN_LOGI(TAG, "BLE advertising stopped for a Wi-Fi slot");
 }
 
 void ble_companion_radio_on(void)

@@ -327,4 +327,58 @@
  */
 #define CAIRN_PENDING_REFRESH_MS 60000
 
+/* ── uplink schedule ──────────────────────────────────────────────────────── */
+
+/*
+ * How long a Wi-Fi slot may last.
+ *
+ * Measured rather than guessed, which the uplink module's own notes asked for
+ * (issue #19). Cellular moves about 3 KB/s on this hardware and Wi-Fi rather
+ * more, so a typical ~230 KB bundle needs on the order of 80 seconds over the
+ * slower path. A slot shorter than that would abort every bundle it started
+ * and make progress only through resume, which is wasteful when the device is
+ * parked anyway. Four minutes leaves room for a handful.
+ */
+#define CAIRN_UPLINK_SLOT_MAX_MS 240000u
+
+/* Associating is bounded separately: a network that is not there should cost
+ * seconds, not the whole slot. */
+#define CAIRN_UPLINK_ASSOCIATE_MS 25000u
+
+/* An LTE send is given longer than a Wi-Fi slot because the link is slower and
+ * the attach alone can take 20 s from cold. */
+#define CAIRN_UPLINK_LTE_LIMIT_MS 300000u
+
+/* Bundles attempted per slot. Bounded so one enormous backlog cannot hold the
+ * radio for an unbounded time; the rest wait for the next parked session. */
+#define CAIRN_UPLINK_BUNDLES_PER_SLOT 4u
+
+/*
+ * How long after a trip ends before cellular is considered.
+ *
+ * The point of waiting is that the phone usually appears first — it is free,
+ * and BLE is already up — so paying for cellular immediately would spend the
+ * owner's data on bundles that were about to leave for nothing.
+ */
+#define CAIRN_UPLINK_LTE_AFTER_TRIP_MS 600000u
+
+/*
+ * Supply floor for radio work, in millivolts.
+ *
+ * A resting car battery sits near 12.4 V. This is below that and well above
+ * the point where starting becomes doubtful: the device must never be the
+ * reason a car will not start, but it also must not refuse to upload on a
+ * perfectly healthy battery.
+ */
+#define CAIRN_UPLINK_BATTERY_FLOOR_MV 11800u
+
+/*
+ * Accelerometer RMS, in milli-g, that aborts a transfer in progress.
+ *
+ * Above the noise floor measured on this unit (under 2 mg RMS at rest, per
+ * docs/flashing-and-testing.md) by a wide margin, so a passing lorry does not
+ * cancel an upload, while a car actually being driven away does.
+ */
+#define CAIRN_UPLINK_ABORT_RMS_MG 60u
+
 #endif /* CAIRN_CONFIG_H */

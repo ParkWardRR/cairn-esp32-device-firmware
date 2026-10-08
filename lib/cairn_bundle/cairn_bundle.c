@@ -10,11 +10,6 @@
 
 static const char *TAG = "BUNDLE";
 
-/* Decode scratch: cairn_manifest_decode re-encodes to prove canonical form, so
- * it needs as much room as the manifest itself. Static, like every other
- * manifest-sized buffer in this firmware; see CAIRN_MANIFEST_ENCODED_MAX. */
-static uint8_t s_scratch[CAIRN_MANIFEST_ENCODED_MAX];
-
 static bool read_whole(const char *path, uint8_t *out, size_t cap, size_t *len)
 {
     cairn_file_t *f = cairn_fs_open(path, CAIRN_FS_READ);
@@ -44,9 +39,16 @@ static bool read_whole(const char *path, uint8_t *out, size_t cap, size_t *len)
     return true;
 }
 
-bool cairn_bundle_open(cairn_bundle_t *b, const char *dir)
+bool cairn_bundle_open(cairn_bundle_t *b, const char *dir,
+                       uint8_t *scratch, size_t scratch_len)
 {
     memset(b, 0, sizeof(*b));
+
+    if (scratch == NULL || scratch_len < CAIRN_MANIFEST_ENCODED_MAX) {
+        CAIRN_LOGE(TAG, "decode scratch is %u bytes, needs %u",
+                   (unsigned)scratch_len, (unsigned)CAIRN_MANIFEST_ENCODED_MAX);
+        return false;
+    }
     snprintf(b->dir, sizeof(b->dir), "%s", dir);
 
     char path[CAIRN_BUNDLE_DIR_MAX + 32];
@@ -65,7 +67,7 @@ bool cairn_bundle_open(cairn_bundle_t *b, const char *dir)
     }
 
     cairn_err_t err = cairn_manifest_decode(b->manifest, b->manifest_len, &b->m,
-                                            s_scratch, sizeof(s_scratch));
+                                            scratch, scratch_len);
     if (err != CAIRN_OK) {
         /*
          * Say enough to tell the cases apart without the card in hand. A

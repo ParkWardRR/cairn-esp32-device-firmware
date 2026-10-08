@@ -138,6 +138,7 @@ static size_t reference_stream(cairn_bundle_t *b, uint8_t *out, size_t cap)
 #define STREAM_CAP (3u * 1024u * 1024u)
 static uint8_t g_reference[STREAM_CAP];
 static uint8_t g_actual[STREAM_CAP];
+static uint8_t g_scratch[CAIRN_MANIFEST_ENCODED_MAX];
 
 int main(void)
 {
@@ -185,7 +186,7 @@ int main(void)
     snprintf(dir, sizeof(dir), "%s/%s", CAIRN_DIR_BUNDLES, ulid);
 
     static cairn_bundle_t b;
-    CHECK("the sealed bundle opens", cairn_bundle_open(&b, dir));
+    CHECK("the sealed bundle opens", cairn_bundle_open(&b, dir, g_scratch, sizeof(g_scratch)));
     CHECK("it has more than one member", b.m.member_count > 1);
     CHECK("it has more than one chunk, so 8 KiB chunking took effect",
           b.m.chunk_count > 1);
@@ -280,7 +281,7 @@ int main(void)
         if (truncate(victim, (off_t)(b.m.members[0].length - 64)) == 0) {
             static cairn_bundle_t b2;
             CHECK("a member shorter than the signed manifest is refused at open",
-                  !cairn_bundle_open(&b2, dir));
+                  !cairn_bundle_open(&b2, dir, g_scratch, sizeof(g_scratch)));
         } else {
             printf("  FAIL  [bundle] could not truncate a member to test the check\n");
             g_fail++;
