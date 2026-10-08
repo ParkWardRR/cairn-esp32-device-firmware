@@ -24,7 +24,32 @@ static const char *TAG = "STORE";
 
 /* 256 KiB chunks, the specification's default. With CAIRN_MAX_CHUNKS at 64 this
  * bounds a bundle at 16 MiB, above what CAIRN_MAX_MEMBERS segments can hold. */
-#define CHUNK_BYTES (256u * 1024u)
+/*
+ * Target bytes per chunk.
+ *
+ * 8 KiB, down from 256 KiB. A chunk is the unit the server accepts or refuses
+ * whole — it is stored under its own digest — so it is also the unit of lost
+ * work when a link dies mid-transfer. At 256 KiB a typical ~230 KB bundle
+ * sealed as a *single* chunk, which meant an interrupted cellular upload
+ * restarted from zero and the offer's missing-chunks resume had nothing to
+ * resume. At 8 KiB the same bundle is around 29 chunks, so progress
+ * accumulates and a dead slot costs one chunk.
+ *
+ * 8 rather than 4 KiB: 4 doubles the per-chunk bookkeeping (a descriptor is 40
+ * bytes in the signed manifest, and every chunk is a separate HTTP request) for
+ * a finer resume granularity than any measurement yet justifies. Revisit if
+ * poor-link measurements show 8 KiB chunks frequently failing before they are
+ * acknowledged.
+ *
+ * The owner intends this to become a web-UI setting. Nothing outside the sealer
+ * needs to agree with it: the size is recorded per chunk in the signed manifest,
+ * cairn_intake derives each chunk's offset by summing the preceding
+ * descriptors, the Rust emulator takes chunk_size as a parameter (its relay
+ * matrix runs 128-byte chunks), and the Go server only reads
+ * len(ChunkDescriptors). So this value can change per bundle without breaking
+ * any reader.
+ */
+#define CHUNK_TARGET_BYTES (8u * 1024u)
 
 /* Streaming I/O block: large enough to keep SPI efficient, small enough to sit
  * in DRAM alongside everything else. */
@@ -1246,6 +1271,66 @@ static size_t collect_members(const char *dir, cairn_member_t *members,
  * computing them together is the only way to guarantee they describe the same
  * stream. Two separate passes could disagree if a file changed in between.
  */
+/*
+ * Total bytes across the members, before any hashing.
+ *
+ * Needed because the chunk size is chosen from the bundle's size, and a member's
+ * length is otherwise only known once it has been hashed. Returns false if any
+ * member cannot be opened, so the caller fails before writing a manifest that
+ * describes bytes it could not read.
+ */
+static bool total_member_bytes(const char *dir, const cairn_member_t *members,
+                               size_t member_count, uint64_t *out)
+{
+    uint64_t total = 0;
+
+    for (size_t i = 0; i < member_count; i++) {
+        char path[PATH_MAX_LEN];
+        snprintf(path, sizeof(path), "%s/%s", dir, members[i].name);
+
+        cairn_file_t *f = cairn_fs_open(path, CAIRN_FS_READ);
+        if (f == NULL) {
+            CAIRN_LOGE(TAG, "cannot size member %s", members[i].name);
+            return false;
+        }
+        total += cairn_fs_size(f);
+        cairn_fs_close(f);
+    }
+
+    *out = total;
+    return true;
+}
+
+/*
+ * The chunk size for a bundle of `total` bytes.
+ *
+ * CHUNK_TARGET_BYTES normally, but grown when the target would need more than
+ * CAIRN_MAX_CHUNKS descriptors. Growing is the only acceptable response: the
+ * alternative is refusing to seal a long drive, and this firmware's whole
+ * premise is that it never trades a trip for anything. An unusually long trip
+ * therefore gets coarser resume granularity rather than no bundle at all, and
+ * the log says so.
+ */
+static uint32_t chunk_size_for(uint64_t total)
+{
+    if (total == 0) return CHUNK_TARGET_BYTES;
+
+    uint64_t needed = (total + CHUNK_TARGET_BYTES - 1) / CHUNK_TARGET_BYTES;
+    if (needed <= (uint64_t)CAIRN_MAX_CHUNKS) return CHUNK_TARGET_BYTES;
+
+    /* Round up to a 512-byte boundary so the size stays tidy in the manifest. */
+    uint64_t size = (total + CAIRN_MAX_CHUNKS - 1) / CAIRN_MAX_CHUNKS;
+    size = ((size + 511u) / 512u) * 512u;
+
+    CAIRN_LOGW(TAG, "bundle is %llu bytes: %u-byte chunks would need %llu "
+                    "descriptors (max %d), so using %llu-byte chunks instead",
+               (unsigned long long)total, (unsigned)CHUNK_TARGET_BYTES,
+               (unsigned long long)needed, CAIRN_MAX_CHUNKS,
+               (unsigned long long)size);
+
+    return (uint32_t)size;
+}
+
 static bool digest_members_and_chunks(const char *dir, cairn_member_t *members,
                                       size_t member_count, cairn_chunk_t *chunks,
                                       size_t *chunk_count)
@@ -1253,6 +1338,11 @@ static bool digest_members_and_chunks(const char *dir, cairn_member_t *members,
     cairn_sha256_t chunk_ctx;
     uint32_t       chunk_bytes = 0;
     size_t         chunks_used = 0;
+
+    uint64_t total_bytes = 0;
+    if (!total_member_bytes(dir, members, member_count, &total_bytes)) return false;
+
+    const uint32_t CHUNK_BYTES = chunk_size_for(total_bytes);
 
     cairn_sha256_init(&chunk_ctx);
 
@@ -1470,7 +1560,7 @@ bool cairn_capture_seal(cairn_capture_t *cap, const uint8_t seed[32],
         return false;
     }
 
-    static uint8_t encoded[4096];
+    static uint8_t encoded[CAIRN_MANIFEST_ENCODED_MAX];
     size_t         encoded_len = 0;
     uint8_t        sig[64];
 

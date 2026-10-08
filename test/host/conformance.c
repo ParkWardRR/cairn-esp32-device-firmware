@@ -722,7 +722,7 @@ static bool check_manifest(const char *dir, const char *vector,
     /* The bytes must parse as canonical regardless of signature validity: a bad
      * signature does not make the encoding malformed. */
     cairn_manifest_t m;
-    static uint8_t scratch[8192];
+    static uint8_t scratch[CAIRN_MANIFEST_ENCODED_MAX];
     cairn_err_t derr = cairn_manifest_decode(encoded, enc_len, &m, scratch,
                                              sizeof(scratch));
     if (want_valid && derr != CAIRN_OK) {
@@ -874,7 +874,7 @@ static bool check_binding(const char *dir, const char *vector, const mj_doc_t *d
     }
 
     static cairn_manifest_t m;
-    static uint8_t scratch[8192];
+    static uint8_t scratch[CAIRN_MANIFEST_ENCODED_MAX];
     cairn_err_t err = cairn_manifest_decode(encoded, enc_len, &m, scratch, sizeof(scratch));
     free(encoded);
     if (err != CAIRN_OK) {
@@ -981,7 +981,7 @@ static bool check_receipt(const char *dir, const char *vector,
     }
 
     cairn_receipt_t r;
-    static uint8_t scratch[4096];
+    static uint8_t scratch[CAIRN_MANIFEST_ENCODED_MAX];
     cairn_err_t derr = cairn_receipt_decode(encoded, len, &r, scratch,
                                             sizeof(scratch));
     free(encoded);

@@ -278,7 +278,51 @@ void cairn_merkle_root(uint8_t (*leaves)[32], size_t count, uint8_t out[32]);
 
 #define CAIRN_MAX_MEMBERS      16
 #define CAIRN_MAX_MEMBER_NAME  32
-#define CAIRN_MAX_CHUNKS       64
+/*
+ * The chunk-descriptor ceiling.
+ *
+ * Raised from 64 when the chunk target dropped to 8 KiB for resumable uplinks
+ * (see CAIRN_CHUNK_TARGET_BYTES). 64 descriptors at that size would have capped
+ * a bundle at 512 KiB and failed the seal above it, which trades a whole trip
+ * for a transport convenience — the wrong direction. The sealer now grows the
+ * chunk size rather than refuse, so this is a bound on bookkeeping, not on how
+ * long a drive may be.
+ *
+ * 96, not more, because this is the real constraint: each slot costs about 224
+ * bytes of static DRAM — 40 bytes in each of the two static cairn_manifest_t
+ * instances (cairn_offload.c, cairn_store.c) plus 48 in each of the three
+ * manifest-sized buffers derived below. At 128 the image no longer links:
+ * `.dram0.bss` overflowed `dram0_0_seg` by 1872 bytes, because NimBLE and the
+ * Wi-Fi stack have already claimed most of that segment. Note that the total
+ * RAM percentage PlatformIO prints is NOT the binding limit; the static DRAM
+ * segment is, and it fails at link time rather than at runtime.
+ *
+ * So raising this needs DRAM freed first, or the buffers moved to the 4 MB
+ * PSRAM. 96 slots at the 8 KiB target covers a bundle up to 768 KiB, about
+ * three times the ~230 KB a trip has actually been measured at, and anything
+ * larger adapts to coarser chunks instead of failing.
+ */
+#define CAIRN_MAX_CHUNKS       96
+
+/*
+ * An upper bound on a manifest's canonical CBOR, derived from the ceilings
+ * above rather than written as a number.
+ *
+ * It has to be derived. The sealer's encode buffer, the offload module's
+ * manifest buffer and its decode scratch were all a flat 4096, which happened
+ * to fit 64 chunk descriptors; raising the chunk ceiling silently overflowed
+ * the encode and the only symptom was cairn_capture_seal returning false — a
+ * trip lost, with nothing in the log naming the manifest. Tying the bound to
+ * the arrays means the next change to either constant carries the buffers with
+ * it.
+ *
+ * Per entry: a chunk descriptor is a 3-element array holding two integers and a
+ * 32-byte digest, so 48 bytes covers it with room for the largest integer
+ * encodings; a member is a name, a length and a digest, so 96 covers it. The
+ * 2048 is the scalars, the fixed strings and the record-count map.
+ */
+#define CAIRN_MANIFEST_ENCODED_MAX \
+    (2048u + (CAIRN_MAX_MEMBERS * 96u) + (CAIRN_MAX_CHUNKS * 48u))
 
 typedef struct {
     char     name[CAIRN_MAX_MEMBER_NAME];

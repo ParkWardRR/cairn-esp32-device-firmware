@@ -13,10 +13,10 @@ static const char *TAG = "OFFLOAD";
 
 /* One module, one phone: the manifest being worked on and its scratch live here
  * rather than on a BLE task's small stack. */
-static uint8_t          s_man[4096 + 64];
+static uint8_t          s_man[CAIRN_MANIFEST_ENCODED_MAX + 64];
 static size_t           s_man_len;          /* manifest.cbor length; the 64-byte signature follows */
 static cairn_manifest_t s_m;
-static uint8_t          s_scratch[4096];
+static uint8_t          s_scratch[CAIRN_MANIFEST_ENCODED_MAX];
 
 /* LIST works from a small table so pagination does not re-read every manifest. */
 typedef struct {
@@ -189,7 +189,7 @@ static bool load_manifest(const char *id_text)
     size_t sig_len = 0;
 
     snprintf(path, sizeof(path), "%s/%s/manifest.cbor", CAIRN_DIR_BUNDLES, id_text);
-    if (!read_file_into(path, s_man, 4096, &s_man_len)) return false;
+    if (!read_file_into(path, s_man, CAIRN_MANIFEST_ENCODED_MAX, &s_man_len)) return false;
 
     snprintf(path, sizeof(path), "%s/%s/manifest.sig", CAIRN_DIR_BUNDLES, id_text);
     if (!read_file_into(path, s_man + s_man_len, 64, &sig_len) || sig_len != 64) return false;

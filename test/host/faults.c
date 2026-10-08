@@ -360,12 +360,12 @@ static bool seal_now(cairn_capture_t *cap, char id_out[27], uint8_t root_out[32]
     cairn_file_t *f = cairn_fs_open(mpath, CAIRN_FS_READ);
     if (f == NULL) return false;
 
-    static uint8_t encoded[4096];
+    static uint8_t encoded[CAIRN_MANIFEST_ENCODED_MAX];
     size_t len = cairn_fs_read(f, encoded, sizeof(encoded));
     cairn_fs_close(f);
 
     static cairn_manifest_t m;
-    static uint8_t scratch[8192];
+    static uint8_t scratch[CAIRN_MANIFEST_ENCODED_MAX];
     if (cairn_manifest_decode(encoded, len, &m, scratch, sizeof(scratch)) != CAIRN_OK) {
         return false;
     }
@@ -431,7 +431,7 @@ static bool verify_sealed_bundle(const char *id, const uint8_t pub[32],
                                  const cairn_root_key_t *root, cairn_manifest_t *out)
 {
     char path[256];
-    static uint8_t encoded[4096];
+    static uint8_t encoded[CAIRN_MANIFEST_ENCODED_MAX];
     size_t enc_len = 0, sig_len = 0;
     uint8_t sig[64];
 
@@ -444,7 +444,7 @@ static bool verify_sealed_bundle(const char *id, const uint8_t pub[32],
     CHECK(cairn_manifest_verify(encoded, enc_len, sig, pub) == CAIRN_OK,
           "manifest signature does not verify");
 
-    static uint8_t scratch[8192];
+    static uint8_t scratch[CAIRN_MANIFEST_ENCODED_MAX];
     CHECK(cairn_manifest_decode(encoded, enc_len, out, scratch, sizeof(scratch))
               == CAIRN_OK, "manifest does not decode canonically");
     CHECK(out->manifest_version == CAIRN_MANIFEST_VERSION, "manifest_version %u",
@@ -607,7 +607,7 @@ static bool row_clean_seal(void)
 
     cairn_file_t *mf = cairn_fs_open(mpath, CAIRN_FS_READ);
     CHECK(mf != NULL, "no manifest on the card");
-    static uint8_t encoded[4096];
+    static uint8_t encoded[CAIRN_MANIFEST_ENCODED_MAX];
     size_t enc_len = cairn_fs_read(mf, encoded, sizeof(encoded));
     cairn_fs_close(mf);
 
@@ -622,7 +622,7 @@ static bool row_clean_seal(void)
           "manifest signature does not verify");
 
     static cairn_manifest_t m;
-    static uint8_t scratch[8192];
+    static uint8_t scratch[CAIRN_MANIFEST_ENCODED_MAX];
     CHECK(cairn_manifest_decode(encoded, enc_len, &m, scratch, sizeof(scratch))
               == CAIRN_OK, "manifest does not decode");
     CHECK(cairn_manifest_verify_content_root(&m) == CAIRN_OK,
@@ -1027,7 +1027,7 @@ static bool row_interrupted_seal_completed(void)
     CHECK(cairn_content_root(m.members, m.member_count, m.content_root) == CAIRN_OK,
           "content root failed");
 
-    static uint8_t encoded[4096];
+    static uint8_t encoded[CAIRN_MANIFEST_ENCODED_MAX];
     size_t enc_len = 0;
     uint8_t sig[64];
     CHECK(cairn_manifest_sign(&m, seed, pub, encoded, sizeof(encoded), &enc_len,

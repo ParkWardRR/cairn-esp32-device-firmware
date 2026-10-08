@@ -158,7 +158,7 @@ static bool seal_bundle(int samples, bundle_t *out)
     if (!slurp(path, enc, sizeof(enc), &out->manifest_len)) return false;
 
     static cairn_manifest_t m;
-    static uint8_t scratch[8192];
+    static uint8_t scratch[CAIRN_MANIFEST_ENCODED_MAX];
     if (cairn_manifest_decode(enc, out->manifest_len, &m, scratch, sizeof(scratch)) != CAIRN_OK) return false;
     memcpy(out->root, m.content_root, 32);
     out->chunk_count = m.chunk_count;
@@ -177,7 +177,7 @@ static bool card_stream(const bundle_t *b, uint8_t *out, size_t cap, size_t *len
     snprintf(path, sizeof(path), "%s/%s/manifest.cbor", CAIRN_DIR_BUNDLES, b->text);
     if (!slurp(path, enc, sizeof(enc), &enc_len)) return false;
     static cairn_manifest_t m;
-    static uint8_t scratch[8192];
+    static uint8_t scratch[CAIRN_MANIFEST_ENCODED_MAX];
     if (cairn_manifest_decode(enc, enc_len, &m, scratch, sizeof(scratch)) != CAIRN_OK) return false;
 
     size_t at = 0;
@@ -544,7 +544,7 @@ static bool row_read_returns_exact_ranges_across_member_boundaries(void)
     snprintf(path, sizeof(path), "%s/%s/manifest.cbor", CAIRN_DIR_BUNDLES, b.text);
     CHECK(slurp(path, enc, sizeof(enc), &el), "manifest");
     static cairn_manifest_t m;
-    static uint8_t scratch[8192];
+    static uint8_t scratch[CAIRN_MANIFEST_ENCODED_MAX];
     CHECK(cairn_manifest_decode(enc, el, &m, scratch, sizeof(scratch)) == CAIRN_OK && m.member_count >= 2, "members");
     uint64_t boundary = m.members[0].length;
 
