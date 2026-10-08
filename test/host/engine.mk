@@ -9,7 +9,11 @@
 .DEFAULT_GOAL := all
 
 ENGINES_YAML   := ../../engines
-ENGINE_VECTORS := $(ENGINES_YAML)/vectors/expr.draft.txt
+# The formula vectors belong to contracts/engine/v1, not to this repository: the C
+# evaluator is one of the three implementations held to them, so it must read the
+# contract's copy and not a local one. CAIRN_CONTRACTS wins, as everywhere else.
+CONTRACTS      ?= $(if $(CAIRN_CONTRACTS),$(CAIRN_CONTRACTS),../../.contracts/contracts)
+ENGINE_VECTORS := $(CONTRACTS)/engine/v1/vectors/expr.txt
 ENGINE_GEN_HDR := $(wildcard $(ENGINE_DIR)/gen/*.h)
 
 # The engine module reaches the binaries that link policy.c and cairn_power.c through

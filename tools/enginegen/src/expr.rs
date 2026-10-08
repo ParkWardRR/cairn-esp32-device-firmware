@@ -4,7 +4,7 @@
 //! The language is integer-only and has no loops, no calls out and no state, so
 //! evaluation always terminates and cannot execute anything. Every value is an
 //! int32 and every operation must land in int32 or the evaluation fails, which makes
-//! the result identical in C, Go, Swift and TypeScript. See engines/SPEC.draft.md.
+//! the result identical in C, Go, Swift and TypeScript. See contracts/engine/v1/spec.md.
 //!
 //! The compiler refuses, at build time, any expression that could divide by zero or
 //! overflow for some input byte values (interval analysis over A..D in 0..=255), so

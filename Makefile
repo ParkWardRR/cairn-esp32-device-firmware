@@ -25,9 +25,16 @@ GEN_DIR     := build/engines
 GEN_SEL     := $(GEN_DIR)/cairn_engines_sel.h
 GEN_COMMIT  := lib/cairn_engine/gen/cairn_engines_gen.h
 ENGINEGEN   := tools/enginegen/target/release/enginegen
-VECTORS     := $(ENGINES_DIR)/vectors/expr.draft.txt
 
-.PHONY: help firmware engines-gen engines-check engines-test engines-validate host-test enginegen clean-engines
+# The engine profile schema, its normative text and its vectors live in contracts/engine/v1
+# (pinned by contracts.lock), not in this repository: two copies of one schema is the drift
+# engine/v1 was created to end. Resolution order is the documented one -- CAIRN_CONTRACTS
+# wins, otherwise the fetched copy.
+CONTRACTS   ?= $(if $(CAIRN_CONTRACTS),$(CAIRN_CONTRACTS),.contracts/contracts)
+ENGINE_SPEC := $(CONTRACTS)/engine/v1
+VECTORS     := $(ENGINE_SPEC)/vectors/expr.txt
+
+.PHONY: help firmware engines-gen engines-check engines-test engines-validate host-test enginegen clean-engines contracts
 
 help:
 	@sed -n '3,12p' Makefile
@@ -37,7 +44,11 @@ help:
 enginegen:
 	cargo build --release --locked --quiet --manifest-path tools/enginegen/Cargo.toml
 
-engines-validate: enginegen
+# A no-op when .contracts is already at the pinned commit, so this is cheap to depend on.
+contracts:
+	scripts/fetch-contracts.sh
+
+engines-validate: enginegen contracts
 	$(ENGINEGEN) validate --dir $(ENGINES_DIR)
 	$(ENGINEGEN) vectors --file $(VECTORS)
 
@@ -53,7 +64,7 @@ firmware: enginegen
 engines-gen: enginegen
 	$(ENGINEGEN) gen --dir $(ENGINES_DIR) --engines all --out $(GEN_COMMIT)
 
-engines-check: enginegen
+engines-check: enginegen contracts
 	$(ENGINEGEN) validate --dir $(ENGINES_DIR)
 	$(ENGINEGEN) vectors --file $(VECTORS)
 	mkdir -p $(GEN_DIR)
@@ -74,7 +85,7 @@ engines-check: enginegen
 	@! $(ENGINEGEN) gen --dir $(ENGINES_DIR) --engines '' --out $(GEN_DIR)/never.h 2> /dev/null \
 	  || { echo "error: an empty selection was accepted" >&2; exit 1; }
 
-engines-test:
+engines-test: contracts
 	cargo test --locked --manifest-path tools/enginegen/Cargo.toml
 
 host-test:

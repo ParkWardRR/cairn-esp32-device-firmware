@@ -2,7 +2,7 @@
 //!
 //! Strictness is the point: an unknown field, a bad formula, a duplicate PID or an
 //! impossible range is an error that stops the build, never a warning. The draft
-//! JSON Schema in engines/engine.schema.draft.json states the same structure for
+//! JSON Schema in contracts/engine/v1/acquisition.schema.json states the same structure for
 //! other consumers; a test keeps the two in step on the shipped profiles and on the
 //! negative vectors.
 

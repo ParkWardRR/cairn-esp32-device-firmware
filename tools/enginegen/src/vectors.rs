@@ -1,4 +1,4 @@
-//! The expression-language vector file (engines/vectors/expr.draft.txt).
+//! The expression-language vector file (contracts/engine/v1/vectors/expr.txt).
 //!
 //! Line kinds, `;`-separated, `#` starts a comment:
 //!

@@ -86,6 +86,10 @@ jobs:
   # vectors and negative profile vectors must hold, and the firmware's own tests must
   # pass against one-engine and all-engines tables (tests/ in tools/enginegen, then
   # test/host engine_test). `make engines-check` is the whole of it.
+  #
+  # The schema and the vectors come from the pinned contracts/engine/v1, so this job
+  # fetches them: a contract change this generator does not accept now fails here rather
+  # than at a flash.
   engines:
     runs-on: [self-hosted, cairn]
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -95,6 +99,9 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Fetch the pinned contracts
+        run: scripts/fetch-contracts.sh
 
       - name: Validate, generate, diff and test
         run: make engines-check

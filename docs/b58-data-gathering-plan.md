@@ -326,7 +326,7 @@ Do not conflate these — each needs its own evidence:
 | B58 analysis profile | **Stub** — no limits | `cairn-vehicle-server/internal/engine/profiles/bmw-b58.json` |
 | PID discovery probe | **Working** | `src/mtprobe.cpp` |
 | PID validation probe | **Working** | `src/pidtest.cpp` |
-| Engine profile schema | **Draft** | `engines/SPEC.draft.md` |
+| Engine profile schema | **Draft** | `contracts/engine/v1/spec.md` (pinned; was `engines/SPEC.draft.md`) |
 | Engine code generator | **Working** | `tools/enginegen/` |
 | Multi-PID batch | **Working** (confirmed N20) | `sensors.cpp:sensors_read_obd_batch()` |
 | Cold-channel rotation | **Working** (confirmed N20) | `sensors.cpp:sensors_read_obd_extended()` |

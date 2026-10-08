@@ -466,9 +466,7 @@ What is in the repository:
 |---|---|
 | `engines/bmw-n20.yaml` | BMW N20/N26 (F32 428i), status `derived`: every number and formula was extracted from what the firmware hard-coded before, and `engine_test.c` proves each one equal, exhaustively over every possible input byte |
 | `engines/bmw-b58.yaml` | BMW B58 (M240i), status `stub`: identity only; the generator rejects a stub that states anything |
-| `engines/engine.schema.draft.json`, `engines/SPEC.draft.md` | The schema (`cairn.engine/v1-draft`) and the specification of profiles, the formula language and the bytecode |
-| `engines/vectors/expr.draft.txt` | Formula vectors: expressions with inputs, expected values and exact bytecode, expressions the compiler must reject, and raw bytecode with the value or error an evaluator must produce |
-| `engines/vectors/invalid/*.yaml` | Profiles that must be rejected, each stating the error it must produce |
+| `.contracts/contracts/engine/v1/` | **The schema, the normative text and the vectors are the contract's, not this repository's** (`contracts/engine/v1`, pinned by `contracts.lock`). They moved there on 2026-10-08; keeping a second copy here is the drift that contract was created to end. `acquisition.schema.json`, `spec.md`, `vectors/expr.txt` (formula vectors: expressions with inputs, expected values and exact bytecode; expressions the compiler must reject; raw bytecode with the value or error an evaluator must produce) and `vectors/invalid/*.yaml` (profiles that must be rejected, each stating the error it must produce). Set `CAIRN_CONTRACTS` to a checkout to change a contract and this generator together |
 | `tools/enginegen/` | The generator (`validate`, `gen`, `list`, `identity`, `vectors`, `eval`) and its tests |
 | `lib/cairn_engine/` | The runtime: profile selection, the integer-only formula evaluator, batch request building and reply parsing, the vehicle gate, and the committed all-engines header in `gen/` |
 
@@ -781,7 +779,6 @@ The security condition did not get met; it got **traded, knowingly**. The origin
 | [docs/uplink-manager.md](docs/uplink-manager.md) | The uplink schedule (BLE home, Wi-Fi slots, check-ins, backoff), home detection and the LTE trigger; host-tested, not wired |
 | [docs/v2-firmware-testing.md](docs/v2-firmware-testing.md) | Flashing, reading the self-test and the SD logs, the card layout, deliberate-breakage bench tests, standby. Contains Wi-Fi and mTLS sections that no longer apply |
 | [docs/v2-hardware-mapping-audit.md](docs/v2-hardware-mapping-audit.md) | The firmware's pin and bus assumptions checked against the vendor guide, the driver library and measurements |
-| [engines/SPEC.draft.md](engines/SPEC.draft.md) | Draft specification of engine profiles, the integer formula language, the bytecode and the vectors (not in `docs/`; lives beside the profiles) |
 | [research/](research/) | BMW N20 PID support and formulas; Freematics parked-drain notes and report |
 | [MIGRATION.md](MIGRATION.md) | How this repository was extracted from the original monorepo |
 

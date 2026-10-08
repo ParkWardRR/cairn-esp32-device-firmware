@@ -9,6 +9,28 @@ fn engines_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../engines")
 }
 
+/// `contracts/engine/v1`, which owns the schema, the normative text and the vectors. This
+/// repository holds the profiles; it deliberately holds no copy of the contract, because
+/// two copies of one schema is the drift `engine/v1` was created to end.
+///
+/// Resolution is the project's documented order: `CAIRN_CONTRACTS` wins, so a contract and
+/// its implementation can change together on a laptop; otherwise the copy
+/// `scripts/fetch-contracts.sh` pinned.
+fn engine_contract() -> PathBuf {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = match std::env::var_os("CAIRN_CONTRACTS") {
+        Some(v) => PathBuf::from(v),
+        None => root.join(".contracts/contracts"),
+    }
+    .join("engine/v1");
+    assert!(
+        dir.join("acquisition.schema.json").is_file(),
+        "{} is missing: run scripts/fetch-contracts.sh, or set CAIRN_CONTRACTS to a checkout's contracts/ directory",
+        dir.display()
+    );
+    dir
+}
+
 #[test]
 fn shipped_profiles_are_valid() {
     let all = profile::load_dir(&engines_dir()).expect("engines/ must validate");
@@ -18,7 +40,7 @@ fn shipped_profiles_are_valid() {
 
 #[test]
 fn every_negative_vector_is_rejected_for_its_reason() {
-    let dir = engines_dir().join("vectors/invalid");
+    let dir = engine_contract().join("vectors/invalid");
     let mut n = 0;
     for e in std::fs::read_dir(&dir).unwrap() {
         let path = e.unwrap().path();
@@ -96,7 +118,7 @@ fn a_broken_profile_fails_the_whole_directory() {
     std::fs::create_dir_all(&tmp).unwrap();
     std::fs::copy(engines_dir().join("bmw-n20.yaml"), tmp.join("bmw-n20.yaml")).unwrap();
     std::fs::copy(
-        engines_dir().join("vectors/invalid/bad-div-by-zero.yaml"),
+        engine_contract().join("vectors/invalid/bad-div-by-zero.yaml"),
         tmp.join("bad-div-by-zero.yaml"),
     )
     .unwrap();
@@ -110,13 +132,18 @@ fn as_json(path: &Path) -> serde_json::Value {
     serde_json::to_value(&y).unwrap()
 }
 
-/// The draft JSON Schema, which other consumers will use, agrees with the generator on
-/// the shipped profiles and on every structural negative. (Semantic negatives, such as a
-/// formula that can divide by zero, are beyond JSON Schema and are the generator's.)
+/// The contract's JSON Schema, which every other consumer reads, agrees with this
+/// generator on the shipped profiles and on every structural negative. (Semantic
+/// negatives, such as a formula that can divide by zero, are beyond JSON Schema and are
+/// the generator's.)
+///
+/// This is now a cross-repository check: the schema comes from the pinned
+/// `contracts/engine/v1`, so a contract change that the generator does not accept fails
+/// here rather than at a flash.
 #[test]
-fn draft_schema_agrees_with_the_generator() {
+fn contract_schema_agrees_with_the_generator() {
     let schema = serde_json::from_str::<serde_json::Value>(
-        &std::fs::read_to_string(engines_dir().join("engine.schema.draft.json")).unwrap(),
+        &std::fs::read_to_string(engine_contract().join("acquisition.schema.json")).unwrap(),
     )
     .unwrap();
     let compiled = jsonschema::JSONSchema::compile(&schema).expect("the schema itself is valid");
@@ -131,7 +158,7 @@ fn draft_schema_agrees_with_the_generator() {
     }
 
     for name in ["bad-unknown-field", "bad-missing-section", "bad-schema-version", "bad-vin-pattern", "bad-cold-no-slot"] {
-        let doc = as_json(&engines_dir().join(format!("vectors/invalid/{name}.yaml")));
+        let doc = as_json(&engine_contract().join(format!("vectors/invalid/{name}.yaml")));
         assert!(!compiled.is_valid(&doc), "{name} must fail the draft schema as well");
     }
 }
