@@ -67,7 +67,24 @@ bool cairn_bundle_open(cairn_bundle_t *b, const char *dir)
     cairn_err_t err = cairn_manifest_decode(b->manifest, b->manifest_len, &b->m,
                                             s_scratch, sizeof(s_scratch));
     if (err != CAIRN_OK) {
-        CAIRN_LOGE(TAG, "%s: manifest does not decode: %s", dir, cairn_strerror(err));
+        /*
+         * Say enough to tell the cases apart without the card in hand. A
+         * manifest that is all zeroes is a torn write; a plausible-looking head
+         * with a short length is a truncation; a full-length body that still
+         * will not decode is a format disagreement. Guessing between those from
+         * "malformed" alone costs a trip to the car.
+         */
+        CAIRN_LOGE(TAG, "%s: manifest does not decode: %s (%u bytes, starts "
+                        "%02x %02x %02x %02x %02x %02x %02x %02x)",
+                   dir, cairn_strerror(err), (unsigned)b->manifest_len,
+                   b->manifest_len > 0 ? b->manifest[0] : 0,
+                   b->manifest_len > 1 ? b->manifest[1] : 0,
+                   b->manifest_len > 2 ? b->manifest[2] : 0,
+                   b->manifest_len > 3 ? b->manifest[3] : 0,
+                   b->manifest_len > 4 ? b->manifest[4] : 0,
+                   b->manifest_len > 5 ? b->manifest[5] : 0,
+                   b->manifest_len > 6 ? b->manifest[6] : 0,
+                   b->manifest_len > 7 ? b->manifest[7] : 0);
         return false;
     }
 

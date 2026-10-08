@@ -38,6 +38,9 @@
 #if CAIRN_NETPROBE
 #include "netprobe.h"
 #endif
+#if CAIRN_WIFI_UPLINK
+#include "wifi_link.h"
+#endif
 
 static const char *TAG = "BOOT";
 
@@ -427,6 +430,46 @@ static bool bring_up_after_mount(void)
 #if CAIRN_SELFTEST
     run_selftest();
     CAIRN_LOGI(TAG, "self-test build: halting rather than capturing");
+    return false;
+#endif
+
+#if CAIRN_WIFIUP_TEST
+    /*
+     * After the card and the known-answer check, because a prune deletes real
+     * data and must not run on a build whose primitives disagree with the
+     * specification. Before the lifecycle, because this takes the radio and the
+     * card for minutes with no regard for the uplink schedule.
+     */
+    {
+        uint32_t pending = 0;
+        uint64_t pending_bytes = 0;
+        cairn_store_pending_stats(&pending, &pending_bytes);
+        CAIRN_LOGI(TAG, "Wi-Fi upload bench: %u sealed bundle(s), %llu bytes on the card",
+                   (unsigned)pending, (unsigned long long)pending_bytes);
+
+        if (wifi_link_connect(30000)) {
+            wifi_link_result_t r;
+            wifi_link_upload_pending(16, nullptr, nullptr, &r);
+            wifi_link_disconnect();
+
+            cairn_store_pending_stats(&pending, &pending_bytes);
+            CAIRN_LOGI(TAG, "after the session: %u bundle(s), %llu bytes remain",
+                       (unsigned)pending, (unsigned long long)pending_bytes);
+
+            if (r.delivered > 0) {
+                CAIRN_LOGI(TAG, "=== Wi-Fi uplink PROVEN: %u bundle(s) delivered "
+                                "and pruned on a verified receipt ===",
+                           (unsigned)r.delivered);
+            } else {
+                CAIRN_LOGE(TAG, "=== Wi-Fi uplink did NOT deliver a bundle ===");
+            }
+        } else {
+            CAIRN_LOGE(TAG, "=== could not associate; nothing attempted ===");
+        }
+
+        cairn_log_flush();
+    }
+    CAIRN_LOGI(TAG, "Wi-Fi upload bench: halting rather than capturing");
     return false;
 #endif
 
