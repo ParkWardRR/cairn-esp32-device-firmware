@@ -7,16 +7,38 @@ ASan/UBSan clean, 15 mutations of the safety rules all caught).
 
 ## Status
 
-**Built and host-tested. Not wired into the firmware**, because there is nothing to
-schedule yet: Wi-Fi (#15) and LTE (#16) are blocked on flash and NVS encryption (#7, gate
-#18), and the BLE path is phone-driven by `lib/cairn_offload`. That first gate could never
-open on this unit — encryption is an eFuse burn the car's revision v1.0 dongle may not
-take — so on **2026-10-07 the condition became #18's third option**: credentials held
-under a key the chip cannot reconstruct without the server, with the key's life between
-boots still to be designed (see [esp32-hardening.md](esp32-hardening.md)). That design
-lands before a transport stores anything, so the schedule stays unwired either way. When
-a Wi-Fi or LTE transport exists it
-implements `cairn_transport_t` and the lifecycle calls `tick()`.
+**Wired into the firmware and running in `env:cairn` since 2026-10-07.**
+`src/uplink_runner.cpp` is the other half of this module: it gathers evidence from the
+lifecycle, performs the one action `tick()` returns, and reports the outcome. The split is
+what kept 119 rows of scheduling behaviour testable on the host, so the I/O stays on that
+side of it.
+
+| path | state |
+|---|---|
+| LTE | **Live.** Proven on the car's dongle: attach, TLS through the public Funnel ingress, 158,906 bytes uploaded, receipt verified, bundle pruned. |
+| Wi-Fi | **Implemented and proven, but marked unavailable to the schedule.** It cannot associate while the BLE controller is initialised ([#31](https://github.com/ParkWardRR/cairn-esp32-device-firmware/issues/31)). |
+| BLE | Phone-driven by `lib/cairn_offload`, as before. |
+
+Two actions the runner cannot yet really perform, and reports as done so the schedule does
+not stall: `ANNOUNCE_SLOT` and `CHECKIN`, both unreleased BLE contract fields
+([#34](https://github.com/ParkWardRR/cairn-esp32-device-firmware/issues/34)).
+
+The home scan works — it finds the configured network in about 1.7 s — but reports a miss
+while Wi-Fi is unavailable, because a scan hit marks the device "at home" and being at home
+is what suppresses the LTE trigger. A truthful scan would disable the only working network
+path in order to enable one that cannot associate.
+
+The credential gate was not met; it was **traded, knowingly**. Flash and NVS encryption
+(#7, gate #18) need eFuse burns the car's revision v1.0 dongle may not take, so credentials
+live in plaintext flash in the gitignored `include/secrets.h`. What a flash dump costs is
+stated where they are defined: it permits uploading **as** this device and reading what it
+uploads, but not deleting anything, because a prune still requires a receipt signed by the
+server and verified on-device. The narrower protection (#18's third option, a key the chip
+cannot reconstruct without the server) remains the right destination; see
+[esp32-hardening.md](esp32-hardening.md).
+
+Measured status, with the evidence, is in
+[network-uplink-status.md](network-uplink-status.md).
 
 ## The schedule (the owner's, decided in #17)
 
@@ -64,11 +86,56 @@ subject to the caps in the usage module. It is `cairn_uplink_config_t.lte_auto`,
 constant, so "never automatically" is a one-line change. After a power cycle the manager has
 not seen a trip end, so it does not start LTE on its own; that is the conservative direction.
 
+## The full state machine (from the cellular design)
+
+The cellular design document
+([lte-cellular-design.md](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/blob/main/docs/lte-cellular-design.md))
+defines the complete state machine that the uplink manager implements once
+Wi-Fi and LTE transports exist:
+
+| State | Behaviour | Exit condition |
+|---|---|---|
+| Capture | Collect OBD/GNSS locally; keep Wi-Fi off | Bundle/checkpoint ready |
+| BLE preferred | Offer sealed chunks to the paired iPhone | Phone takes durable custody, or progress stalls for 30-60 s |
+| Known-Wi-Fi probe | Scan only when justified by location/history or backlog; join provisioned networks only | Authenticated ingestion reachable, or 10-20 s expire |
+| Wi-Fi burst | Drain eligible backlog; BLE control/GPS remains available | Queue drained, no progress, or energy/time limit reached |
+| LTE fallback | Attach and upload budget-approved chunks | Queue drained, capped allowance reached, or repeated failure |
+| Backoff | Wi-Fi off; LTE asleep/off; continue BLE and local recording | Next retry, new network opportunity, or priority event |
+
+**Switch based on successful upload progress, not just RSSI.** "Strong Wi-Fi
+with no server access" and "registered LTE with unusable throughput" are both
+failed delivery paths. A Wi-Fi network at home should outrank LTE immediately
+after a stalled/unavailable BLE relay.
+
+### Oscillation prevention
+
+Use transport-independent chunk IDs and receiver deduplication. When changing
+paths, continue with missing chunks rather than rebuilding or resending a whole
+trip. Two acknowledgement levels:
+
+| Acknowledgement | Meaning |
+|---|---|
+| Phone custody | The iPhone durably stored the encrypted chunk; dongle may stop offering it over BLE |
+| Server commit | The server durably accepted and verified it; dongle may apply its deletion/retention policy |
+
+Retain the dongle copy until server commit unless storage pressure explicitly
+triggers a different policy.
+
 ## Not decided here
 
-- How BLE and Wi-Fi coexist at the radio level: the owner decided time-slicing, so there is
-  nothing to measure for that. The slot length, slot count and backoff numbers are
-  placeholders to be set from measurement (issue #19).
+- ~~How BLE and Wi-Fi coexist at the radio level: the owner decided time-slicing, so there
+  is nothing to measure for that.~~ **Measured, and the answer was unwelcome.**
+  Time-slicing by stopping advertising is not enough: with the Bluetooth controller still
+  initialised, Wi-Fi association fails in the WPA2 four-way handshake (reason 204
+  `HANDSHAKE_TIMEOUT`) after 25 s, every attempt. Genuinely releasing the controller
+  (`NimBLEDevice::deinit`) does let Wi-Fi associate and then panics on the next scan. So
+  there *was* something to measure, and the Wi-Fi path is off until it is resolved
+  ([#31](https://github.com/ParkWardRR/cairn-esp32-device-firmware/issues/31)). LTE is
+  unaffected: its modem has a separate antenna.
+- The slot length is now measured rather than a placeholder: cellular moves about 3 KB/s on
+  this hardware, so a ~230 KB bundle needs on the order of 80 s and
+  `CAIRN_UPLINK_SLOT_MAX_MS` is 240 s. Slot count and backoff are still placeholders
+  (issue #19).
 - The wire format of the slot announcement and the check-in: it is a new field in the BLE
   contract (upstream issue 21) and is not released. The manager returns the intent only.
 - Multipath (different chunks of one bundle over two paths at once): exploratory, not built,
