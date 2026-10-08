@@ -35,6 +35,9 @@
 #include "prov_console.h"
 #include "pidtest.h"
 #include "sensors.h"
+#if CAIRN_NETPROBE
+#include "netprobe.h"
+#endif
 
 static const char *TAG = "BOOT";
 
@@ -457,6 +460,18 @@ void setup()
 
     pinMode(CAIRN_PIN_LED, OUTPUT);
     digitalWrite(CAIRN_PIN_LED, HIGH);
+
+#if CAIRN_NETPROBE
+    /*
+     * Before the card, deliberately. The probe answers hardware questions and
+     * touches no bundle; making it wait on a mount would mean a marginal card
+     * contact could stop it reporting whether a modem exists.
+     */
+    delay(300);
+    netprobe_run();
+    CAIRN_LOGI(TAG, "network probe build: halting rather than capturing");
+    return;
+#endif
 
     if (!try_mount_sd()) {
         /*
