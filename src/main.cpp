@@ -41,6 +41,9 @@
 #if CAIRN_WIFI_UPLINK
 #include "wifi_link.h"
 #endif
+#if CAIRN_LTE_UPLINK
+#include "lte_link.h"
+#endif
 
 static const char *TAG = "BOOT";
 
@@ -470,6 +473,41 @@ static bool bring_up_after_mount(void)
         cairn_log_flush();
     }
     CAIRN_LOGI(TAG, "Wi-Fi upload bench: halting rather than capturing");
+    return false;
+#endif
+
+#if CAIRN_LTEUP_TEST
+    {
+        uint32_t pending = 0;
+        uint64_t pending_bytes = 0;
+        cairn_store_pending_stats(&pending, &pending_bytes);
+        CAIRN_LOGI(TAG, "LTE upload bench: %u sealed bundle(s), %llu bytes on the card",
+                   (unsigned)pending, (unsigned long long)pending_bytes);
+
+        cairn_lte_status_t st = lte_link_up();
+        CAIRN_LOGI(TAG, "modem bring-up: %s", cairn_lte_status_name(st));
+
+        if (st == CAIRN_LTE_OK) {
+            lte_link_result_t r;
+            lte_link_upload_pending(4, nullptr, nullptr, &r);
+
+            cairn_store_pending_stats(&pending, &pending_bytes);
+            CAIRN_LOGI(TAG, "after the session: %u bundle(s), %llu bytes remain",
+                       (unsigned)pending, (unsigned long long)pending_bytes);
+
+            if (r.delivered > 0) {
+                CAIRN_LOGI(TAG, "=== LTE uplink PROVEN: %u bundle(s) delivered "
+                                "and pruned over cellular ===",
+                           (unsigned)r.delivered);
+            } else {
+                CAIRN_LOGE(TAG, "=== LTE uplink did NOT deliver a bundle ===");
+            }
+        }
+
+        lte_link_down();
+        cairn_log_flush();
+    }
+    CAIRN_LOGI(TAG, "LTE upload bench: halting rather than capturing");
     return false;
 #endif
 

@@ -248,16 +248,26 @@ void wifi_link_upload_pending(uint32_t max_bundles,
             break;
         }
 
+        uint32_t before = out->bytes_up;
         switch (upload_one(names[i], should_abort, abort_ctx,
                            &out->bytes_up, &out->bytes_down)) {
-        case UP_DELIVERED: out->delivered++; break;
-        case UP_RETAINED:  out->retained++;  break;
-        case UP_REFUSED:   out->refused++;   break;
-        case UP_ABORTED:   i = found;        break;   /* stop the session */
+        case UP_DELIVERED: out->delivered++; done++; break;
+        case UP_RETAINED:  out->retained++;  done++; break;
+        case UP_REFUSED:   out->refused++;   done++; break;
+        case UP_ABORTED:   i = found;                break;   /* stop the session */
         case UP_FAILED:
-        default:           out->failed++;    break;
+        default:
+            out->failed++;
+            /*
+             * Only count it against the budget if something actually went over
+             * the air. A bundle that could not be opened did no network work,
+             * and the card holds legacy v2 bundles that sort first, so charging
+             * them would exhaust the budget before a uploadable bundle is
+             * reached.
+             */
+            if (out->bytes_up != before) done++;
+            break;
         }
-        done++;
     }
 
     cairn_http_disconnect(&s_http);
