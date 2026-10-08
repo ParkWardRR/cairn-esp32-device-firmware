@@ -145,6 +145,36 @@ class ServerCallbacks : public NimBLEServerCallbacks {
         cairn_engine_set_ble_declaration(NULL); /* clear stale engine declaration */
         ble_offload_on_disconnect();
         CAIRN_LOGI(TAG, "companion disconnected (reason %d)", reason);
+
+        /*
+         * If the peer no longer has the keys, drop our half of the bond.
+         *
+         * Bonding is symmetric and the two halves can get out of step: when the
+         * phone is told to forget the device — or is restored, replaced, or has
+         * Bluetooth reset — it arrives wanting to pair afresh while this side
+         * still holds an LTK for its address and tries to encrypt with it. The
+         * link then fails before any pairing dialog, every time, and with one
+         * bond slot and no way to clear it the only escape was reflashing with a
+         * changed passkey. Dropping the stale bond on exactly these reasons
+         * makes the next attempt a clean pairing.
+         *
+         * Only these reasons. A bond is the thing that keeps a stranger from
+         * reading trip metadata, so an ordinary timeout or a walk out of range
+         * must not discard it.
+         */
+        const bool peer_lost_keys =
+            reason == (BLE_HS_ERR_HCI_BASE + BLE_ERR_PINKEY_MISSING) ||
+            reason == (BLE_HS_ERR_HCI_BASE + BLE_ERR_AUTH_FAIL) ||
+            reason == BLE_HS_EENCRYPT ||
+            reason == BLE_HS_EENCRYPT_KEY_SZ;
+
+        if (peer_lost_keys && NimBLEDevice::getNumBonds() > 0) {
+            CAIRN_LOGW(TAG, "the peer could not decrypt the link (reason %d): it "
+                            "has forgotten this device. Dropping our stale bond "
+                            "so the next connection can pair cleanly.", reason);
+            ble_companion_clear_bonds();
+        }
+
         if (!s_radio_off)
             NimBLEDevice::startAdvertising();
     }
@@ -201,6 +231,11 @@ static void clear_bonds_if_pairing_changed(uint8_t authreq, uint8_t io_cap, uint
         CAIRN_LOGI(TAG, "pairing configuration unchanged: %d bond(s) kept", NimBLEDevice::getNumBonds());
     }
     prefs.end();
+}
+
+int ble_companion_bond_count(void)
+{
+    return NimBLEDevice::getNumBonds();
 }
 
 void ble_companion_clear_bonds(void)

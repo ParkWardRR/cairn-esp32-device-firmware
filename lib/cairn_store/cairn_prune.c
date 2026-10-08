@@ -144,6 +144,114 @@ static bool delete_bundle_dir(const char *id_text)
     return cairn_fs_rmdir(dir);
 }
 
+/* ── dropping bundles no reader can accept ────────────────────────────────── */
+
+/*
+ * The manifest version, read from the first few bytes, or -1 when it cannot be
+ * established.
+ *
+ * A deliberate peek rather than cairn_manifest_decode, because the whole point
+ * is to classify manifests the decoder *refuses*. The encoding makes this safe
+ * to do by hand: the manifest is a canonical CBOR map whose first key is 1,
+ * manifest_version, encoded as a small unsigned integer. Anything that does not
+ * match that shape exactly returns -1 and is left alone.
+ */
+static int manifest_version_of(const char *dir)
+{
+    char path[PATH_MAX_LEN];
+    snprintf(path, sizeof(path), "%s/manifest.cbor", dir);
+
+    cairn_file_t *f = cairn_fs_open(path, CAIRN_FS_READ);
+    if (f == NULL) return -1;
+
+    uint8_t h[4] = { 0, 0, 0, 0 };
+    size_t  got  = cairn_fs_read(f, h, sizeof(h));
+    cairn_fs_close(f);
+    if (got < sizeof(h)) return -1;
+
+    if ((h[0] & 0xe0) != 0xa0) return -1;        /* major type 5, a map */
+
+    size_t i = 1;
+    if ((h[0] & 0x1f) == 24) i = 2;              /* pair count in the next byte */
+    else if ((h[0] & 0x1f) > 24) return -1;      /* a larger count: not ours */
+
+    if (h[i] != 0x01) return -1;                 /* first key must be 1 */
+    if (h[i + 1] > 0x17) return -1;              /* must be a small uint */
+
+    return (int)h[i + 1];
+}
+
+static uint64_t bundle_dir_bytes(const char *dir)
+{
+    cairn_dir_t *d = cairn_fs_opendir(dir);
+    if (d == NULL) return 0;
+
+    uint64_t total = 0;
+    char     name[64];
+    bool     is_dir = false;
+    uint64_t size   = 0;
+
+    while (cairn_fs_readdir(d, name, sizeof(name), &is_dir, &size)) {
+        if (!is_dir) total += size;
+    }
+    cairn_fs_closedir(d);
+    return total;
+}
+
+bool cairn_prune_legacy_bundles(uint32_t *dropped, uint64_t *bytes_freed)
+{
+    if (dropped != NULL)     *dropped = 0;
+    if (bytes_freed != NULL) *bytes_freed = 0;
+
+    cairn_dir_t *d = cairn_fs_opendir(CAIRN_DIR_BUNDLES);
+    if (d == NULL) return false;
+
+    /* Names first: removing while iterating invalidates the iterator. */
+    char   ids[32][28];
+    size_t count = 0;
+    char   name[64];
+    bool   is_dir = false;
+
+    while (count < sizeof(ids) / sizeof(ids[0]) &&
+           cairn_fs_readdir(d, name, sizeof(name), &is_dir, NULL)) {
+        if (!is_dir || strlen(name) != 26) continue;
+        snprintf(ids[count], sizeof(ids[0]), "%s", name);
+        count++;
+    }
+    cairn_fs_closedir(d);
+
+    for (size_t i = 0; i < count; i++) {
+        char dir[PATH_MAX_LEN];
+        snprintf(dir, sizeof(dir), "%s/%s", CAIRN_DIR_BUNDLES, ids[i]);
+
+        int v = manifest_version_of(dir);
+
+        /*
+         * Only a version this firmware positively read AND that is older than
+         * the one it writes. An unreadable shape (-1) is left alone: it might
+         * be a torn write worth recovering, and this command must never become
+         * a way to delete data that a receipt could still redeem.
+         */
+        if (v < 0 || v >= CAIRN_MANIFEST_VERSION) continue;
+
+        uint64_t bytes = bundle_dir_bytes(dir);
+
+        if (!delete_bundle_dir(ids[i])) {
+            CAIRN_LOGE(TAG, "could not drop legacy bundle %s", ids[i]);
+            continue;
+        }
+
+        CAIRN_LOGW(TAG, "dropped %s: manifest version %d, which no reader here "
+                        "or on the server accepts (%llu bytes)",
+                   ids[i], v, (unsigned long long)bytes);
+
+        if (dropped != NULL)     (*dropped)++;
+        if (bytes_freed != NULL) *bytes_freed += bytes;
+    }
+
+    return true;
+}
+
 /* ── the gate ─────────────────────────────────────────────────────────────── */
 
 static bool key_is_usable(const uint8_t key[32])

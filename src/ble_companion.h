@@ -18,6 +18,10 @@ void ble_companion_radio_off(void);
 void ble_companion_radio_on(void);
 void ble_companion_clear_bonds(void);
 
+/* How many bonds are stored. The console reports it before clearing, so the
+ * operator can tell "there was nothing to clear" from "a bond was dropped". */
+int  ble_companion_bond_count(void);
+
 void ble_companion_notify_quality(uint8_t fix_type, uint8_t sats_used,
                                   uint16_t hdop_e2, uint32_t fix_age_ms);
 void ble_companion_notify_status(void);
@@ -29,6 +33,7 @@ static inline bool ble_companion_connected(void) { return false; }
 static inline void ble_companion_radio_off(void) {}
 static inline void ble_companion_radio_on(void) {}
 static inline void ble_companion_clear_bonds(void) {}
+static inline int  ble_companion_bond_count(void) { return 0; }
 static inline void ble_companion_notify_quality(uint8_t a, uint8_t b,
                                                 uint16_t c, uint32_t d) {
     (void)a; (void)b; (void)c; (void)d;

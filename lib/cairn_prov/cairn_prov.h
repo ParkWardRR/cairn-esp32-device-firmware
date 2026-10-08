@@ -112,6 +112,30 @@ typedef struct {
      */
     const char *(*apply)(void *ctx, const cairn_prov_staged_t *staged);
 
+    /*
+     * Delete sealed bundles whose manifest version is below the one this
+     * firmware writes. Returns the count removed and the bytes freed.
+     *
+     * This is the one deletion path that does not go through a receipt, and it
+     * exists because the alternative is worse. A pre-v3 bundle cannot be read
+     * by this firmware or accepted by this server, so no transport will ever
+     * carry it and no receipt can ever be earned for it: it occupies the card
+     * forever. Narrow on purpose — it refuses anything it can still read as a
+     * current-version bundle, so it cannot become a general "delete my data"
+     * command. Optional; NULL when the build has no implementation.
+     */
+    bool (*drop_legacy_bundles)(void *ctx, uint32_t *dropped, uint64_t *bytes);
+
+    /*
+     * Forget every BLE bond. Optional; NULL when the build has no BLE.
+     *
+     * Needed because the dongle keeps exactly one bond and the phone holds the
+     * other half. If the phone forgets the device, the dongle still tries to
+     * encrypt with the old key and pairing fails with no way out, and swapping
+     * which phone is paired otherwise means reflashing with a changed passkey.
+     */
+    bool (*clear_ble_bonds)(void *ctx, uint32_t *cleared);
+
     /* A line for the log. Never contains a value, only field names and events. */
     void (*log)(void *ctx, const char *msg);
 

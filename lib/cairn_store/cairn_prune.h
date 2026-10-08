@@ -74,6 +74,28 @@ cairn_prune_result_t cairn_prune_if_receipted(const char *id_text,
                                               const uint8_t uploaded_root[32]);
 
 /*
+ * Delete sealed bundles whose manifest version is older than the one this
+ * firmware writes. Returns false only if the bundle directory cannot be listed.
+ *
+ * The second and only other deletion path, and the one that does not require a
+ * receipt — so it is here, beside the receipt gate, rather than somewhere a
+ * reader would not think to audit.
+ *
+ * It exists because a pre-v3 bundle is unreachable, not merely inconvenient:
+ * this firmware's decoder refuses it and the server would refuse it too, so no
+ * transport can carry it and no receipt can ever be earned for it. Without this
+ * it occupies the card forever. The owner invokes it deliberately over the USB
+ * console, where physical access is already the trust boundary.
+ *
+ * The narrowing is what keeps it honest. A bundle is dropped only when the
+ * version was positively read AND is below CAIRN_MANIFEST_VERSION. A manifest
+ * whose shape cannot be parsed is left alone, because that may be a torn write
+ * worth recovering — this must never become a way to delete data a receipt
+ * could still redeem.
+ */
+bool cairn_prune_legacy_bundles(uint32_t *dropped, uint64_t *bytes_freed);
+
+/*
  * Finish a prune interrupted by power loss. An intent record is written before
  * the first delete, so an interrupted prune leaves an intent with no
  * completion — recognizable here, rather than a half-deleted directory that

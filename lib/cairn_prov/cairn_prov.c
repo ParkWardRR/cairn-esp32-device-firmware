@@ -354,6 +354,45 @@ void cairn_prov_line(cairn_prov_t *p, const char *line, const cairn_prov_env_t *
             snprintf(r, sizeof(r), "ERR %s", err ? err : "cannot build the enrolment blob");
             say(p, r);
         }
+    } else if (strcmp(tok[0], "DROP") == 0 && nt == 2 &&
+               strcmp(tok[1], "legacy-bundles") == 0) {
+        /*
+         * Spelled out rather than abbreviated, and it takes no wildcard, so it
+         * cannot be mistaken for or grown into a general delete. The
+         * implementation refuses any bundle it can still read as current, so
+         * the worst a typo does is free space nothing could use.
+         */
+        if (p->ops->drop_legacy_bundles == NULL) {
+            say(p, "ERR this build cannot drop bundles");
+        } else {
+            uint32_t dropped = 0;
+            uint64_t bytes   = 0;
+            if (p->ops->drop_legacy_bundles(p->ops->ctx, &dropped, &bytes)) {
+                char r[128];
+                snprintf(r, sizeof(r), "OK dropped %u bundle(s), %llu bytes freed",
+                         (unsigned)dropped, (unsigned long long)bytes);
+                say(p, r);
+                note(p, "provisioning: legacy bundles dropped");
+            } else {
+                say(p, "ERR could not scan the bundle directory");
+            }
+        }
+    } else if (strcmp(tok[0], "CLEAR") == 0 && nt == 2 &&
+               strcmp(tok[1], "bonds") == 0) {
+        if (p->ops->clear_ble_bonds == NULL) {
+            say(p, "ERR this build has no BLE");
+        } else {
+            uint32_t cleared = 0;
+            if (p->ops->clear_ble_bonds(p->ops->ctx, &cleared)) {
+                char r[96];
+                snprintf(r, sizeof(r), "OK cleared %u bond(s); the next phone to "
+                                       "connect may pair", (unsigned)cleared);
+                say(p, r);
+                note(p, "provisioning: BLE bonds cleared");
+            } else {
+                say(p, "ERR could not clear bonds");
+            }
+        }
     } else if (strcmp(tok[0], "SET") == 0 && nt >= 3) {
         set_field(p, tok[1], tok[2], nt >= 4 ? tok[3] : NULL);
     } else if (strcmp(tok[0], "COMMIT") == 0 && nt == 1) {

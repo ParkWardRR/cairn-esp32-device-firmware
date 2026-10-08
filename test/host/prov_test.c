@@ -233,10 +233,62 @@ static const char *m_apply(void *c, const cairn_prov_staged_t *st)
     s_last = *st;
     return NULL;
 }
+/* The two optional ops. Scripted so the protocol's handling of a build that
+ * lacks them, and of a failure, can both be exercised. */
+static uint32_t s_drop_count   = 2;
+static uint64_t s_drop_bytes   = 4096;
+static bool     s_drop_fails   = false;
+static int      s_drops_called = 0;
+static uint32_t s_bonds        = 1;
+static bool     s_bond_fails   = false;
+static int      s_bonds_called = 0;
+
+static bool m_drop(void *c, uint32_t *dropped, uint64_t *bytes)
+{
+    (void)c;
+    s_drops_called++;
+    if (s_drop_fails) return false;
+    *dropped = s_drop_count;
+    *bytes   = s_drop_bytes;
+    return true;
+}
+
+static bool m_bonds(void *c, uint32_t *cleared)
+{
+    (void)c;
+    s_bonds_called++;
+    if (s_bond_fails) return false;
+    *cleared = s_bonds;
+    return true;
+}
+
 static void m_log(void *c, const char *m) { (void)c; strncat(s_log, m, sizeof(s_log) - strlen(s_log) - 2); strcat(s_log, "\n"); }
 static void m_reply(void *c, const char *l) { (void)c; strncat(s_out, l, sizeof(s_out) - strlen(s_out) - 2); strcat(s_out, "\n"); }
 
-static const cairn_prov_ops_t OPS = { NULL, m_identity, m_enroll, m_apply, m_log, m_reply };
+/* Designated, so adding an op does not silently shift these into the wrong
+ * slots -- which is exactly what a positional initializer did here once. */
+static const cairn_prov_ops_t OPS = {
+    .ctx                 = NULL,
+    .identity            = m_identity,
+    .enroll_text         = m_enroll,
+    .apply               = m_apply,
+    .drop_legacy_bundles = m_drop,
+    .clear_ble_bonds     = m_bonds,
+    .log                 = m_log,
+    .reply               = m_reply,
+};
+
+/* The same, without the optional ops, for a build that has neither. */
+static const cairn_prov_ops_t OPS_MINIMAL = {
+    .ctx                 = NULL,
+    .identity            = m_identity,
+    .enroll_text         = m_enroll,
+    .apply               = m_apply,
+    .drop_legacy_bundles = NULL,
+    .clear_ble_bonds     = NULL,
+    .log                 = m_log,
+    .reply               = m_reply,
+};
 
 static void reset_io(void) { s_out[0] = s_log[0] = 0; s_applies = 0; s_apply_fails = false; memset(&s_last, 0, sizeof(s_last)); }
 
@@ -521,6 +573,100 @@ static bool row_legacy_slots_are_erased(void)
 
 typedef struct { const char *name; bool (*fn)(void); } row_t;
 
+/*
+ * DROP legacy-bundles and CLEAR bonds.
+ *
+ * Both delete something, so what matters is that they are reachable only
+ * through a session that has already passed the window and trip rules, that
+ * they report what they did, and that a build without them says so rather than
+ * silently appearing to succeed.
+ */
+static bool row_drop_and_clear(void)
+{
+    cairn_prov_t p;
+    cairn_prov_init(&p, &OPS);
+    cairn_prov_env_t env = { 1000, false, false };
+
+    /* Outside a session: no reply at all, and certainly no deletion. */
+    reset_io();
+    s_drops_called = 0;
+    s_bonds_called = 0;
+    send(&p, &env, "DROP legacy-bundles");
+    send(&p, &env, "CLEAR bonds");
+    CHECK(s_drops_called == 0 && s_bonds_called == 0,
+          "DROP and CLEAR outside a session do nothing");
+    CHECK(s_out[0] == '\0', "and say nothing");
+
+    send(&p, &env, "CAIRN-PROV BEGIN");
+
+    /* Inside a session: both work and report their counts. */
+    reset_io();
+    s_drop_count = 7;
+    s_drop_bytes = 4917420;
+    send(&p, &env, "DROP legacy-bundles");
+    CHECK(s_drops_called == 1, "DROP calls through once");
+    CHECK(strstr(s_out, "OK dropped 7 bundle(s)") != NULL,
+          "DROP reports how many bundles went");
+    CHECK(strstr(s_out, "4917420") != NULL, "and how many bytes were freed");
+
+    reset_io();
+    s_bonds = 1;
+    send(&p, &env, "CLEAR bonds");
+    CHECK(s_bonds_called == 1, "CLEAR bonds calls through once");
+    CHECK(strstr(s_out, "OK cleared 1 bond(s)") != NULL,
+          "CLEAR bonds reports the count");
+
+    /* A trip starting kills the session, so neither can run mid-drive. */
+    reset_io();
+    s_drops_called = 0;
+    env.trip_active = true;
+    send(&p, &env, "DROP legacy-bundles");
+    CHECK(s_drops_called == 0, "DROP is refused once a trip is active");
+    CHECK(strstr(s_out, "ERR aborted") != NULL, "and says why");
+    env.trip_active = false;
+
+    /* A failure is reported as one, not as success. */
+    cairn_prov_init(&p, &OPS);
+    send(&p, &env, "CAIRN-PROV BEGIN");
+    reset_io();
+    s_drop_fails = true;
+    send(&p, &env, "DROP legacy-bundles");
+    CHECK(strstr(s_out, "ERR") != NULL, "a failed DROP reports ERR");
+    s_drop_fails = false;
+
+    reset_io();
+    s_bond_fails = true;
+    send(&p, &env, "CLEAR bonds");
+    CHECK(strstr(s_out, "ERR") != NULL, "a failed CLEAR reports ERR");
+    s_bond_fails = false;
+
+    /* A build without the ops must refuse rather than appear to succeed. */
+    cairn_prov_t q;
+    cairn_prov_init(&q, &OPS_MINIMAL);
+    send(&q, &env, "CAIRN-PROV BEGIN");
+    reset_io();
+    send(&q, &env, "DROP legacy-bundles");
+    CHECK(strstr(s_out, "ERR") != NULL,
+          "a build that cannot drop bundles says so");
+    reset_io();
+    send(&q, &env, "CLEAR bonds");
+    CHECK(strstr(s_out, "ERR") != NULL, "a build with no BLE says so");
+
+    /* Neither verb is a prefix match: the exact argument is required. */
+    cairn_prov_init(&p, &OPS);
+    send(&p, &env, "CAIRN-PROV BEGIN");
+    reset_io();
+    s_drops_called = 0;
+    send(&p, &env, "DROP");
+    send(&p, &env, "DROP bundles");
+    send(&p, &env, "DROP legacy-bundles extra");
+    send(&p, &env, "CLEAR");
+    send(&p, &env, "CLEAR all");
+    CHECK(s_drops_called == 0, "a near-miss argument drops nothing");
+
+    return true;
+}
+
 int main(void)
 {
     static const row_t ROWS[] = {
@@ -536,6 +682,7 @@ int main(void)
         { "COMMIT is all-or-nothing and convergent on retry", row_commit_rules },
         { "no secret is ever echoed or logged (raw or base64)", row_no_secret_leaks },
         { "legacy Wi-Fi and key slots are erased, idempotently, touching nothing else", row_legacy_slots_are_erased },
+        { "DROP legacy-bundles and CLEAR bonds obey the session and report", row_drop_and_clear },
     };
     for (size_t i = 0; i < sizeof(ROWS) / sizeof(ROWS[0]); i++) {
         bool ok = ROWS[i].fn();

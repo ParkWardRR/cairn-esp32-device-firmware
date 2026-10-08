@@ -29,6 +29,7 @@
 #include "cairn_kv.h"
 #include "cairn_log.h"
 #include "cairn_platform.h"
+#include "cairn_prune.h"
 #include "cairn_store.h"
 
 /* Provided by platform_host.c, as in the other host suites. */
@@ -283,6 +284,74 @@ int main(void)
         } else {
             printf("  FAIL  [bundle] could not truncate a member to test the check\n");
             g_fail++;
+        }
+    }
+
+    /*
+     * 7. Dropping legacy bundles. The real card holds seven pre-v3 bundles that
+     *    no reader here or on the server accepts, so they can never earn a
+     *    receipt and never be pruned. This is the only deletion path that does
+     *    not require one, so what matters is that it is narrow: it must take the
+     *    old version and nothing else.
+     */
+    {
+        /* A v2 manifest, shaped exactly like the ones observed on the card:
+         * a 23-pair map whose first key is 1 with value 2. */
+        char v2dir[200];
+        snprintf(v2dir, sizeof(v2dir), "%s/0000000000AAAAAAAAAAAAAAAA", CAIRN_DIR_BUNDLES);
+        cairn_fs_mkdir(v2dir);
+
+        char mpath[256];
+        snprintf(mpath, sizeof(mpath), "%s/manifest.cbor", v2dir);
+        const uint8_t v2[] = { 0xb7, 0x01, 0x02, 0x02, 0x50, 0x00 };
+        cairn_file_t *vf = cairn_fs_open(mpath, CAIRN_FS_WRITE);
+        CHECK("drop: a synthetic v2 bundle was created",
+              vf != NULL && cairn_fs_write(vf, v2, sizeof(v2)) == sizeof(v2));
+        if (vf != NULL) cairn_fs_close(vf);
+
+        /* And one whose manifest is unreadable garbage: a torn write, which
+         * must be left alone because a receipt could still redeem it. */
+        char tdir[200];
+        snprintf(tdir, sizeof(tdir), "%s/0000000000BBBBBBBBBBBBBBBB", CAIRN_DIR_BUNDLES);
+        cairn_fs_mkdir(tdir);
+        snprintf(mpath, sizeof(mpath), "%s/manifest.cbor", tdir);
+        const uint8_t torn[] = { 0x00, 0x00, 0x00, 0x00 };
+        vf = cairn_fs_open(mpath, CAIRN_FS_WRITE);
+        if (vf != NULL) { cairn_fs_write(vf, torn, sizeof(torn)); cairn_fs_close(vf); }
+
+        uint32_t gone  = 0;
+        uint64_t freed = 0;
+        CHECK("drop: the scan succeeds", cairn_prune_legacy_bundles(&gone, &freed));
+        CHECK("drop: exactly the one v2 bundle went", gone == 1);
+        CHECK("drop: it reported the bytes it freed", freed >= sizeof(v2));
+
+        char probe[256];
+        snprintf(probe, sizeof(probe), "%s/manifest.cbor", v2dir);
+        CHECK("drop: the v2 bundle is gone from the card", !cairn_fs_exists(probe));
+
+        snprintf(probe, sizeof(probe), "%s/manifest.cbor", tdir);
+        CHECK("drop: an unreadable manifest is LEFT ALONE, not deleted",
+              cairn_fs_exists(probe));
+
+        /* The current-version bundle this test sealed earlier must survive --
+         * it was truncated above, so re-seal a fresh one to check. */
+        static cairn_capture_t cap2;
+        if (cairn_capture_open_or_resume(&cap2, device_id, boot_id, &g_ident) &&
+            append_samples(&cap2, 20) == 20) {
+            uint8_t id2[16];
+            if (cairn_capture_seal(&cap2, seed, pub, "cairn-bundle-test", 1, 0, id2)) {
+                char ulid2[27];
+                cairn_ulid_encode(id2, ulid2);
+
+                gone = 0;
+                CHECK("drop: a second scan finds nothing left to drop",
+                      cairn_prune_legacy_bundles(&gone, NULL) && gone == 0);
+
+                snprintf(probe, sizeof(probe), "%s/%s/manifest.cbor",
+                         CAIRN_DIR_BUNDLES, ulid2);
+                CHECK("drop: a current-version bundle is untouched",
+                      cairn_fs_exists(probe));
+            }
         }
     }
 

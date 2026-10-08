@@ -9,6 +9,8 @@
 #include "cairn_platform.h"
 #include "cairn_log.h"
 #include "cairn_prov.h"
+#include "cairn_prune.h"
+#include "ble_companion.h"
 #include "cairn_store.h"
 #include "config.h"
 
@@ -141,6 +143,23 @@ static const char *op_apply(void *, const cairn_prov_staged_t *st)
     return nullptr;
 }
 
+static bool op_drop_legacy_bundles(void *, uint32_t *dropped, uint64_t *bytes)
+{
+    return cairn_prune_legacy_bundles(dropped, bytes);
+}
+
+static bool op_clear_ble_bonds(void *, uint32_t *cleared)
+{
+#if CAIRN_BLE_COMPANION
+    *cleared = (uint32_t)ble_companion_bond_count();
+    ble_companion_clear_bonds();
+    return true;
+#else
+    (void)cleared;
+    return false;
+#endif
+}
+
 static void op_log(void *, const char *msg)
 {
     CAIRN_LOGI(TAG, "%s", msg);
@@ -158,7 +177,8 @@ static void op_reply(void *, const char *line)
 }
 
 static const cairn_prov_ops_t OPS = { nullptr, op_identity, op_enroll_text,
-                                      op_apply, op_log, op_reply };
+                                      op_apply, op_drop_legacy_bundles,
+                                      op_clear_ble_bonds, op_log, op_reply };
 
 /* ── console ──────────────────────────────────────────────────────────────── */
 
