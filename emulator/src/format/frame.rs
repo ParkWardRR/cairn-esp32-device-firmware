@@ -49,6 +49,12 @@ impl RecordType {
     pub const GNSS_GAP: Self = Self(0x08);
     pub const POLICY_SNAPSHOT: Self = Self(0x09);
     pub const OBD_EXTENDED: Self = Self(0x0A);
+    /// One source's claim about the wall clock, with the accuracy it claims.
+    /// The frame's own monotonic is the other half: `utc_ms - monotonic_ms` is
+    /// the basis that source implies, which is the figure that makes sources
+    /// comparable and drift visible. The manifest's basis stays first-wins;
+    /// these records are the evidence trail behind it.
+    pub const TIME_OBSERVATION: Self = Self(0x0B);
 
     /// Whether this implementation understands the type.
     ///
@@ -57,7 +63,7 @@ impl RecordType {
     /// older decoder. The frame CRC and — in a keyed scan — the tag still apply,
     /// so a skipped record remains integrity-checked.
     pub fn known(self) -> bool {
-        (Self::GNSS_SAMPLE.0..=Self::OBD_EXTENDED.0).contains(&self.0)
+        (Self::GNSS_SAMPLE.0..=Self::TIME_OBSERVATION.0).contains(&self.0)
     }
 
     /// The spec's name for this type, used in conformance expectations.
@@ -73,6 +79,7 @@ impl RecordType {
             Self::GNSS_GAP => "GNSS_GAP".into(),
             Self::POLICY_SNAPSHOT => "POLICY_SNAPSHOT".into(),
             Self::OBD_EXTENDED => "OBD_EXTENDED".into(),
+            Self::TIME_OBSERVATION => "TIME_OBSERVATION".into(),
             Self(other) => format!("UNKNOWN(0x{other:02x})"),
         }
     }

@@ -236,3 +236,83 @@ impl ObdExtended {
         self.map_kpa.is_some_and(|m| m >= 255)
     }
 }
+
+// ── TIME_OBSERVATION (§4.12) ────────────────────────────────────────────────
+
+/// Where a `TIME_OBSERVATION` came from (§4.12.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimeSource(pub u8);
+
+impl TimeSource {
+    pub const GNSS: Self = Self(1);
+    pub const PHONE: Self = Self(2);
+    pub const MODEM_NETWORK: Self = Self(3);
+    pub const RTC: Self = Self(4);
+
+    /// Whether this build understands the source. An unknown source is **kept**
+    /// rather than rejected: the observation is still evidence, and a newer
+    /// device naming a source this build has not heard of is exactly the case
+    /// the field exists to survive.
+    pub fn known(self) -> bool {
+        (Self::GNSS.0..=Self::RTC.0).contains(&self.0)
+    }
+
+    pub fn name(self) -> String {
+        match self {
+            Self::GNSS => "gnss".into(),
+            Self::PHONE => "phone".into(),
+            Self::MODEM_NETWORK => "modem_network".into(),
+            Self::RTC => "rtc".into(),
+            Self(other) => format!("unknown({other})"),
+        }
+    }
+}
+
+/// Bit 0 of the flags: this observation is the one the device adopted as the
+/// manifest's `utc_basis_ms`.
+pub const TIME_OBSERVATION_ADOPTED: u8 = 1 << 0;
+
+/// One wall-clock reading from one source, recorded as evidence rather than as a
+/// decision (§4.12).
+///
+/// The monotonic reading of the same instant is the **frame's** `monotonic_ms`,
+/// not a field here, and that pairing is the point: `utc_ms` minus the frame's
+/// monotonic is the UTC of monotonic zero this source implies, so sources can be
+/// compared directly and drift within one source is visible across a trip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimeObservation {
+    pub utc_ms: u64,
+    /// The source's own uncertainty, or `None` when it stated none. Absent is
+    /// not zero: a source that does not report accuracy is not a source claiming
+    /// perfect accuracy.
+    pub accuracy_ms: Option<u32>,
+    pub source: TimeSource,
+    pub adopted: bool,
+}
+
+impl TimeObservation {
+    /// The UTC of monotonic zero this observation implies, given the monotonic
+    /// reading of the frame that carried it.
+    ///
+    /// `None` when the monotonic reading is later than the wall clock, which
+    /// cannot happen on a sane device and would otherwise wrap the subtraction.
+    pub fn implied_basis_ms(&self, frame_monotonic_ms: u32) -> Option<u64> {
+        self.utc_ms.checked_sub(u64::from(frame_monotonic_ms))
+    }
+}
+
+pub fn parse_time_observation(p: &[u8]) -> Result<TimeObservation> {
+    if p.len() != 16 {
+        return Err(FormatError::Malformed(format!(
+            "TIME_OBSERVATION payload is {} bytes, want 16",
+            p.len()
+        )));
+    }
+    let accuracy = u32::from_le_bytes([p[8], p[9], p[10], p[11]]);
+    Ok(TimeObservation {
+        utc_ms: u64::from_le_bytes(p[0..8].try_into().unwrap()),
+        accuracy_ms: (accuracy != u32::MAX).then_some(accuracy),
+        source: TimeSource(p[12]),
+        adopted: p[13] & TIME_OBSERVATION_ADOPTED != 0,
+    })
+}

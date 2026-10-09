@@ -16,7 +16,7 @@ use super::{
     crc::crc32,
     derive_segment_key,
     keys::{ENCRYPTION_SUITE_V1, NONCE_SIZE},
-    manifest::{MANIFEST_VERSION, SIGNATURE_ALGORITHM_ED25519},
+    manifest::{EngineProfileRef, MANIFEST_VERSION, SIGNATURE_ALGORITHM_ED25519},
     scan_segment,
     segment::{JOURNAL_SEGMENT_INDEX, append_segment_header},
     verify_segment_against_manifest,
@@ -280,6 +280,10 @@ fn journal_has_its_own_key_and_chain() {
 // ── manifest ────────────────────────────────────────────────────────────────
 
 fn manifest(trip_seq: Option<u32>) -> Manifest {
+    manifest_with(trip_seq, None)
+}
+
+fn manifest_with(trip_seq: Option<u32>, engine_profile: Option<EngineProfileRef>) -> Manifest {
     Manifest {
         manifest_version: MANIFEST_VERSION,
         bundle_id: [1; 16],
@@ -304,6 +308,7 @@ fn manifest(trip_seq: Option<u32>) -> Manifest {
         discarded_tail_bytes: 0,
         signature_algorithm: SIGNATURE_ALGORITHM_ED25519.into(),
         trip_seq,
+        engine_profile,
         vehicle_id: [0x30; 16],
         assignment_id: [0x50; 16],
         device_counter: 1,
@@ -312,15 +317,57 @@ fn manifest(trip_seq: Option<u32>) -> Manifest {
     }
 }
 
+/// Keys 23 and 29 are independently optional, so all four combinations are
+/// well-formed and every one of 27, 28 and 29 fields must round-trip. A reader
+/// that treats the count as "27 or 28" rejects a bundle that names its engine
+/// profile, which is the whole point of the key being optional.
 #[test]
-fn manifest_round_trips_with_and_without_trip_seq() {
-    for (trip_seq, fields) in [(None, 27u8), (Some(9), 28)] {
-        let m = manifest(trip_seq);
+fn manifest_round_trips_with_either_optional_key_present_or_absent() {
+    let profile = || {
+        Some(EngineProfileRef {
+            id: "bmw-n20".into(),
+            version: 3,
+            sha256: [0x7c; 32],
+        })
+    };
+    for (trip_seq, engine_profile, fields) in [
+        (None, None, 27u8),
+        (Some(9), None, 28),
+        (None, profile(), 28),
+        (Some(9), profile(), 29),
+    ] {
+        let m = manifest_with(trip_seq, engine_profile);
         let b = m.to_cbor().unwrap();
         assert_eq!(b[0], 0xb8, "a map with a one-byte length");
         assert_eq!(b[1], fields);
         assert_eq!(Manifest::from_cbor(&b).unwrap(), m);
     }
+}
+
+/// The digest identifies the profile *document*, so a profile edited without a
+/// version bump is a different profile. Nothing else in the manifest would say
+/// so, which is why the key carries the hash and not just the name.
+#[test]
+fn an_edited_profile_with_the_same_version_is_a_different_manifest() {
+    let one = manifest_with(
+        None,
+        Some(EngineProfileRef {
+            id: "bmw-n20".into(),
+            version: 3,
+            sha256: [0x7c; 32],
+        }),
+    );
+    let mut two = one.clone();
+    two.engine_profile.as_mut().unwrap().sha256[0] ^= 1;
+    assert_ne!(one.to_cbor().unwrap(), two.to_cbor().unwrap());
+}
+
+/// A bundle from a device with no profile, or from firmware built before the key
+/// existed, is still valid. A reader must not require it.
+#[test]
+fn a_manifest_without_an_engine_profile_still_decodes() {
+    let b = manifest(None).to_cbor().unwrap();
+    assert_eq!(Manifest::from_cbor(&b).unwrap().engine_profile, None);
 }
 
 #[test]

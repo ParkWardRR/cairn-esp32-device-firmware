@@ -621,6 +621,7 @@ impl DeviceStore {
             discarded_tail_bytes: discarded,
             signature_algorithm: format::manifest::SIGNATURE_ALGORITHM_ED25519.into(),
             trip_seq: None,
+            engine_profile: None,
             vehicle_id: identity.vehicle_id,
             assignment_id: identity.assignment_id,
             device_counter: identity.device_counter,

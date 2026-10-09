@@ -68,6 +68,21 @@ pub struct ChunkDescriptor {
     pub sha256: [u8; 32],
 }
 
+/// Which engine profile produced a bundle's numbers (manifest key 29, §5.1.1).
+///
+/// The profile decides the multi-PID request, every value conversion, the
+/// hot/cold tiering, the polling cadences and the engine-on thresholds, so a
+/// bundle that does not name it leaves a reader unable to say which formula a
+/// figure came through.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineProfileRef {
+    pub id: String,
+    pub version: u8,
+    /// SHA-256 of the profile document as `contracts/engine/v1` defines it —
+    /// the same value the generator reports.
+    pub sha256: [u8; 32],
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
     pub manifest_version: u8,
@@ -108,8 +123,19 @@ pub struct Manifest {
 
     /// Ties the capture to the sequence of drives, not just the boot. Optional:
     /// when absent, key 23 is omitted from the encoding entirely rather than
-    /// written as null, so a manifest has 27 or 28 fields.
+    /// written as null.
     pub trip_seq: Option<u32>,
+
+    /// The engine profile that produced this bundle's numbers: its id, its
+    /// version, and the SHA-256 of the profile document (§5.1.1). Optional and
+    /// independent of [`Self::trip_seq`], so a manifest has 27 to 29 fields.
+    ///
+    /// The **digest, not just the name**, because a profile edited without a
+    /// version bump is a different profile and only the digest says so. A reader
+    /// must not require this key: a bundle from a device with no profile, or one
+    /// built before the key existed, is still valid and still signed over
+    /// whatever keys are present.
+    pub engine_profile: Option<EngineProfileRef>,
 
     // ── v3 binding (keys 24–28, mandatory) ──────────────────────────────────
     // The first four must each equal the corresponding field of every segment
@@ -160,10 +186,12 @@ const KEY_ASSIGNMENT_ID: u64 = 25;
 const KEY_DEVICE_COUNTER: u64 = 26;
 const KEY_STORAGE_KEY_VERSION: u64 = 27;
 const KEY_ENCRYPTION_SUITE: u64 = 28;
+const KEY_ENGINE_PROFILE: u64 = 29; // optional
 
-/// Without and with the optional trip_seq.
+/// Keys 23 and 29 are independently optional, so every count in this range is
+/// well-formed. Which keys are actually present is checked per key.
 const MANIFEST_FIELD_COUNT_BASE: usize = 27;
-const MANIFEST_FIELD_COUNT_MAX: usize = 28;
+const MANIFEST_FIELD_COUNT_MAX: usize = 29;
 
 /// Derive the 8-byte key identifier from a public key: truncated SHA-256.
 pub fn device_key_id(pub_key: &VerifyingKey) -> [u8; 8] {
@@ -195,11 +223,11 @@ impl Manifest {
         }
 
         let mut e = Encoder::new();
-        e.map_header(if self.trip_seq.is_some() {
-            MANIFEST_FIELD_COUNT_MAX
-        } else {
+        e.map_header(
             MANIFEST_FIELD_COUNT_BASE
-        });
+                + usize::from(self.trip_seq.is_some())
+                + usize::from(self.engine_profile.is_some()),
+        );
 
         e.key(KEY_MANIFEST_VERSION);
         e.uint(self.manifest_version as u64);
@@ -294,6 +322,14 @@ impl Manifest {
         e.key(KEY_ENCRYPTION_SUITE);
         e.text(&self.encryption_suite);
 
+        if let Some(p) = &self.engine_profile {
+            e.key(KEY_ENGINE_PROFILE);
+            e.array_header(3);
+            e.text(&p.id);
+            e.uint(p.version as u64);
+            e.bytes(&p.sha256);
+        }
+
         Ok(e.into_bytes())
     }
 
@@ -320,9 +356,11 @@ impl Manifest {
         let mut d = Decoder::new(b);
 
         let n = d.map_header()?;
-        if n != MANIFEST_FIELD_COUNT_BASE && n != MANIFEST_FIELD_COUNT_MAX {
+        // A range rather than a pair of totals: trip_seq and engine_profile are
+        // independently optional, so 27, 28 and 29 are all well-formed.
+        if !(MANIFEST_FIELD_COUNT_BASE..=MANIFEST_FIELD_COUNT_MAX).contains(&n) {
             return Err(FormatError::Malformed(format!(
-                "manifest has {n} fields, expected {MANIFEST_FIELD_COUNT_BASE} or {MANIFEST_FIELD_COUNT_MAX}"
+                "manifest has {n} fields, expected {MANIFEST_FIELD_COUNT_BASE} to {MANIFEST_FIELD_COUNT_MAX}"
             )));
         }
 
@@ -350,6 +388,7 @@ impl Manifest {
             discarded_tail_bytes: 0,
             signature_algorithm: String::new(),
             trip_seq: None,
+            engine_profile: None,
             vehicle_id: [0; 16],
             assignment_id: [0; 16],
             device_counter: 0,
@@ -496,6 +535,19 @@ impl Manifest {
                         )));
                     }
                 }
+                KEY_ENGINE_PROFILE => {
+                    let fields = d.array_header()?;
+                    if fields != 3 {
+                        return Err(FormatError::Malformed(format!(
+                            "engine_profile has {fields} fields, want 3"
+                        )));
+                    }
+                    m.engine_profile = Some(EngineProfileRef {
+                        id: d.text()?,
+                        version: d.u8()?,
+                        sha256: d.bytes_n()?,
+                    });
+                }
                 other => {
                     return Err(FormatError::Malformed(format!(
                         "unknown manifest key {other}"
@@ -504,10 +556,11 @@ impl Manifest {
             }
         }
 
-        // Every key but trip_seq is mandatory. With a 27- or 28-field count and
-        // duplicates refused, a missing key could only hide behind the optional
-        // one; name it, rather than letting a zero-valued field reach the
-        // binding check, where an all-zero vehicle_id would read as a claim.
+        // Every key but trip_seq and engine_profile is mandatory. With the field
+        // count bounded and duplicates refused, a missing key could only hide
+        // behind an optional one; name it, rather than letting a zero-valued
+        // field reach the binding check, where an all-zero vehicle_id would read
+        // as a claim.
         for key in (KEY_MANIFEST_VERSION..=KEY_ENCRYPTION_SUITE).filter(|&k| k != KEY_TRIP_SEQ) {
             if seen & (1 << key) == 0 {
                 return Err(FormatError::Malformed(format!(

@@ -61,6 +61,7 @@ struct Expectation {
     events: Option<EventsExpectation>,
     health: Option<HealthExpectation>,
     obd_ext: Option<ObdExtExpectation>,
+    time_obs: Option<TimeObsExpectation>,
 }
 
 /// `keyed` is an object for single-segment vectors and an array for the
@@ -175,6 +176,23 @@ struct HealthRecordExpectation {
 #[derive(Debug, Deserialize)]
 struct ObdExtExpectation {
     records: Vec<ObdExtRecordExpectation>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TimeObsExpectation {
+    records: Vec<TimeObsRecordExpectation>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TimeObsRecordExpectation {
+    /// The frame's own monotonic reading, not a payload field. Checked, because
+    /// it is the other half of what `implied_basis_ms` is computed from.
+    monotonic_ms: u32,
+    utc_ms: u64,
+    accuracy_ms: Option<u32>,
+    source: String,
+    adopted: bool,
+    implied_basis_ms: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -352,6 +370,11 @@ fn check_vector(dir: &Path, exp: &Expectation, keys: &RootKeyProvider, t: &mut T
         recognised = true;
         check_events(dir, e, keys, t)?;
     }
+    if let Some(o) = &exp.time_obs {
+        recognised = true;
+        check_time_obs(dir, o, keys, t)?;
+    }
+
     if let Some(h) = &exp.health {
         recognised = true;
         check_health(dir, h, keys, t)?;
@@ -1038,6 +1061,102 @@ fn check_events(dir: &Path, e: &EventsExpectation, keys: &RootKeyProvider, t: &m
         }
     }
     t.what.push("trip events");
+    Ok(())
+}
+
+/// TIME_OBSERVATION decoding, held to the vector record by record.
+///
+/// `implied_basis_ms` is the reason this check exists: it is not a payload field
+/// but `utc_ms` minus the **frame's** monotonic, so a decoder that reads the
+/// payload correctly and pairs it with the wrong frame still fails here.
+fn check_time_obs(
+    dir: &Path,
+    o: &TimeObsExpectation,
+    keys: &RootKeyProvider,
+    t: &mut Tally,
+) -> Check {
+    let bytes = read(dir, "segment.bin")?;
+    let res = scan_segment(&bytes, ScanState::default(), Some(keys as &dyn KeyProvider))
+        .map_err(|e| format!("keyed scan: {e}"))?;
+    if res.stop != StopReason::Eof {
+        return Err(format!("keyed scan stopped with {}", res.stop));
+    }
+    let frames: Vec<_> = res
+        .frames
+        .into_iter()
+        .filter(|f| f.record_type == format::RecordType::TIME_OBSERVATION)
+        .collect();
+    if frames.len() != o.records.len() {
+        return Err(format!(
+            "found {} TIME_OBSERVATION records, want {}",
+            frames.len(),
+            o.records.len()
+        ));
+    }
+
+    for (i, (f, w)) in frames.iter().zip(&o.records).enumerate() {
+        if f.monotonic_ms != w.monotonic_ms {
+            return Err(format!(
+                "record {i} frame monotonic_ms = {}, want {}",
+                f.monotonic_ms, w.monotonic_ms
+            ));
+        }
+        let p = f
+            .payload
+            .as_ref()
+            .ok_or_else(|| format!("record {i} has no decrypted payload"))?;
+        let r = payload::parse_time_observation(p).map_err(|e| format!("record {i}: {e}"))?;
+
+        if r.utc_ms != w.utc_ms {
+            return Err(format!(
+                "record {i} utc_ms = {}, want {}",
+                r.utc_ms, w.utc_ms
+            ));
+        }
+        // Absent is not zero: a source stating no accuracy is not one claiming
+        // perfect accuracy, so the sentinel must survive as None.
+        if r.accuracy_ms != w.accuracy_ms {
+            return Err(format!(
+                "record {i} accuracy_ms = {:?}, want {:?}",
+                r.accuracy_ms, w.accuracy_ms
+            ));
+        }
+        if r.source.name() != w.source {
+            return Err(format!(
+                "record {i} source = {}, want {}",
+                r.source.name(),
+                w.source
+            ));
+        }
+        if r.adopted != w.adopted {
+            return Err(format!(
+                "record {i} adopted = {}, want {}",
+                r.adopted, w.adopted
+            ));
+        }
+        match r.implied_basis_ms(f.monotonic_ms) {
+            Some(got) if got == w.implied_basis_ms => {}
+            Some(got) => {
+                return Err(format!(
+                    "record {i} implied_basis_ms = {got}, want {}",
+                    w.implied_basis_ms
+                ));
+            }
+            None => {
+                return Err(format!(
+                    "record {i} implied no basis: monotonic {} is later than utc {}",
+                    f.monotonic_ms, r.utc_ms
+                ));
+            }
+        }
+    }
+
+    let adopted = o.records.iter().filter(|r| r.adopted).count();
+    if adopted > 1 {
+        return Err(format!("{adopted} records claim to be the adopted basis"));
+    }
+
+    t.what.push("time observations");
     Ok(())
 }
 
