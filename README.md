@@ -1,5 +1,5 @@
 <!-- cairn-nav:start -->
-<p align="center"><b>Cairn is a family of five repositories.</b> Each builds, tests and releases on its own; they agree through the shared <a href="https://github.com/ParkWardRR/cairn-driving-log-selfhosted/tree/main/contracts">contracts</a>.</p>
+<p align="center"><b>Cairn is a family of six repositories.</b> Each builds, tests and releases on its own; they agree through the shared <a href="https://github.com/ParkWardRR/cairn-driving-log-selfhosted/tree/main/contracts">contracts</a>, and they share one <a href="https://github.com/ParkWardRR/cairn-driving-log-selfhosted/blob/main/ROADMAP.md">roadmap</a>.</p>
 
 | Part | Repository | What it does | Stack | Docs | Issues | CI |
 |---|---|---|---|---|---|---|
@@ -8,31 +8,69 @@
 | Phone | [cairn-ios-companion-app](https://github.com/ParkWardRR/cairn-ios-companion-app) | BLE relay, GPS assist, server client | Swift · SwiftUI | [docs](https://github.com/ParkWardRR/cairn-ios-companion-app/tree/main/docs) | [issues](https://github.com/ParkWardRR/cairn-ios-companion-app/issues) | [CI](https://github.com/ParkWardRR/cairn-ios-companion-app/actions) |
 | Server | [cairn-vehicle-server](https://github.com/ParkWardRR/cairn-vehicle-server) | Verifies, decrypts, stores; serves app and dashboard | Go | [docs](https://github.com/ParkWardRR/cairn-vehicle-server/tree/main/docs) | [issues](https://github.com/ParkWardRR/cairn-vehicle-server/issues) | [CI](https://github.com/ParkWardRR/cairn-vehicle-server/actions) |
 | Dashboard | [cairn-vehicle-web-dashboard](https://github.com/ParkWardRR/cairn-vehicle-web-dashboard) | Browser UI: trips, places, engine, health | Nuxt · TypeScript | [docs](https://github.com/ParkWardRR/cairn-vehicle-web-dashboard/tree/main/docs) | [issues](https://github.com/ParkWardRR/cairn-vehicle-web-dashboard/issues) | [CI](https://github.com/ParkWardRR/cairn-vehicle-web-dashboard/actions) |
+| Modules | [cairn-modules](https://github.com/ParkWardRR/cairn-modules) | Interpretation, separated from the logging core: one package per module | YAML · Rust | [readme](https://github.com/ParkWardRR/cairn-modules#readme) | [issues](https://github.com/ParkWardRR/cairn-modules/issues) | [CI](https://github.com/ParkWardRR/cairn-modules/actions) |
 
 <sub>Shared: [Roadmap](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/blob/main/ROADMAP.md) · [Install](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/blob/main/INSTALL.md) · [Architecture](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/blob/main/docs/architecture.md) · [Threat model](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/blob/main/docs/threat-model.md) · [Trust model](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/blob/main/docs/trust-model-v3.md) · [Contracts](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/tree/main/contracts) · [Archive of the original monorepo](https://github.com/ParkWardRR/cairn-original-monorepo-archive)</sub>
 <!-- cairn-nav:end -->
+<h1 align="center">Cairn ESP32 device firmware</h1>
+<p align="center"><strong>The firmware for the Cairn in-car dongle. It records your drives to an SD card as encrypted, tamper-evident bundles, and hands them to your own server — over Bluetooth through your phone, or by itself over cellular. It never deletes a trip until your server has signed for exactly that trip.</strong></p>
 
-# Cairn ESP32 device firmware
+<p align="center">
+  <a href="https://github.com/ParkWardRR/cairn-esp32-device-firmware/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/ParkWardRR/cairn-esp32-device-firmware/ci.yml?style=flat-square&label=CI" alt="CI"></a>
+  <a href="https://github.com/ParkWardRR/cairn-esp32-device-firmware/actions/workflows/interop.yml"><img src="https://img.shields.io/github/actions/workflow/status/ParkWardRR/cairn-esp32-device-firmware/interop.yml?style=flat-square&label=interop" alt="Interop"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Blue_Oak_1.0.0-2E86C1?style=flat-square" alt="Blue Oak Model License 1.0.0"></a>
+  <img src="https://img.shields.io/badge/target-ESP32_·_Freematics_ONE+-2E86C1?style=flat-square" alt="Freematics ONE+ (classic ESP32)">
+  <img src="https://img.shields.io/badge/contracts-v0.5.0-2E86C1?style=flat-square" alt="contracts-v0.5.0">
+  <img src="https://img.shields.io/badge/transports-BLE_·_LTE_·_Wi--Fi-27AE60?style=flat-square" alt="BLE, LTE and Wi-Fi">
+</p>
 
-**The firmware for the Cairn in-car dongle: it records your drives to an SD card as encrypted, tamper-evident bundles, and hands them to your phone over Bluetooth. It never deletes a trip until your own server has signed for it.**
+---
 
-[![CI](https://github.com/ParkWardRR/cairn-esp32-device-firmware/actions/workflows/ci.yml/badge.svg)](https://github.com/ParkWardRR/cairn-esp32-device-firmware/actions/workflows/ci.yml)
-[![Interop](https://github.com/ParkWardRR/cairn-esp32-device-firmware/actions/workflows/interop.yml/badge.svg)](https://github.com/ParkWardRR/cairn-esp32-device-firmware/actions/workflows/interop.yml)
-[![License: Blue Oak 1.0.0](https://img.shields.io/badge/license-Blue%20Oak%201.0.0-blue)](LICENSE)
-
-This repository is one of five that make up [Cairn](https://github.com/ParkWardRR/cairn-driving-log-selfhosted), a self-hosted car driving log. This one is the dongle. The system is:
+This repository is one of six that make up [Cairn](https://github.com/ParkWardRR/cairn-driving-log-selfhosted), a self-hosted car driving log. This one is the dongle — the part in the car. The system:
 
 ```mermaid
 flowchart LR
-    car["Car OBD-II port"] --> dongle["Dongle<br/>(this repository)"]
-    dongle -- "BLE" --> phone["iPhone app<br/>cairn-ios-companion-app"]
-    phone -- "authenticated upload" --> server["Your server<br/>cairn-vehicle-server"]
+    car["Car OBD-II port"] --> dongle["<b>Dongle</b><br/>(this repository)"]
+    dongle -- "BLE: sealed bundles" --> phone["iPhone app<br/>cairn-ios-companion-app"]
+    dongle -- "LTE: sealed bundles<br/>(no phone needed)" --> server["Your server<br/>cairn-vehicle-server"]
+    phone -- "authenticated upload" --> server
     server --> web["Web dashboard<br/>cairn-vehicle-web-dashboard"]
     server -. "signed receipt" .-> phone
     phone -. "receipt, over BLE" .-> dongle
+    server -. "signed receipt" .-> dongle
 ```
 
-Contents: [What it is](#what-the-dongle-is-and-is-not) | [Status](#status) | [Hardware](#hardware) | [Architecture](#architecture) | [Capture to bundle](#from-capture-to-a-sealed-bundle) | [BLE and offload](#ble-service-and-bundle-offload) | [Enrolment](#enrolment-and-provisioning) | [secrets.h](#secretsh) | [OTA and partitions](#ota-and-the-ab-partitions) | [Security](#security-posture) | [Engine profiles](#engine-profiles) | [Device info and boot timing](#device-info-and-boot-timing) | [Cores not yet wired](#host-tested-cores-that-are-not-wired-in-yet) | [Tests](#tests) | [Layout](#repository-layout) | [Build and flash](#build-flash-and-test) | [Configuration](#configuration) | [Troubleshooting](#troubleshooting) | [FAQ](#faq) | [Docs index](#docs-index) | [Contributing](#contributing) | [License](#license)
+Whichever path a bundle takes, the rule is the same: the carrier moves ciphertext it cannot read, and the dongle frees the card only on a receipt it has verified itself.
+
+**Contents:**
+[What it is](#what-the-dongle-is-and-is-not) ·
+[Status](#status) ·
+[Hardware](#hardware) ·
+[Architecture](#architecture) ·
+[Capture to bundle](#from-capture-to-a-sealed-bundle) ·
+[BLE and offload](#ble-service-and-bundle-offload) ·
+[Enrolment](#enrolment-and-provisioning) ·
+[secrets.h](#secretsh) ·
+[OTA and partitions](#ota-and-the-ab-partitions) ·
+[Security](#security-posture) ·
+[Engine profiles](#engine-profiles) ·
+[Device info and boot timing](#device-info-and-boot-timing) ·
+[Cores not yet wired](#host-tested-cores-that-are-not-wired-in-yet) ·
+[Tests](#tests) ·
+[Layout](#repository-layout) ·
+[Build and flash](#build-flash-and-test) ·
+[Configuration](#configuration) ·
+[Troubleshooting](#troubleshooting) ·
+[FAQ](#faq) ·
+[Docs index](#docs-index) ·
+[Contributing](#contributing) ·
+[License](#license)
+
+> **Where this is going** is not in this README. The project keeps **one** roadmap, for all six
+> repositories: [ROADMAP.md](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/blob/main/ROADMAP.md).
+> This repository's next work is [Phase 27](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/blob/main/ROADMAP.md#phase-27--a-trip-you-can-trust--in-progress)
+> (a trip you can trust — one drive away) and [Phase 28](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/blob/main/ROADMAP.md#phase-28--the-networked-dongle-finished--in-progress)
+> (the networked dongle, finished).
 
 ## What the dongle is, and is not
 
@@ -50,11 +88,15 @@ The phone sees only ciphertext and is trusted for availability, not for secrecy 
 
 ## Status
 
-Separating what is proven from what is only designed. "Hardware" means run on the one real dongle (ESP32 revision v1.0). Dates are from the docs in `docs/`; the front door's [ROADMAP](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/blob/main/ROADMAP.md) is the newer record.
+As of **2026-10-08**, separating what is **proven** on the one real dongle (ESP32 revision v1.0) from what is **built** and from what is only **designed**. A fix that has landed and has not been seen on a drive counts as built, not proven. The [roadmap](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/blob/main/ROADMAP.md#open-defects) tracks what closes each open item.
 
 | Area | State |
 |---|---|
-| Capture (OBD, GNSS, IMU), trip detection, pre-roll, sealing, storage self-checks | Shipped, with a known OBD sampling defect. Capture, seal and storage checks passed on the real dongle (2026-10-05, `docs/hardware-roundtrip.md`); a real drive informed the sampling constants. **But the 2026-10-07 drive captured only 239 OBD samples across 1002 s**: a quiet ECU made every PID read wait out its full 1000 ms timeout, ~9 per cycle, which blocked the sensing task (and so GNSS) for ~23 s at a time — 766 s of a 1002 s trip, in 25 outages. The IMU, read on its own path, kept sampling at ~8.5 Hz throughout. Bounded to ~700 ms per dead cycle in 0c55fb0; **not yet confirmed on a drive**, since bench power reports `obd=absent`. See [#37](https://github.com/ParkWardRR/cairn-esp32-device-firmware/issues/37) |
+| **Trip dates** | **Fixed, unverified.** Every trip on the server was dated 1970, from two defects in one path. The UTC basis lived only in RAM, and the dongle is bus-powered — switching the car off cuts power mid-capture, so a bundle is almost always sealed on a *later* boot after a resume, and a resume had nowhere to restore a basis from. It was also anchored at the wrong instant: readers reconstruct a wall clock as `utc_basis_ms + frame.monotonic_ms`, and this firmware writes device uptime into `monotonic_ms`, so the basis has to be UTC at monotonic **zero**, not UTC at the sample. Now a CRC'd `utcbasis.bin` sidecar beside the capture, and the subtraction lives in one place. One new storage-matrix row (41 → 42). Confirming it needs a drive with a GNSS fix ([#38](https://github.com/ParkWardRR/cairn-esp32-device-firmware/issues/38)) |
+| **Time from every source** | **Wired in.** GNSS (now repeated every 2 minutes rather than once), the cellular network (`AT+CCLK?` during link-up) and the phone (BLE `UTC_SYNC`) each emit a `TIME_OBSERVATION` record; the manifest basis stays first-wins and the records are the evidence trail. One plausibility floor for all three, applied where an observation becomes the basis rather than per source — because every clock here can lie in a way that parses: the SIM7600 answers with its 1980 build default before NITZ, and a GNSS receiver with no fix yields a flawless 2000-01-01. **No client writes `UTC_SYNC` yet**, so the phone source is wired and unexercised |
+| Capture (OBD, GNSS, IMU), trip detection, pre-roll, sealing, storage self-checks | Shipped, with a known OBD sampling defect. Capture, seal and storage checks passed on the real dongle (2026-10-05, `docs/hardware-roundtrip.md`); a real drive informed the sampling constants. **But the 2026-10-07 drive captured only 239 OBD samples across 1002 s**: a quiet ECU made every PID read wait out its full 1000 ms timeout, ~9 per cycle, which blocked the sensing task (and so GNSS) for ~23 s at a time — 766 s of a 1002 s trip, in 25 outages. The IMU, read on its own path, kept sampling at ~8.5 Hz throughout — which is how the blocked task was found at all: when one channel goes quiet, check whether its neighbours went quiet with it before suspecting the channel. Three fixes since: 350 ms per read with fail-fast after two consecutive misses (`0c55fb0`), a back-off while the ECU answers nothing (`1c887b7`), and **the six-PID batch is no longer discarded when it comes back partial or reordered** (`416c457`) — it demanded the full byte count *and* each PID in request order, so a reply carrying five of six failed entirely and fell back to six sequential requests, which is exactly the 1200 ms effective cadence the drive showed. **None of it is confirmed on a drive**, since bench power reports `obd=absent`. See [#37](https://github.com/ParkWardRR/cairn-esp32-device-firmware/issues/37) |
+| **Which engine profile produced a bundle** | **Stamped, and moving.** The seal writes `cairn-v2.0.0-dev+bmw-n20@400cbc` into the manifest's `firmware_version` — version, profile id and six hex digits of the profile's own SHA-256 — which uses 31 of 32 available bytes. `contracts-v0.5.0` adds manifest key 29 `engine_profile` as a first-class optional field, so the suffix is a stopgap ([#39](https://github.com/ParkWardRR/cairn-esp32-device-firmware/issues/39)). That the N20 profile really drove the 2026-10-07 drive was verified from the data, not assumed: all ten cold slots populated 16–24 times each across 239 cycles, `poll_cadence_ms` only ever 1200 or 200, and `lambda_e4` peaking at exactly 19999, the formula's ceiling |
+| **Wide-open throttle is not readable from the current PID set** | `throttle_pct` is PID 0x11, the throttle *plate* angle. On this drive-by-wire N20 it peaked at 77% across a whole drive and read **32–34% during the one confirmed 8.6 psi boost event**, so a pull cannot be identified from it. Pedal position (0x49/0x4A) is in the `env:cairn-pidtest` probe list but **not** in the profile's `pids`, because whether this DME answers is unknown. Generic OBD also has no "max this trip" PID — 0x4F reports the ceiling of the *reporting range*, not a recorded peak — so maxima have to come from sample density |
 | Bundle format v3 (AEAD frames, hash chain, signed manifest) | Shipped. Byte-exact with the Go reference and the independent Rust implementation on the pinned vectors (host) |
 | Crash recovery (torn tails, interrupted seals and prunes) | Host-tested with fault injection; also exercised by pulling power on the bench |
 | BLE service: phone GNSS in, quality and status out | Shipped in every build |
@@ -65,7 +107,7 @@ Separating what is proven from what is only designed. "Hardware" means run on th
 | Flash encryption, NVS encryption, Secure Boot | **Not enabled, and not enactable on this unit**: each is an eFuse burn, the only dongle may not take one, and Secure Boot V2 is not available on this chip revision at all. A plan for other hardware, not a feature |
 | Standby (parked low power) | Implemented; the current draw has **not been measured** |
 | Engine profiles (`engines/`, `tools/enginegen`, `lib/cairn_engine`) | **Wired in.** The OBD request, value conversion, cadence, engine-on voltage and standby and drive-confirmation dwells come from the active profile. The BMW N20 profile is `derived` and proven equal to the previously hard-coded values; the B58 profile is a `stub` (identity only). The schema and formula language are a **draft** |
-| Device information over BLE (`DEVICE_INFO`, characteristic `0040`) | **Wired in** and host-tested against the contract's vectors (contracts-v0.2.0, draft). Not yet read by a phone from a real unit |
+| Device information over BLE (`DEVICE_INFO`, characteristic `0040`) | **Wired in** and host-tested against the contract's vectors. `DEVICE_INFO` left draft in `contracts-v0.4.0` — four implementations agree on it. Not yet read by a phone from a real unit |
 | Boot timing record | **Wired in** (marks in `setup()` and the lifecycle, logged on the console and SD log, carried in device info). **Not measured** on the unit: no numbers and no budget exist |
 | Signed check-in instructions and the home trigger (`lib/cairn_checkin`) | **Host-tested only.** Needs a pinned instruction key that is not in `secrets.h` yet, and its GATT characteristics are not created |
 | Configuration receiver (`lib/cairn_config`) | **Host-tested only, provisional.** The config contract is unreleased; credentials are refused until a credential store exists |
@@ -514,7 +556,7 @@ These modules are built, tested on the host and documented, but nothing in `src/
 
 ### Check-in: signed instructions and the home trigger
 
-`lib/cairn_checkin` implements `contracts/ble/v1/checkin.md` (draft, contracts-v0.2.0; [docs/check-in.md](docs/check-in.md)). When the dongle is back on BLE after a Wi-Fi slot the phone may deliver a small closed set of instructions: `UPLOAD_NOW`, `STOP_TRYING` (1 to 168 hours), `CLEAR_STOP` and `CONFIG`, each signed by the **server** with an instruction key pinned in firmware. The phone only carries them and cannot forge, alter or replay one. An unsigned 6-byte `HOME_TRIGGER` ("you may use Wi-Fi now") is accepted separately, for at most 900 s, never during a trip, and held in RAM only.
+`lib/cairn_checkin` implements `contracts/ble/v1/checkin.md` (still draft; [docs/check-in.md](docs/check-in.md)). When the dongle is back on BLE after a Wi-Fi slot the phone may deliver a small closed set of instructions: `UPLOAD_NOW`, `STOP_TRYING` (1 to 168 hours), `CLEAR_STOP` and `CONFIG`, each signed by the **server** with an instruction key pinned in firmware. The phone only carries them and cannot forge, alter or replay one. An unsigned 6-byte `HOME_TRIGGER` ("you may use Wi-Fi now") is accepted separately, for at most 900 s, never during a trip, and held in RAM only.
 
 ```mermaid
 flowchart LR
@@ -604,7 +646,7 @@ flowchart LR
 | `offload` | The offload module over real sealed bundles: framing, refusals, MTU, stalls, and the receipt gate under attack (forged receipt, genuine receipt for the wrong bundle, no overwrite of a stored receipt) |
 | `mtprobe` | Reply parsing for the manual-transmission probe |
 | `engine` | The formula evaluator against `engines/vectors`, the generated N20 tables against the previously hard-coded values (every input byte), and the vehicle gate; run against the committed all-engines tables and, in `make engines-check`, against each selection a build can produce |
-| `devinfo`, `checkin` | `DEVICE_INFO`, `UPLINK_EVENT`, instructions and the home trigger against the contract's vectors (`ble/v1/vectors/device-info`, from contracts-v0.2.0). The rows are skipped, with a message, on a contracts pin that lacks them |
+| `devinfo`, `checkin` | `DEVICE_INFO`, `UPLINK_EVENT`, instructions and the home trigger against the contract's vectors (`ble/v1/vectors/device-info`). The rows are skipped, with a message, on a contracts pin that lacks them |
 | `boottime`, `uplink`, `config` | The boot record and budget check, the uplink schedule and its safety rules, and the configuration receiver, over synthetic inputs (their contracts are unreleased) |
 | `digest`, `usage` | The digest reducer and byte budget, the rule that a digest acknowledgement is not a receipt (against the real prune gate), data accounting, caps, power-cut persistence and the retry breaker. Provisional: synthetic data, no contract vectors |
 | `interop-writer` | Seals bundles with the C store and format code and leaves them for the server's Go verifier to judge |
@@ -647,7 +689,7 @@ flowchart LR
 | `tests/` | Checks that CI jobs stay on the self-hosted runner |
 | `MIGRATION.md` | Where this repository came from |
 
-**Contracts.** The format, enrolment and BLE protocols are specified, with vectors, in [Cairn Vehicle Data Protocols](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/tree/main/contracts). `contracts.lock` pins a release by tag and commit (currently `contracts-v0.2.0`, with format v3, enrolment v1 and BLE v1); both are verified, so a moved tag cannot change what this builds against. `CAIRN_CONTRACTS=<dir>` overrides it for changing a contract and the firmware together; `scripts/fetch-contracts.sh --release` refuses the override and a dirty tree.
+**Contracts.** The format, enrolment and BLE protocols are specified, with vectors, in [Cairn Vehicle Data Protocols](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/tree/main/contracts). `contracts.lock` pins a release by tag and commit (currently **`contracts-v0.5.0`**, with format v3, enrolment v1, ble v1 and engine v1); both are verified, so a moved tag cannot change what this builds against. The engine schema now lives in the contracts repository and no copy is kept here, so **a firmware change that needs a new capture field is gated on a maintainer tagging a contracts release** — `make engines-check` fails until then. `CAIRN_CONTRACTS=<dir>` overrides it for changing a contract and the firmware together; `scripts/fetch-contracts.sh --release` refuses the override and a dirty tree.
 
 ## Build, flash and test
 
@@ -782,6 +824,15 @@ The security condition did not get met; it got **traded, knowingly**. The origin
 | [research/](research/) | BMW N20 PID support and formulas; Freematics parked-drain notes and report |
 | [MIGRATION.md](MIGRATION.md) | How this repository was extracted from the original monorepo |
 
+## Related repositories
+
+- [cairn-driving-log-selfhosted](https://github.com/ParkWardRR/cairn-driving-log-selfhosted): the front door — system docs, the one [roadmap](https://github.com/ParkWardRR/cairn-driving-log-selfhosted/blob/main/ROADMAP.md), and the shared contracts this firmware pins
+- [cairn-vehicle-server](https://github.com/ParkWardRR/cairn-vehicle-server): the server, the relay and the tools that talk to this dongle (`cairn-provision`, `cairn-signfw`, `cairn-verify`, `cairn-phone`)
+- [cairn-vehicle-web-dashboard](https://github.com/ParkWardRR/cairn-vehicle-web-dashboard): the web dashboard
+- [cairn-ios-companion-app](https://github.com/ParkWardRR/cairn-ios-companion-app): the iPhone app — the BLE peer on the other end of the offload
+- [cairn-modules](https://github.com/ParkWardRR/cairn-modules): the modules, whose declared PIDs `enginegen` will merge into a profile
+- [cairn-original-monorepo-archive](https://github.com/ParkWardRR/cairn-original-monorepo-archive): the archived original monorepo
+
 ## Contributing
 
 - Work on a branch of this repository and open a pull request to `main`. CI runs only for branches of this repository, on the self-hosted runner.
@@ -790,16 +841,9 @@ The security condition did not get met; it got **traded, knowingly**. The origin
 - Protocol changes are contract-first: change the contracts and their vectors in the front door repository, then bump `contracts.lock`. A firmware-only change to a wire format is a bug.
 - Never commit `include/secrets.h`, real keys, hostnames, device ids or card images. Keep placeholders in every tracked file.
 - Do not enable eFuse-burning options (flash encryption release mode, secure boot) in any build.
-- Keep this README honest: separate shipped, host-tested only and planned.
+- Keep this README honest: separate proven on hardware, built and host-tested only, and designed.
+- **Do not add a roadmap here.** The project keeps one, in the front door repository. This README says what the firmware is and what it has running; the plan lives there.
 
 ## License
 
 [Blue Oak Model License 1.0.0](LICENSE). The vendored Freematics drivers under `third_party/freematics-base/` are third-party code under their own licenses (the Freematics sources are marked BSD; the bundled TinyGPS is LGPL 2.1 or later); see the headers in those files. The Ed25519 field arithmetic in `lib/cairn_format/cf_ed25519.c` is adapted from the public-domain TweetNaCl.
-
-## Related repositories
-
-- [cairn-driving-log-selfhosted](https://github.com/ParkWardRR/cairn-driving-log-selfhosted): the front door, system docs, roadmap and the shared contracts
-- [cairn-vehicle-server](https://github.com/ParkWardRR/cairn-vehicle-server): the server, relay and tools (`cairn-provision`, `cairn-signfw`, `cairn-verify`)
-- [cairn-vehicle-web-dashboard](https://github.com/ParkWardRR/cairn-vehicle-web-dashboard): the web dashboard
-- [cairn-ios-companion-app](https://github.com/ParkWardRR/cairn-ios-companion-app): the iPhone app
-- [cairn-original-monorepo-archive](https://github.com/ParkWardRR/cairn-original-monorepo-archive): the archived original monorepo
