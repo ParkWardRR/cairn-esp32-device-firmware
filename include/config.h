@@ -405,6 +405,26 @@
  */
 #define CAIRN_TIME_OBS_PERIOD_MS 120000u
 
+/*
+ * The earliest wall clock any source is allowed to claim: 2020-01-01T00:00:00Z.
+ *
+ * Checked once, where an observation is turned into the bundle's time basis,
+ * rather than three times in three source drivers that can drift apart. Every
+ * clock on this device can lie in a way that parses:
+ *
+ *   - the SIM7600 answers AT+CCLK? with its build default in 1980 before the
+ *     network has told it anything
+ *   - a GNSS receiver can report a date before it has a fix, and the two-digit
+ *     year means yy=00 reads as a perfectly valid 2000-01-01
+ *   - a phone with no clock, or a malformed 8-byte write, is whatever those
+ *     bytes happen to say
+ *
+ * A plausible wrong date is worse than an admitted absence, because it becomes
+ * the basis every sample in the bundle is timed against and nothing downstream
+ * can tell. DEGRADED_TIME and a 1970 date are at least honest.
+ */
+#define CAIRN_TIME_PLAUSIBLE_FLOOR_MS 1577836800000ULL
+
 /* Associating is bounded separately: a network that is not there should cost
  * seconds, not the whole slot. */
 #define CAIRN_UPLINK_ASSOCIATE_MS 25000u

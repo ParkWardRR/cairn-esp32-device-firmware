@@ -621,6 +621,27 @@ static void on_time_observation(Lifecycle *lc, const fact_t *f)
      * monotonic_ms is the basis that source implies, so a consumer can compare
      * them and pick without the device having to guess.
      */
+    /*
+     * One plausibility floor for every source, here at the point of adoption.
+     *
+     * Each driver has its own reason to produce a date that parses and is wrong
+     * by decades -- see CAIRN_TIME_PLAUSIBLE_FLOOR_MS -- and the GNSS path is the
+     * one that actually runs on every drive: its two-digit year means a receiver
+     * reporting yy=00 before it has a fix yields a flawless 2000-01-01. Checking
+     * once here rather than in three drivers means a new source cannot be added
+     * without the guard, and the guard cannot drift between them.
+     *
+     * Refused rather than recorded-but-not-adopted: an impossible date is noise,
+     * not evidence, and leaving it in the bundle invites a consumer to pick it.
+     */
+    if (f->data.utc.utc_ms < CAIRN_TIME_PLAUSIBLE_FLOOR_MS) {
+        CAIRN_LOGW(TAG, "time observation from source %u is %llu ms, before the "
+                        "plausible floor; refused",
+                   (unsigned)f->data.utc.source,
+                   (unsigned long long)f->data.utc.utc_ms);
+        return;
+    }
+
     const bool adopt = !lc->have_utc_basis;
 
     cairn_time_observation_t obs;
