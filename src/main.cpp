@@ -577,8 +577,25 @@ void setup()
     delay(300);
 #endif
 
-    CAIRN_LOGI(TAG, "Cairn %s, policy v%d, built %s %s", CAIRN_FIRMWARE_VERSION,
-               CAIRN_POLICY_VERSION, __DATE__, __TIME__);
+    /* Which build this is, on the first line a person reads. The channel, the commit and
+     * the dirty marker come from scripts/build_identity.py; a build made by hand says dev
+     * and names no commit, which is the honest answer rather than a flattering one. */
+#ifndef CAIRN_CHANNEL
+#define CAIRN_CHANNEL "dev"
+#endif
+#ifdef CAIRN_GIT_COMMIT_HEX
+#define CAIRN_COMMIT_STR CAIRN_GIT_COMMIT_HEX
+#else
+#define CAIRN_COMMIT_STR "not recorded"
+#endif
+#ifdef CAIRN_BUILD_DIRTY
+#define CAIRN_DIRTY_STR " dirty"
+#else
+#define CAIRN_DIRTY_STR ""
+#endif
+    CAIRN_LOGI(TAG, "Cairn %s (%s%s), policy v%d, commit %s, built %s %s",
+               CAIRN_FIRMWARE_VERSION, CAIRN_CHANNEL, CAIRN_DIRTY_STR,
+               CAIRN_POLICY_VERSION, CAIRN_COMMIT_STR, __DATE__, __TIME__);
     CAIRN_LOGI(TAG, "wake cause %d, free heap %u bytes",
                (int)esp_sleep_get_wakeup_cause(), (unsigned)ESP.getFreeHeap());
     log_partition_state();
