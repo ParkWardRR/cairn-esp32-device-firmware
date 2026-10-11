@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "cairn_blesec.h"
+#include "cairn_prov.h"
 #include "cairn_engine.h"
 #include "cairn_format.h"
 #include "cairn_log.h"
@@ -176,6 +177,10 @@ class UtcSyncCallbacks : public NimBLECharacteristicCallbacks {
     }
 };
 
+/* Set from the main loop, alongside prov_console_poll's own trip flag. Only read when a
+ * pairing fails, to decide whether recovering a stale bond is allowed right now. */
+static volatile bool s_trip_active = false;
+
 class ServerCallbacks : public NimBLEServerCallbacks {
     void onConnect(NimBLEServer *server, NimBLEConnInfo &info) override {
         s_conn_handle       = info.getConnHandle();
@@ -237,7 +242,30 @@ class ServerCallbacks : public NimBLEServerCallbacks {
 
     void onAuthenticationComplete(NimBLEConnInfo &info) override {
         if (!info.isEncrypted()) {
-            CAIRN_LOGW(TAG, "pairing failed; disconnecting");
+            /*
+             * Pairing failed, so the two halves of the bond disagree. Recovering here is the
+             * only place it can be done: the disconnect below is ours, and comes back to
+             * onDisconnect as "terminated by local host", which is deliberately not one of the
+             * peer-lost-keys reasons. Before this, that left the dongle unable to pair at all
+             * until it was reflashed with a changed passkey (#44).
+             *
+             * The guards live in cairn_blesec.h and are host-tested; they are what stops this
+             * becoming "any stranger in range can evict the owner's bond".
+             */
+            cairn_ble_pair_failure_t f;
+            f.bonds_held  = NimBLEDevice::getNumBonds();
+            f.uptime_ms   = (uint32_t)millis();
+            f.trip_active = s_trip_active ? 1 : 0;
+
+            const cairn_ble_pair_failure_action_t action =
+                cairn_ble_pair_failure_action(&f, CAIRN_PROV_WINDOW_MS);
+
+            CAIRN_LOGW(TAG, "pairing failed after %u ms with %d bond(s); %s",
+                       (unsigned)f.uptime_ms, f.bonds_held,
+                       cairn_ble_pair_failure_reason(action));
+
+            if (action == CAIRN_BLE_DROP) ble_companion_clear_bonds();
+
             s_server->disconnect(info.getConnHandle());
             return;
         }
@@ -289,6 +317,11 @@ static void clear_bonds_if_pairing_changed(uint8_t authreq, uint8_t io_cap, uint
 int ble_companion_bond_count(void)
 {
     return NimBLEDevice::getNumBonds();
+}
+
+void ble_companion_set_trip_active(bool active)
+{
+    s_trip_active = active;
 }
 
 void ble_companion_clear_bonds(void)

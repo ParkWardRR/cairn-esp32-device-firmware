@@ -34,6 +34,7 @@
 #include "cairn_store.h"
 #include "config.h"
 #include "lifecycle.h"
+#include "ble_companion.h"
 #include "prov_console.h"
 #include "pidtest.h"
 #include "sensors.h"
@@ -677,7 +678,9 @@ void loop()
     lifecycle_tick(g_lifecycle);
 
     /* Provisioning is refused whenever the controller is past Idle. */
-    prov_console_poll(g_lifecycle->capture != CaptureState::Idle);
+    const bool trip_active = g_lifecycle->capture != CaptureState::Idle;
+    ble_companion_set_trip_active(trip_active);
+    prov_console_poll(trip_active);
 
 #if CAIRN_PIDTEST
     pidtest_tick();
