@@ -260,8 +260,16 @@ class ServerCallbacks : public NimBLEServerCallbacks {
             const cairn_ble_pair_failure_action_t action =
                 cairn_ble_pair_failure_action(&f, CAIRN_PROV_WINDOW_MS);
 
-            CAIRN_LOGW(TAG, "pairing failed after %u ms with %d bond(s); %s",
+            /* The security state as the controller sees it, so a failure says what it got to
+             * rather than only that it failed. A link that is bonded-but-not-encrypted points
+             * at a key the two sides disagree about; everything zero means the procedure never
+             * produced anything. Key size is 0 or the negotiated LTK length. */
+            CAIRN_LOGW(TAG, "pairing failed after %u ms with %d bond(s) "
+                            "[enc=%d auth=%d bonded=%d keysize=%u mtu=%u]; %s",
                        (unsigned)f.uptime_ms, f.bonds_held,
+                       (int)info.isEncrypted(), (int)info.isAuthenticated(),
+                       (int)info.isBonded(), (unsigned)info.getSecKeySize(),
+                       (unsigned)info.getMTU(),
                        cairn_ble_pair_failure_reason(action));
 
             if (action == CAIRN_BLE_DROP) ble_companion_clear_bonds();
