@@ -381,11 +381,15 @@ static bool build_gatt_and_advertise(void)
         NIMBLE_PROPERTY::WRITE_ENC);
     chr_fix->setCallbacks(&s_gnss_fix_cbs);
 
+    /* No WRITE_AUTHEN. 5ec8028 dropped the AUTHEN flags from seven characteristics because
+     * this build pairs Just Works (mitm: 0, BLE_HS_IO_NO_INPUT_OUTPUT) and Just Works cannot
+     * produce an authenticated link — so an AUTHEN flag is not protection here, it is a
+     * requirement nothing can satisfy. This one was missed, and it is the last of them.
+     * Restore it together with MITM + DISPLAY_ONLY (#5), not before. */
     NimBLECharacteristic *chr_engine = svc->createCharacteristic(
         "A8E30004-4F5B-11EF-A017-325096B39F47",
         NIMBLE_PROPERTY::WRITE_NR |
-        NIMBLE_PROPERTY::WRITE_ENC |
-        NIMBLE_PROPERTY::WRITE_AUTHEN);
+        NIMBLE_PROPERTY::WRITE_ENC);
     chr_engine->setCallbacks(&s_engine_decl_cbs);
 
     NimBLECharacteristic *chr_utc = svc->createCharacteristic(
