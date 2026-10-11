@@ -1,5 +1,12 @@
 # Cairn v2 firmware — flashing and bench testing
 
+> **"v2" here means the second-generation firmware application, and nothing else.** Three
+> numbers are easy to confuse: this application generation (v2), the **bundle format**
+> (**v3** since 2026-10-04) and the firmware **version** (**`cairn-v0.1.0`**, channel
+> `stable`, since 2026-10-10). The file keeps its name so existing links still resolve.
+> For how a release is built and flashed, see the README's
+> [Releases](../README.md#releases) section.
+
 For the hardware profile, the serial adapter wiring and the pin-level details,
 see [flashing-and-testing.md](flashing-and-testing.md). This document covers
 only what is different about the v2 firmware.
@@ -255,7 +262,7 @@ The self-test image checks the things that silently make a drive worthless, then
 halts instead of capturing. Expected output:
 
 ```
- BOOT INFO  Cairn cairn-v2.0.0, policy v1, built ...
+ BOOT INFO  Cairn cairn-v0.1.0 (stable), policy v1, commit 26acdbbab48c58c7, built ...
  BOOT INFO  running from app0 at 0x010000 (1728 KiB)
  BOOT INFO  SD mounted: 30436 MiB total, 12 MiB used
  LOG  INFO  SD sink attached: /cairn/logs/boot-000001-000.log (boot 1, ...)
@@ -374,7 +381,7 @@ reports:
 ```
 OK  /Volumes/card/cairn/bundles/01J...
   bundle       0000000000005d9e88204a5ce12f2bc0
-  device       8777228e31648b23f6f783d28eee3e26  firmware cairn-v2.0.0
+  device       8777228e31648b23f6f783d28eee3e26  firmware cairn-v0.1.0
   content root 77db4376f36801c4230a91a47c22dec6...
   recovery     clean
   seg-00000000.seg     EOF            1042 frame(s)  seq 0..1041
