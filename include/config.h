@@ -244,6 +244,20 @@
 #define CAIRN_START_DWELL_MS            3000
 #define CAIRN_STOP_DWELL_MS             120000 /* 2 min of stillness ends a trip */
 
+/*
+ * The re-entry dwell prevents a single accelerometer spike from bouncing
+ * Trailing back to Active. Without it the Active<->Trailing oscillation
+ * runs at tick rate (~200 ms) and the stop dwell never accumulates, so
+ * intermediate stops (Costco, golf course) never produce a Trailing->Idle
+ * transition. Measured on the 2026-10-12 drive: 194 flaps, zero leg
+ * boundaries.
+ *
+ * 2 seconds is long enough to reject engine-idle vibration spikes (which
+ * last one or two ticks) but short enough that a genuine departure from a
+ * traffic light is detected within 2 s.
+ */
+#define CAIRN_TRAILING_REENTRY_DWELL_MS 2000
+
 /* Motion evidence thresholds. */
 #define CAIRN_MOTION_ACCEL_RMS_MG   120
 #define CAIRN_MOTION_SPEED_CMPS     280  /* ~10 km/h */

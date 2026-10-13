@@ -1457,9 +1457,12 @@ void lifecycle_tick(Lifecycle *lc)
         break;
 
     case CaptureState::Trailing:
-        if (lc->motion_since_ms != 0) {
-            /* Moving again before the dwell expired: the same trip continues
-             * rather than being split at every traffic light. */
+        if (lc->motion_since_ms != 0 &&
+            now - lc->motion_since_ms >= CAIRN_TRAILING_REENTRY_DWELL_MS) {
+            /* Moving again before the stop dwell expired: the same trip
+             * continues. The re-entry dwell requires sustained motion so
+             * a single accelerometer spike from engine vibration does not
+             * bounce the state back to Active and reset the stop dwell. */
             set_capture_state(lc, CaptureState::Active, 1, 1);
         } else if (lc->still_since_ms != 0 &&
                    now - lc->still_since_ms >= CAIRN_STOP_DWELL_MS) {
