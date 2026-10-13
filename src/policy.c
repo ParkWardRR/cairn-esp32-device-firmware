@@ -147,11 +147,12 @@ bool cairn_policy_decode(const uint8_t *buf, size_t len, cairn_policy_t *out)
 const char *cairn_dynamics_name(cairn_dynamics_t d)
 {
     switch (d) {
-    case CAIRN_DYN_IDLE:   return "IDLE";
-    case CAIRN_DYN_CRUISE: return "CRUISE";
-    case CAIRN_DYN_ACTIVE: return "ACTIVE";
-    case CAIRN_DYN_EVENT:  return "EVENT";
-    default:               return "?";
+    case CAIRN_DYN_IDLE:      return "IDLE";
+    case CAIRN_DYN_CRUISE:    return "CRUISE";
+    case CAIRN_DYN_ACTIVE:    return "ACTIVE";
+    case CAIRN_DYN_EVENT:     return "EVENT";
+    case CAIRN_DYN_OVERDRIVE: return "OVERDRIVE";
+    default:                  return "?";
     }
 }
 
@@ -240,6 +241,12 @@ void cairn_policy_rates(const cairn_policy_t *p, cairn_dynamics_t d,
         out->gnss_period_ms = (uint16_t)(p->gnss_period_ms / 4);
         out->imu_window_ms  = (uint16_t)(p->imu_window_ms / 4);
         out->obd_period_ms  = (uint16_t)(p->obd_period_ms / 2);
+        break;
+
+    case CAIRN_DYN_OVERDRIVE:
+        out->gnss_period_ms = CAIRN_FLOOR_GNSS_PERIOD_MS;
+        out->imu_window_ms  = CAIRN_FLOOR_IMU_WINDOW_MS;
+        out->obd_period_ms  = CAIRN_FLOOR_OBD_PERIOD_MS;
         break;
     }
 

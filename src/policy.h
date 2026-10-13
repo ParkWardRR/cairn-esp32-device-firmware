@@ -102,6 +102,7 @@ typedef enum {
     CAIRN_DYN_CRUISE,     /* moving steadily; nominal rates resolve this fine */
     CAIRN_DYN_ACTIVE,     /* accelerating, braking or turning */
     CAIRN_DYN_EVENT,      /* a sharp transient worth resolving in detail */
+    CAIRN_DYN_OVERDRIVE,  /* phone on charger: every sensor at its floor rate */
 } cairn_dynamics_t;
 
 const char *cairn_dynamics_name(cairn_dynamics_t d);

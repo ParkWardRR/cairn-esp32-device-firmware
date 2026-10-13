@@ -29,6 +29,8 @@ void ble_companion_notify_quality(uint8_t fix_type, uint8_t sats_used,
                                   uint16_t hdop_e2, uint32_t fix_age_ms);
 void ble_companion_notify_status(void);
 
+bool ble_companion_phone_charging(void);
+
 #else
 
 static inline bool ble_companion_begin(void) { return true; }
@@ -43,6 +45,7 @@ static inline void ble_companion_notify_quality(uint8_t a, uint8_t b,
     (void)a; (void)b; (void)c; (void)d;
 }
 static inline void ble_companion_notify_status(void) {}
+static inline bool ble_companion_phone_charging(void) { return false; }
 
 #endif
 

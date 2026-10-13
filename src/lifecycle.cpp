@@ -1352,6 +1352,9 @@ void lifecycle_tick(Lifecycle *lc)
         cairn_dynamics_t d = cairn_policy_classify(&lc->policy,
                                                    lc->last_accel_rms_mg, speed,
                                                    delta, trip_active);
+        if (trip_active && ble_companion_phone_charging())
+            d = CAIRN_DYN_OVERDRIVE;
+
         if (d != lc->dynamics) {
             CAIRN_LOGD(TAG, "dynamics %s -> %s", cairn_dynamics_name(lc->dynamics),
                        cairn_dynamics_name(d));

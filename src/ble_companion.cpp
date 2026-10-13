@@ -40,6 +40,9 @@ static uint16_t s_queue_drop_count  = 0;
 static uint16_t s_last_seq          = 0;
 static bool     s_have_seq          = false;
 
+#define CAIRN_COMPANION_FLAG_CHARGING 0x01
+static volatile uint8_t s_companion_flags = 0;
+
 static inline int32_t rd_i32(const uint8_t *p) {
     return (int32_t)((uint32_t)p[0] | (uint32_t)p[1] << 8 |
                      (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24);
@@ -95,6 +98,8 @@ class GnssFixCallbacks : public NimBLECharacteristicCallbacks {
         g->source_flags = CAIRN_SOURCE_PHONE;
         g->utc_offset_ms = 0;
         g->utc_acc_ms    = CAIRN_U16_UNKNOWN;
+
+        s_companion_flags = d[26];
 
         if (sensor_task_post_fact(&f)) {
             s_last_seq          = seq;
@@ -197,8 +202,9 @@ class ServerCallbacks : public NimBLEServerCallbacks {
 
     void onDisconnect(NimBLEServer *server, NimBLEConnInfo &info,
                       int reason) override {
-        s_connected   = false;
-        s_conn_handle = 0xFFFF;
+        s_connected       = false;
+        s_conn_handle     = 0xFFFF;
+        s_companion_flags = 0;
         cairn_engine_set_ble_declaration(NULL); /* clear stale engine declaration */
         ble_offload_on_disconnect();
         CAIRN_LOGI(TAG, "companion disconnected (reason %d)", reason);
@@ -454,6 +460,11 @@ static bool build_gatt_and_advertise(void)
 }
 
 bool ble_companion_connected(void) { return s_connected; }
+
+bool ble_companion_phone_charging(void)
+{
+    return s_connected && (s_companion_flags & CAIRN_COMPANION_FLAG_CHARGING) != 0;
+}
 
 void ble_companion_notify_quality(uint8_t fix_type, uint8_t sats_used,
                                   uint16_t hdop_e2, uint32_t fix_age_ms)
