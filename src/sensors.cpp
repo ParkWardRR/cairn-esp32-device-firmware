@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <FreematicsPlus.h>
+#include <Preferences.h>
 #include <math.h>
 
 #include "cairn_engine.h"
@@ -245,6 +246,58 @@ static void init_imu(SensorStatus *status)
     }
 }
 
+/* ── GNSS aiding (hot/warm start) ────────────────────────────────────────── */
+
+static void ubx_checksum(const uint8_t *msg, int len, uint8_t *ck_a, uint8_t *ck_b)
+{
+    uint8_t a = 0, b = 0;
+    for (int i = 2; i < len; i++) { a += msg[i]; b += a; }
+    *ck_a = a;
+    *ck_b = b;
+}
+
+static void send_gnss_aiding(void)
+{
+    Preferences prefs;
+    if (!prefs.begin("cairn_gnss", true)) return;
+
+    int32_t lat = prefs.getInt("lat", 0);
+    int32_t lon = prefs.getInt("lon", 0);
+    int32_t alt = prefs.getInt("alt", 0);
+    uint32_t age = millis() - prefs.getUInt("mono", 0);
+    prefs.end();
+
+    if (lat == 0 && lon == 0) return;
+    if (age > 24UL * 3600UL * 1000UL) return;
+
+    /* UBX-MGA-INI-POS_LLH: class 0x13, id 0x40, length 20. */
+    uint8_t msg[28];
+    msg[0] = 0xB5; msg[1] = 0x62;
+    msg[2] = 0x13; msg[3] = 0x40;
+    msg[4] = 20; msg[5] = 0;
+    msg[6] = 0x01;  /* type = LLH */
+    msg[7] = 0x00;  /* version */
+    msg[8] = 0x00; msg[9] = 0x00;  /* reserved */
+    memcpy(&msg[10], &lat, 4);
+    memcpy(&msg[14], &lon, 4);
+    memcpy(&msg[18], &alt, 4);
+    uint32_t acc = 100000;  /* 1 km accuracy in cm */
+    memcpy(&msg[22], &acc, 4);
+    ubx_checksum(msg, 26, &msg[26], &msg[27]);
+
+    if (s_sys.link == nullptr) return;
+
+    char cmd[64];
+    strcpy(cmd, "ATGDS");
+    for (int i = 0; i < 28; i++) sprintf(cmd + strlen(cmd), "%02X", msg[i]);
+    strcat(cmd, "\r");
+
+    char resp[32];
+    s_sys.link->sendCommand(cmd, resp, sizeof(resp), 100);
+    CAIRN_LOGI(TAG, "sent GNSS aiding: lat=%d lon=%d alt=%d cm (age %u s)",
+               lat, lon, alt, (unsigned)(age / 1000));
+}
+
 static void init_gnss(SensorStatus *status)
 {
     if (s_sys.gpsBeginExt()) {
@@ -253,6 +306,7 @@ static void init_gnss(SensorStatus *status)
     } else if (s_sys.gpsBegin()) {
         status->gnss = true;
         CAIRN_LOGI(TAG, "GNSS ready (internal)");
+        send_gnss_aiding();
     } else {
         status->gnss = false;
         CAIRN_LOGW(TAG, "GNSS not available");
@@ -1248,6 +1302,19 @@ uint16_t sensors_supply_mv_raw(void)
     return 0;
 }
 
+void sensors_gnss_save_aiding(const cairn_gnss_sample_t *fix)
+{
+    if (fix == nullptr || (fix->lat_e7 == 0 && fix->lon_e7 == 0)) return;
+
+    Preferences prefs;
+    if (!prefs.begin("cairn_gnss", false)) return;
+    prefs.putInt("lat", fix->lat_e7);
+    prefs.putInt("lon", fix->lon_e7);
+    prefs.putInt("alt", fix->alt_cm);
+    prefs.putUInt("mono", millis());
+    prefs.end();
+}
+
 void sensors_gnss_power_down(void)
 {
     if (s_status == NULL || !s_status->gnss) return;
@@ -1256,8 +1323,6 @@ void sensors_gnss_power_down(void)
     s_status->gnss = false;
     s_gps = NULL;
 
-    /* Marked unavailable rather than merely idle, so the degraded-state bitmap
-     * reports DEGRADED_GNSS honestly for as long as it is off. */
     CAIRN_LOGI(TAG, "GNSS powered down for standby");
 }
 

@@ -169,6 +169,8 @@ int  sensors_obd_receive(char *buf, size_t cap, uint32_t timeout_ms);
 bool sensors_obd_recover(void);
 #endif
 
+void sensors_gnss_save_aiding(const cairn_gnss_sample_t *fix);
+
 /* Battery voltage in millivolts, read through the coprocessor. */
 uint16_t sensors_battery_mv(void);
 

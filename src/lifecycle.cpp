@@ -1174,6 +1174,9 @@ static void maybe_standby(Lifecycle *lc)
                     CAIRN_POWER_STATE_STANDBY, CAIRN_TRIGGER_POWER, 0);
     cairn_log_flush();
 
+    if (lc->have_recent_gnss)
+        sensors_gnss_save_aiding(&lc->last_gnss);
+
     cairn_power_result_t r;
     cairn_power_standby(&r);
 
