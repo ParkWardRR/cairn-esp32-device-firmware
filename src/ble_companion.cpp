@@ -511,20 +511,14 @@ bool ble_companion_begin(void)
 /*
  * Give Wi-Fi the quiet it needs for a slot.
  *
- * Stopping advertising alone is not enough: with the Bluetooth controller still
- * initialised, Wi-Fi association fails in the WPA2 four-way handshake
- * (STA_DISCONNECTED reason 204, HANDSHAKE_TIMEOUT) because coexistence
- * time-shares the radio and the handshake cannot meet its timing.
+ * deinit(false) shuts the NimBLE host and controller down completely — freeing
+ * the radio for an uncontested WPA2 handshake — but keeps every GATT object
+ * (server, services, characteristics, callbacks) allocated so radio_on() can
+ * bring the stack back without rebuilding.
  *
- * Deinitialising the stack was tried and is NOT the answer here: after
- * NimBLEDevice::deinit(true) the next scan panicked with InstrFetchProhibited
- * at PC 0, a call through a pointer into the freed GATT objects. Rebuilding the
- * stack per slot is not worth that fragility on the one path already proven to
- * carry trips.
- *
- * So the controller stays up and src/wifi_link.cpp biases the coexistence
- * arbiter toward Wi-Fi for the duration instead. Advertising still stops, which
- * removes the periodic transmissions that compete most directly.
+ * deinit(true) was tried first and crashed: after the objects were freed the
+ * next BLE scan hit InstrFetchProhibited at PC 0. deinit(false) avoids that
+ * entirely because the pointers stay valid.
  */
 void ble_companion_radio_off(void)
 {
@@ -533,20 +527,11 @@ void ble_companion_radio_off(void)
 
     if (s_connected && s_conn_handle != 0xFFFF) {
         s_server->disconnect(s_conn_handle);
-        /* Let the disconnect leave the controller, so the phone sees a
-         * disconnect rather than a silent disappearance. */
         delay(80);
     }
 
-    NimBLEDevice::getAdvertising()->stop();
-    /*
-     * Advertising only. The controller stays initialised and still owns the
-     * radio, so this is contention relief rather than a release -- saying
-     * "released" sent a reader looking for a Wi-Fi bug that was really
-     * coexistence. A true release would be NimBLEDevice::deinit, which would
-     * also tear down the GATT server and have to rebuild it.
-     */
-    CAIRN_LOGI(TAG, "BLE advertising stopped for a Wi-Fi slot");
+    NimBLEDevice::deinit(false);
+    CAIRN_LOGI(TAG, "BLE stack deinited for a Wi-Fi slot");
 }
 
 void ble_companion_radio_on(void)
@@ -554,8 +539,14 @@ void ble_companion_radio_on(void)
     if (!s_radio_off) return;
     s_radio_off = false;
 
+    NimBLEDevice::init(CAIRN_BLE_NAME);
+    NimBLEDevice::setMTU(185);
+    NimBLEDevice::setSecurityAuth(BLE_SM_PAIR_AUTHREQ_BOND | BLE_SM_PAIR_AUTHREQ_SC);
+    NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
+    NimBLEDevice::setSecurityPasskey(CAIRN_BLE_PASSKEY);
+
     NimBLEDevice::getAdvertising()->start();
-    CAIRN_LOGI(TAG, "BLE advertising resumed");
+    CAIRN_LOGI(TAG, "BLE stack reinited, advertising resumed");
 }
 
 #endif /* CAIRN_BLE_COMPANION */

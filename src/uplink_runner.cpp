@@ -95,29 +95,14 @@ static void gather(const Lifecycle *lc, cairn_uplink_evidence_t *ev)
 
 #if CAIRN_WIFI_UPLINK
     /*
-     * Wi-Fi is configured and works -- but not while BLE is initialised, which
-     * in the production image is always.
-     *
-     * Measured on this unit, three times: with the Bluetooth controller up,
-     * association fails in the WPA2 four-way handshake (STA_DISCONNECTED reason
-     * 204, HANDSHAKE_TIMEOUT) after 25 s, every attempt. The same code
-     * associates in ~2 s and has delivered four bundles in env:cairn-wifiup,
-     * which halts before BLE starts. Two mitigations were tried and neither
-     * helped: leaving Wi-Fi power save at its default (needed anyway -- turning
-     * it off aborts under coexistence) and biasing the arbiter with
-     * esp_coex_preference_set(ESP_COEX_PREFER_WIFI). Deinitialising NimBLE for
-     * the slot does let Wi-Fi associate, but the next scan panics with
-     * InstrFetchProhibited at PC 0, a call through a pointer into the freed
-     * GATT objects.
-     *
-     * So the path is marked unavailable rather than left to burn 25 s and stop
-     * BLE advertising once per parked session for nothing. LTE carries the data
-     * in the car; Wi-Fi remains proven and usable through env:cairn-wifiup.
-     * Re-enabling this needs either a safe NimBLE teardown or a slot scheduled
-     * where BLE is already down -- the standby path is the obvious candidate.
+     * Wi-Fi works when the BLE controller is fully deinited for the slot.
+     * ble_companion_radio_off() now calls NimBLEDevice::deinit(false) which
+     * stops the controller while keeping GATT objects alive, and radio_on()
+     * calls init() to bring it back. The WPA2 handshake that failed under
+     * coexistence succeeds with the controller down.
      */
     ev->path[CAIRN_PATH_WIFI].configured = true;
-    ev->path[CAIRN_PATH_WIFI].available  = false;
+    ev->path[CAIRN_PATH_WIFI].available  = true;
     ev->path[CAIRN_PATH_WIFI].allowed    = true;
 #endif
 
@@ -433,16 +418,11 @@ void uplink_runner_tick(Lifecycle *lc)
         break;
 
     case CAIRN_UL_ACT_SCAN_HOME:
-        /*
-         * Reported as a miss, and deliberately so while the Wi-Fi path is
-         * unavailable (see gather()). A scan hit marks the device "at home",
-         * and being at home is what suppresses the LTE trigger -- so a
-         * truthful scan would disable the only working network path to enable
-         * one that cannot associate. run_home_scan is kept and tested: it
-         * works, finding the configured network in about 1.7 s.
-         */
         cairn_uplink_scan_started(&s_u, millis());
-        cairn_uplink_scan_done(&s_u, false, millis());
+        {
+            bool found = run_home_scan(a.max_ms ? a.max_ms : 5000);
+            cairn_uplink_scan_done(&s_u, found, millis());
+        }
         break;
 
     case CAIRN_UL_ACT_LTE_SEND:
