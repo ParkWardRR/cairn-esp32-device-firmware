@@ -509,6 +509,129 @@ bool sensors_read_gnss(cairn_gnss_sample_t *out, uint32_t *fix_age_ms)
     return true;
 }
 
+/* ── ATGRR-based 5 Hz GNSS ──────────────────────────────────────────────── */
+
+static bool s_nmea_available = true;
+
+static const char *skip_field(const char *p)
+{
+    while (*p && *p != ',' && *p != '*') p++;
+    return (*p == ',') ? p + 1 : p;
+}
+
+static double nmea_to_degrees(double raw, char hemisphere)
+{
+    int deg = (int)(raw / 100.0);
+    double min = raw - deg * 100.0;
+    double result = deg + min / 60.0;
+    if (hemisphere == 'S' || hemisphere == 'W') result = -result;
+    return result;
+}
+
+static bool parse_gga(const char *sentence, cairn_gnss_sample_t *out)
+{
+    const char *p = sentence;
+
+    /* Skip talker+sentence id: "$GNGGA," or "$GPGGA," */
+    p = strchr(p, ',');
+    if (!p) return false;
+    p++;
+
+    /* 1: time — skip (we don't have date, so can't form UTC) */
+    p = skip_field(p);
+
+    /* 2: latitude */
+    if (*p == ',' || *p == '*') return false;
+    double lat_raw = strtod(p, nullptr);
+    p = skip_field(p);
+
+    /* 3: N/S */
+    if (*p == ',' || *p == '*') return false;
+    char lat_h = *p;
+    p = skip_field(p);
+
+    /* 4: longitude */
+    if (*p == ',' || *p == '*') return false;
+    double lon_raw = strtod(p, nullptr);
+    p = skip_field(p);
+
+    /* 5: E/W */
+    if (*p == ',' || *p == '*') return false;
+    char lon_h = *p;
+    p = skip_field(p);
+
+    /* 6: fix quality (0 = no fix) */
+    int quality = atoi(p);
+    if (quality == 0) return false;
+    p = skip_field(p);
+
+    /* 7: satellites */
+    int sats = atoi(p);
+    p = skip_field(p);
+
+    /* 8: HDOP */
+    double hdop = strtod(p, nullptr);
+    p = skip_field(p);
+
+    /* 9: altitude */
+    double alt = strtod(p, nullptr);
+
+    double lat = nmea_to_degrees(lat_raw, lat_h);
+    double lon = nmea_to_degrees(lon_raw, lon_h);
+
+    memset(out, 0, sizeof(*out));
+    out->lat_e7      = (int32_t)lround(lat * 1e7);
+    out->lon_e7      = (int32_t)lround(lon * 1e7);
+    out->alt_cm      = (int32_t)lround(alt * 100.0);
+    out->hdop_e2     = (hdop > 0) ? (uint16_t)(hdop * 100) : CAIRN_U16_UNKNOWN;
+    out->sats_used   = (uint8_t)sats;
+    out->sats_visible = CAIRN_U8_UNKNOWN;
+    out->h_acc_cm    = CAIRN_U16_UNKNOWN;
+    out->v_acc_cm    = CAIRN_U16_UNKNOWN;
+    out->speed_cmps  = 0;
+    out->heading_cdeg = 0;
+    out->fix_type    = (sats >= 4 && alt != 0) ? 3 : (sats >= 3 ? 2 : 0);
+    out->source_flags = 0;
+    out->utc_offset_ms = 0;
+    out->utc_acc_ms  = CAIRN_U16_UNKNOWN;
+
+    return (out->lat_e7 != 0 || out->lon_e7 != 0);
+}
+
+int sensors_read_gnss_nmea(cairn_gnss_sample_t *out, int max_out)
+{
+    if (!s_nmea_available || s_status == nullptr || !s_status->gnss) return 0;
+
+    char buf[512];
+    int len = s_sys.gpsGetNMEA(buf, sizeof(buf));
+    if (len <= 0) {
+        s_nmea_available = false;
+        return 0;
+    }
+
+    int count = 0;
+    char *p = buf;
+    while (count < max_out && p < buf + len) {
+        char *start = strstr(p, "$G");
+        if (!start || start >= buf + len) break;
+
+        /* Find end of this sentence (next '$' or end of buffer). */
+        char *end = strchr(start + 1, '$');
+        if (!end || end > buf + len) end = buf + len;
+
+        /* Only parse GGA sentences. */
+        if (start + 6 < end &&
+            (strncmp(start + 3, "GGA,", 4) == 0)) {
+            char saved = *end;
+            *end = '\0';
+            if (parse_gga(start, &out[count])) count++;
+            *end = saved;
+        }
+        p = end;
+    }
+    return count;
+}
+
 bool sensors_gnss_utc(uint64_t *utc_ms, uint32_t *acc_ms)
 {
     if (s_gps == nullptr || s_gps->date == 0) return false;

@@ -319,10 +319,10 @@
  *
  * Not taken from DEVICE_HEALTH, which arrives every 30 s — too coarse to open
  * the bus promptly after an engine start, which would leave the first half
- * minute of OBD missing from every trip. Two seconds costs co-processor link
+ * minute of OBD missing from every trip. 500 ms costs co-processor link
  * traffic, internal to the dongle, and nothing on the vehicle bus.
  */
-#define CAIRN_BATTERY_POLL_MS 2000
+#define CAIRN_BATTERY_POLL_MS 500
 
 /* Poll interval while standing by. The core light-sleeps in between. */
 #define CAIRN_STANDBY_POLL_MS 1000

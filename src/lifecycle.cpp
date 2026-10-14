@@ -449,7 +449,20 @@ static void enforce_bus_silence(Lifecycle *lc)
          * battery (~12.4 V). The bench range is well below any car reading, so a few
          * consecutive hits is a safe latch. One-way: once bench, stays bench until reset,
          * so plugging into a car later does not silently drop into standby mid-development. */
+        lc->prev_supply_mv_raw = lc->last_supply_mv_raw;
         lc->last_supply_mv_raw = sensors_supply_mv_raw();
+
+        uint16_t engine_on = cairn_engine_params()->engine_on_mv;
+        if (lc->prev_supply_mv_raw >= engine_on &&
+            lc->last_supply_mv_raw > 0 &&
+            lc->last_supply_mv_raw < engine_on &&
+            lc->capture != CaptureState::Idle) {
+            CAIRN_LOGW(TAG, "ignition off (supply %u -> %u mV); forcing flush",
+                       (unsigned)lc->prev_supply_mv_raw,
+                       (unsigned)lc->last_supply_mv_raw);
+            lc->cap.last_flush_ms = 0;
+        }
+
         if (!lc->bench_mode) {
             bool in_bench_range = (lc->last_supply_mv_raw >= 3000 &&
                                    lc->last_supply_mv_raw <= 7500);

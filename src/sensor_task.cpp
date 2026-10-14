@@ -134,36 +134,41 @@ static void sensor_task(void *arg)
         if ((int32_t)(now - next_gnss) >= 0) {
             next_gnss = now + s_gnss_period_ms;
 
+            /*
+             * Try ATGRR first for 5 Hz position data from buffered NMEA. The
+             * u-blox M9 outputs GGA at 5 Hz but the coprocessor's ATGPS command
+             * returns a single parsed summary at ~1 Hz. ATGRR returns the raw
+             * NMEA buffer, which may contain multiple GGA sentences.
+             */
+            cairn_gnss_sample_t nmea_buf[8];
+            int nmea_count = sensors_read_gnss_nmea(nmea_buf, 8);
+
+            for (int i = 0; i < nmea_count; i++) {
+                fact_t nf;
+                memset(&nf, 0, sizeof(nf));
+                nf.kind = FACT_GNSS_SAMPLE;
+                nf.monotonic_ms = now;
+                nf.data.gnss = nmea_buf[i];
+                post(&nf);
+            }
+            if (nmea_count > 0) have_reported_gap = false;
+
+            /*
+             * ATGPS is still needed: it provides speed, heading, date+time for
+             * UTC observations, and is the fallback when ATGRR is unsupported.
+             */
             fact_t f;
             memset(&f, 0, sizeof(f));
             f.monotonic_ms = now;
 
             uint32_t fix_age = 0;
             if (sensors_read_gnss(&f.data.gnss, &fix_age)) {
-                f.kind = FACT_GNSS_SAMPLE;
-                post(&f);
-
-                /* A fresh fix ends any outage, so the next one reports at once
-                 * rather than waiting out the rate limit. */
+                if (nmea_count == 0) {
+                    f.kind = FACT_GNSS_SAMPLE;
+                    post(&f);
+                }
                 have_reported_gap = false;
 
-                /*
-                 * Time observations are reported on a slow cadence for as long
-                 * as the receiver has a date, not once.
-                 *
-                 * The *basis* is still first-wins -- re-reporting it would move
-                 * the bundle's time reference after samples had been written
-                 * against the original -- but the observations themselves are
-                 * evidence, and one of them is not enough to be checkable. A
-                 * series shows whether the receiver's clock drifts, and it lets
-                 * a consumer compare GNSS against the phone and the network
-                 * instead of taking whichever source happened to answer first.
-                 *
-                 * Rate-limited because a 1 Hz receiver would otherwise add a
-                 * record per second for a figure that moves predictably; the
-                 * first one is posted immediately, since on a cold start that is
-                 * the moment the trip becomes datable at all.
-                 */
                 if (!have_utc_basis ||
                     (int32_t)(now - last_time_obs_ms) >= CAIRN_TIME_OBS_PERIOD_MS) {
                     fact_t u;
@@ -177,23 +182,7 @@ static void sensor_task(void *arg)
                         post(&u);
                     }
                 }
-            } else {
-                /*
-                 * A read returning nothing means one of two unrelated things,
-                 * and reporting both as a gap was wrong.
-                 *
-                 * Either the receiver has no fix — a real gap, and silence here
-                 * would be indistinguishable from the device being switched off
-                 * — or it simply has not produced a new fix since the last
-                 * poll, which is not a gap at all. Polling at 200 ms against a
-                 * 1 Hz receiver, the second case is the common one.
-                 *
-                 * So the gap is reported only once the newest fix has aged past
-                 * CAIRN_GNSS_STALE_MS, and then no more than once per
-                 * CAIRN_GNSS_GAP_REPORT_MS for as long as the outage lasts. An
-                 * outage still appears in the record; a fast poll no longer
-                 * manufactures one.
-                 */
+            } else if (nmea_count == 0) {
                 if (fix_age >= CAIRN_GNSS_STALE_MS &&
                     (!have_reported_gap ||
                      (int32_t)(now - last_gap_report_ms) >= CAIRN_GNSS_GAP_REPORT_MS)) {

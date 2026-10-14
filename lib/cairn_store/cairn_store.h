@@ -54,13 +54,12 @@ extern "C" {
 #define CAIRN_STAGE_BYTES CAIRN_MAX_FRAME_LEN
 
 /*
- * Durability cadence. Flushing every frame would triple the write load and
- * still not make power loss safe, because the card itself buffers. Instead the
- * format tolerates a torn tail exactly, and these bounds cap how much a pulled
- * fuse can cost.
+ * Durability cadence. The format tolerates a torn tail, so the trade is bounded
+ * data loss against write load. Every-4-frames at ~13 frames/s flushes roughly
+ * every 300 ms, capping power-loss loss at ~1 s instead of the old ~5 s.
  */
-#define CAIRN_FLUSH_EVERY_FRAMES 32
-#define CAIRN_FLUSH_EVERY_MS     5000
+#define CAIRN_FLUSH_EVERY_FRAMES 4
+#define CAIRN_FLUSH_EVERY_MS     1000
 
 typedef enum {
     CAIRN_CHAIN_CAPTURE = 0,

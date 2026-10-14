@@ -140,6 +140,7 @@ struct Lifecycle {
      * ~12-14 V and never engages. Latched after a few consecutive readings so one noisy
      * sample on a cold ADC does not toggle it. Cleared on reboot. */
     uint16_t last_supply_mv_raw = 0;
+    uint16_t prev_supply_mv_raw = 0;
     uint8_t  bench_hits = 0;
     bool     bench_mode = false;
 
