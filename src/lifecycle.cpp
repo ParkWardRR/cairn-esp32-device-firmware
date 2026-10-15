@@ -321,6 +321,26 @@ bool lifecycle_begin(Lifecycle *lc)
     cairn_preroll_reset(&lc->preroll);
 
     lc->trip_seq = cairn_kv_get_u32("trip_seq", 0);
+
+    /*
+     * A capture left open by an earlier boot is sealed now, not extended. (After
+     * trip_seq is read: the seal stamps it into the manifest.)
+     *
+     * Its frames are on that boot's monotonic clock and its basis (utcbasis.bin) is UTC
+     * at that clock's zero. This boot's clock started again at zero, so a frame written
+     * now into the same bundle would be dated against the wrong origin -- or, when this
+     * boot's first time observation is adopted, every earlier frame would be. Measured:
+     * the 2026-10-14 drive resumed the capture the 2026-10-13 drive left open, and the
+     * bundle came out holding the earlier boot's 7 h of parked status records dated a
+     * day late, under the earlier boot's id, which then named the wrong boot for the
+     * later trip. One bundle, one clock: seal it as it is and start this boot afresh.
+     */
+    if (lc->cap.active && memcmp(lc->cap.boot_id, lc->boot_id, 16) != 0) {
+        CAIRN_LOGW(TAG, "resumed capture belongs to an earlier boot; sealing it before capturing");
+        lc->bundle = BundleState::Open;
+        seal_and_reopen(lc, 2);
+    }
+
     if (cairn_kv_get_u32("trip_active", 0)) {
         lc->capture = CaptureState::Active;
         emit_policy_snapshot(lc);
