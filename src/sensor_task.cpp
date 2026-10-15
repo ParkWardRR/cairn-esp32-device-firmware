@@ -3,11 +3,46 @@
 #include <Arduino.h>
 
 #include "cairn_engine.h"
+#include "cairn_gnss.h"
 #include "cairn_log.h"
 #include "config.h"
 #include "mtprobe.h"
 
 static const char *TAG = "SENSE";
+
+/*
+ * Every GNSS fix passes the plausibility gate (lib/cairn_gnss) before it becomes a
+ * fact, so a position the car's own sensors contradict is never written. Refusals are
+ * counted per rule and logged at most every 10 s.
+ */
+static cairn_gnss_gate_t s_gnss_gate;
+static uint32_t          s_gnss_refusal_log_ms;
+
+static bool vet_gnss(const fact_t *f, cairn_gnss_context_t *c, uint32_t obd_ms)
+{
+    /* The OBD reading's age at the moment of this fix; a reading taken after the fix
+     * (a 5 Hz fix from earlier in the buffer) counts as fresh. */
+    int32_t age = (int32_t)(f->monotonic_ms - obd_ms);
+    c->obd_age_ms = age > 0 ? (uint32_t)age : 0;
+
+    cairn_gnss_verdict_t v = cairn_gnss_gate(&s_gnss_gate, &f->data.gnss, f->monotonic_ms, c);
+    if (v == CAIRN_GNSS_ACCEPT) return true;
+
+    uint32_t now = millis();
+    if ((int32_t)(now - s_gnss_refusal_log_ms) >= 10000) {
+        s_gnss_refusal_log_ms = now;
+        CAIRN_LOGW(TAG, "GNSS fix refused (%s): %u cm/s on %u sats, obd %d kph %u ms old, imu %u mg; "
+                        "refused so far: settling %u obd %u still %u accel %u",
+                   cairn_gnss_verdict_name(v), (unsigned)f->data.gnss.speed_cmps,
+                   (unsigned)f->data.gnss.sats_used, c->obd_valid ? (int)c->obd_speed_kph : -1,
+                   (unsigned)c->obd_age_ms, (unsigned)c->imu_rms_mg,
+                   (unsigned)s_gnss_gate.rejected[CAIRN_GNSS_REJECT_SETTLING],
+                   (unsigned)s_gnss_gate.rejected[CAIRN_GNSS_REJECT_OBD],
+                   (unsigned)s_gnss_gate.rejected[CAIRN_GNSS_REJECT_STILL],
+                   (unsigned)s_gnss_gate.rejected[CAIRN_GNSS_REJECT_ACCEL]);
+    }
+    return false;
+}
 
 static QueueHandle_t  s_queue;
 static SensorStatus  *s_status;
@@ -91,6 +126,12 @@ static void sensor_task(void *arg)
     /* Gap reporting state; see the GNSS branch below. */
     uint32_t last_gap_report_ms = millis();
     bool     have_reported_gap  = false;
+    uint32_t last_accepted_fix_ms = millis();
+
+    /* The last OBD road speed, for judging GNSS fixes against the wheels. */
+    bool     have_obd_speed = false;
+    int16_t  last_obd_kph   = 0;
+    uint32_t last_obd_ms    = 0;
 
     for (;;) {
         /* Parked while the controller is in standby. Nothing is draining the
@@ -134,41 +175,54 @@ static void sensor_task(void *arg)
         if ((int32_t)(now - next_gnss) >= 0) {
             next_gnss = now + s_gnss_period_ms;
 
-            /*
-             * Try ATGRR first for 5 Hz position data from buffered NMEA. The
-             * u-blox M9 outputs GGA at 5 Hz but the coprocessor's ATGPS command
-             * returns a single parsed summary at ~1 Hz. ATGRR returns the raw
-             * NMEA buffer, which may contain multiple GGA sentences.
-             */
-            cairn_gnss_sample_t nmea_buf[8];
-            int nmea_count = sensors_read_gnss_nmea(nmea_buf, 8);
-
-            for (int i = 0; i < nmea_count; i++) {
-                fact_t nf;
-                memset(&nf, 0, sizeof(nf));
-                nf.kind = FACT_GNSS_SAMPLE;
-                nf.monotonic_ms = now;
-                nf.data.gnss = nmea_buf[i];
-                post(&nf);
-            }
-            if (nmea_count > 0) have_reported_gap = false;
+            /* What the rest of the car says now, for the plausibility gate. OBD is
+             * read further down this loop, so this is the previous cycle's reading
+             * with its true age. */
+            cairn_gnss_context_t gctx;
+            memset(&gctx, 0, sizeof(gctx));
+            gctx.obd_valid     = have_obd_speed;
+            gctx.obd_speed_kph = last_obd_kph;
+            gctx.imu_valid     = s_status != nullptr && s_status->imu &&
+                                 sensors_recent_accel_rms_mg() != 0;
+            gctx.imu_rms_mg    = sensors_recent_accel_rms_mg();
 
             /*
-             * ATGPS is still needed: it provides speed, heading, date+time for
-             * UTC observations, and is the fallback when ATGRR is unsupported.
+             * ATGPS first: it is the receiver's parsed summary -- speed, heading, the
+             * date for UTC observations -- and its time of day is the reference the
+             * NMEA buffer is judged against.
              */
             fact_t f;
             memset(&f, 0, sizeof(f));
             f.monotonic_ms = now;
-
             uint32_t fix_age = 0;
-            if (sensors_read_gnss(&f.data.gnss, &fix_age)) {
+            const bool have_summary = sensors_read_gnss(&f.data.gnss, &fix_age);
+
+            /*
+             * Then ATGRR for the 5 Hz fixes the summary does not carry. Each comes
+             * back with its own age from its NMEA time of day, so it is stamped when
+             * the receiver took it, not when this loop polled.
+             */
+            cairn_nmea_fix_t nmea_buf[8];
+            int nmea_count = sensors_read_gnss_nmea(nmea_buf, 8);
+
+            int accepted = 0;
+            for (int i = 0; i < nmea_count; i++) {
+                fact_t nf;
+                memset(&nf, 0, sizeof(nf));
+                nf.kind = FACT_GNSS_SAMPLE;
+                nf.monotonic_ms = now - nmea_buf[i].age_ms;
+                nf.data.gnss = nmea_buf[i].sample;
+                if (vet_gnss(&nf, &gctx, last_obd_ms)) { post(&nf); accepted++; }
+            }
+
+            if (have_summary) {
                 if (nmea_count == 0) {
                     f.kind = FACT_GNSS_SAMPLE;
-                    post(&f);
+                    if (vet_gnss(&f, &gctx, last_obd_ms)) { post(&f); accepted++; }
                 }
-                have_reported_gap = false;
 
+                /* Time observations do not depend on the position being plausible:
+                 * a receiver with a poor solution still has the time. */
                 if (!have_utc_basis ||
                     (int32_t)(now - last_time_obs_ms) >= CAIRN_TIME_OBS_PERIOD_MS) {
                     fact_t u;
@@ -182,8 +236,19 @@ static void sensor_task(void *arg)
                         post(&u);
                     }
                 }
-            } else if (nmea_count == 0) {
-                if (fix_age >= CAIRN_GNSS_STALE_MS &&
+            }
+
+            if (accepted > 0) {
+                have_reported_gap = false;
+                last_accepted_fix_ms = now;
+            } else {
+                /*
+                 * No fix this cycle, or none the gate believed: either way there is no
+                 * position for this stretch, and that is what the gap record says.
+                 * A refused fix ages like a missing one.
+                 */
+                uint32_t since = have_summary ? (uint32_t)(now - last_accepted_fix_ms) : fix_age;
+                if (since >= CAIRN_GNSS_STALE_MS &&
                     (!have_reported_gap ||
                      (int32_t)(now - last_gap_report_ms) >= CAIRN_GNSS_GAP_REPORT_MS)) {
                     post_kind(FACT_GNSS_NO_FIX, now);
@@ -241,6 +306,11 @@ static void sensor_task(void *arg)
                 if (got_snapshot) {
                     f.kind = FACT_OBD_SNAPSHOT;
                     post(&f);
+                    if (f.data.obd.speed_kph != CAIRN_I16_UNKNOWN) {
+                        have_obd_speed = true;
+                        last_obd_kph   = f.data.obd.speed_kph;
+                        last_obd_ms    = f.monotonic_ms;
+                    }
                 } else {
                     post_kind(FACT_OBD_SILENT, f.monotonic_ms);
                 }

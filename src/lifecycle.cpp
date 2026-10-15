@@ -170,10 +170,19 @@ static void emit_policy_snapshot(Lifecycle *lc)
  */
 static void emit_capture_record(Lifecycle *lc, uint8_t record_type,
                                 uint8_t schema_version, const uint8_t *payload,
-                                size_t payload_len)
+                                size_t payload_len, uint32_t sampled_ms)
 {
     uint16_t flags = frame_flags(lc);
-    uint32_t now = millis();
+    /*
+     * The frame carries the moment the sensor was read, not the moment this task got
+     * round to writing it. They used to be the same call to millis() here, which is
+     * right only while the queue is empty: during a seal (~2.5 s) facts back up, and on
+     * the 2026-10-14 drive every new bundle opened with up to eight GNSS fixes -- 30 m
+     * of road -- stamped with one shared time. A TIME_OBSERVATION was skewed the same
+     * way, its utc_ms paired with a frame time later than the instant it was read.
+     * 0 means the producer did not say, and only then is the write time used.
+     */
+    uint32_t now = sampled_ms != 0 ? sampled_ms : millis();
 
     /* Pre-roll or capture, the sample has entered the pipeline: that is T_capture. */
     boot_timing_mark(CAIRN_BOOT_FIRST_SAMPLE);
@@ -621,7 +630,7 @@ static void on_gnss_sample(Lifecycle *lc, const fact_t *f)
 
     uint8_t payload[32];
     cairn_encode_gnss_sample(&f->data.gnss, payload);
-    emit_capture_record(lc, CAIRN_REC_GNSS_SAMPLE, 1, payload, sizeof(payload));
+    emit_capture_record(lc, CAIRN_REC_GNSS_SAMPLE, 1, payload, sizeof(payload), f->monotonic_ms);
 }
 
 static void on_gnss_no_fix(Lifecycle *lc, const fact_t *f)
@@ -687,7 +696,7 @@ static void on_time_observation(Lifecycle *lc, const fact_t *f)
 
     uint8_t payload[16];
     cairn_encode_time_observation(&obs, payload);
-    emit_capture_record(lc, CAIRN_REC_TIME_OBSERVATION, 1, payload, sizeof(payload));
+    emit_capture_record(lc, CAIRN_REC_TIME_OBSERVATION, 1, payload, sizeof(payload), f->monotonic_ms);
 
     if (!adopt) return;
 
@@ -707,7 +716,7 @@ static void on_imu_summary(Lifecycle *lc, const fact_t *f)
 {
     uint8_t payload[20];
     cairn_encode_imu_summary(&f->data.imu, payload);
-    emit_capture_record(lc, CAIRN_REC_IMU_SUMMARY, 1, payload, sizeof(payload));
+    emit_capture_record(lc, CAIRN_REC_IMU_SUMMARY, 1, payload, sizeof(payload), f->monotonic_ms);
 }
 
 static void on_obd_snapshot(Lifecycle *lc, const fact_t *f)
@@ -718,7 +727,7 @@ static void on_obd_snapshot(Lifecycle *lc, const fact_t *f)
 
     uint8_t payload[24];
     cairn_encode_obd_snapshot(&f->data.obd, payload);
-    emit_capture_record(lc, CAIRN_REC_OBD_SNAPSHOT, 1, payload, sizeof(payload));
+    emit_capture_record(lc, CAIRN_REC_OBD_SNAPSHOT, 1, payload, sizeof(payload), f->monotonic_ms);
 }
 
 /*
@@ -743,7 +752,7 @@ static void on_obd_extended(Lifecycle *lc, const fact_t *f)
      * *which* PIDs were asked for. Per-record schema versioning is exactly the
      * mechanism for this, so a reader keyed on it never has to guess.
      */
-    emit_capture_record(lc, CAIRN_REC_OBD_EXTENDED, 2, payload, sizeof(payload));
+    emit_capture_record(lc, CAIRN_REC_OBD_EXTENDED, 2, payload, sizeof(payload), f->monotonic_ms);
 }
 
 static void on_obd_silent(Lifecycle *lc)
@@ -1055,6 +1064,17 @@ static void seal_and_reopen(Lifecycle *lc, uint8_t reason)
 
     lc->bundle = BundleState::Sealed;
 
+    /* The basis is UTC at monotonic zero, and the monotonic clock is this boot's, so
+     * the one the sealed capture used is just as true for the next. It used to be
+     * dropped here: the new capture opened with no basis and got one only when the
+     * next time observation arrived, which GNSS repeats every two minutes. Any bundle
+     * sealed before then was signed with utc_basis_ms = 0 and decoded to 1970 --
+     * measured on the 2026-10-14 evening drive, 12 of 37 bundles in one boot, which
+     * the server then left out of the trip as straight-line gaps in the track. */
+    const bool     carry_basis = lc->have_utc_basis && lc->cap.utc_basis_ms != 0;
+    const uint64_t carried_ms  = lc->cap.utc_basis_ms;
+    const uint32_t carried_acc = lc->cap.utc_basis_acc_ms;
+
     /* A fresh capture, with its own bundle id and its own chains. */
     if (!cairn_capture_open_or_resume(&lc->cap, lc->device_id, lc->boot_id,
                                       &lc->storage)) {
@@ -1063,6 +1083,13 @@ static void seal_and_reopen(Lifecycle *lc, uint8_t reason)
     }
     lc->bundle = BundleState::Open;
     lc->have_utc_basis = false;
+    if (carry_basis && lc->cap.utc_basis_ms == 0) {
+        /* Sampled at monotonic zero, so set_utc_basis stores carried_ms unchanged. */
+        cairn_capture_set_utc_basis(&lc->cap, carried_ms, carried_acc, 0);
+        lc->have_utc_basis = true;
+        CAIRN_LOGI(TAG, "UTC basis carried into the new capture: %llu ms (+/- %u ms)",
+                   (unsigned long long)carried_ms, (unsigned)carried_acc);
+    }
     lc->policy_written = false; /* a new bundle must describe its own policy */
 
     emit_transition(lc, CAIRN_REGION_BUNDLE, (uint8_t)BundleState::Sealed,

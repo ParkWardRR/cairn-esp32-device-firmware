@@ -18,6 +18,7 @@
 #include <stdint.h>
 
 #include "cairn_format.h"
+#include "cairn_gnss.h"
 
 struct SensorStatus {
     bool coprocessor;
@@ -43,7 +44,7 @@ void sensors_retry_failed(SensorStatus *status, bool bus_open);
  */
 bool sensors_read_gnss(cairn_gnss_sample_t *out, uint32_t *fix_age_ms);
 
-int  sensors_read_gnss_nmea(cairn_gnss_sample_t *out, int max_out);
+int  sensors_read_gnss_nmea(cairn_nmea_fix_t *out, int max_out);
 
 /* True once the receiver has delivered a date and time it considers valid. */
 bool sensors_gnss_utc(uint64_t *utc_ms, uint32_t *acc_ms);

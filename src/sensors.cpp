@@ -133,6 +133,11 @@ static struct {
 
 static uint32_t s_last_gps_ts = 0;
 static uint32_t s_last_gps_update_ms = 0;
+static uint32_t s_last_gps_time = 0;
+static uint32_t s_last_gps_date = 0;
+/* The receiver's UTC time of day at its last summary, and the millis() it was read at. */
+static uint32_t s_gnss_tod_ms    = 0xFFFFFFFFu;
+static uint32_t s_gnss_tod_at_ms = 0;
 
 /* ── narrowing ────────────────────────────────────────────────────────────── */
 
@@ -264,12 +269,21 @@ static void send_gnss_aiding(void)
     int32_t lat = prefs.getInt("lat", 0);
     int32_t lon = prefs.getInt("lon", 0);
     int32_t alt = prefs.getInt("alt", 0);
-    uint32_t age = millis() - prefs.getUInt("mono", 0);
     prefs.end();
 
     if (lat == 0 && lon == 0) return;
-    if (age > 24UL * 3600UL * 1000UL) return;
 
+    /*
+     * No age check. There was one -- millis() now against millis() when saved -- but
+     * millis() restarts at every boot, so across a reboot it compared two unrelated
+     * clocks and passed or failed at random. Nothing on the device knows the time
+     * before the receiver does. What makes the hint safe instead is that it is honest
+     * about how little it promises: the dongle lives in the car and only saves a fix
+     * the plausibility gate accepted, so this is where the car was parked, and a
+     * 10 km accuracy covers anything short of the car being moved without it. An
+     * over-confident hint is what can pull a receiver's first solutions off; a loose
+     * one only costs a little of the speed-up.
+     */
     /* UBX-MGA-INI-POS_LLH: class 0x13, id 0x40, length 20. */
     uint8_t msg[28];
     msg[0] = 0xB5; msg[1] = 0x62;
@@ -281,21 +295,23 @@ static void send_gnss_aiding(void)
     memcpy(&msg[10], &lat, 4);
     memcpy(&msg[14], &lon, 4);
     memcpy(&msg[18], &alt, 4);
-    uint32_t acc = 100000;  /* 1 km accuracy in cm */
+    uint32_t acc = 1000000;  /* 10 km, in cm */
     memcpy(&msg[22], &acc, 4);
     ubx_checksum(msg, 26, &msg[26], &msg[27]);
 
     if (s_sys.link == nullptr) return;
 
-    char cmd[64];
-    strcpy(cmd, "ATGDS");
-    for (int i = 0; i < 28; i++) sprintf(cmd + strlen(cmd), "%02X", msg[i]);
-    strcat(cmd, "\r");
+    /* The co-processor's pass-through takes space-separated hex bytes, exactly as the
+     * driver itself sends its receiver settings (FreematicsPlus gpsBegin); the bytes
+     * used to be run together. */
+    char cmd[5 + 28 * 3 + 2];
+    int n = snprintf(cmd, sizeof(cmd), "ATGDS");
+    for (int i = 0; i < 28; i++) n += snprintf(cmd + n, sizeof(cmd) - (size_t)n, "%02X ", msg[i]);
+    cmd[n - 1] = '\r';
 
     char resp[32];
     s_sys.link->sendCommand(cmd, resp, sizeof(resp), 100);
-    CAIRN_LOGI(TAG, "sent GNSS aiding: lat=%d lon=%d alt=%d cm (age %u s)",
-               lat, lon, alt, (unsigned)(age / 1000));
+    CAIRN_LOGI(TAG, "sent GNSS aiding: lat=%d lon=%d alt=%d cm (+/- 10 km)", lat, lon, alt);
 }
 
 static void init_gnss(SensorStatus *status)
@@ -511,15 +527,32 @@ bool sensors_read_gnss(cairn_gnss_sample_t *out, uint32_t *fix_age_ms)
     if (s_status == nullptr || !s_status->gnss) return false;
     if (!s_sys.gpsGetData(&s_gps) || s_gps == nullptr) return false;
 
-    /* The driver returns the same buffer each call; an unchanged timestamp means
-     * no new fix, and reporting it again would fabricate a sample. */
-    if (s_gps->ts == s_last_gps_ts) {
+    /*
+     * The driver returns the same buffer each call, so a fix repeated is a fix
+     * fabricated. Its own `ts` cannot say: over the co-processor link the driver sets
+     * ts = millis() on every successful read (FreematicsPlus gpsGetData), so it always
+     * looks new, and a receiver that has lost its fix had its last position written
+     * again every poll. The receiver's date and time of day do say.
+     */
+    if (s_gps->ts == s_last_gps_ts ||
+        (s_gps->time != 0 && s_gps->time == s_last_gps_time && s_gps->date == s_last_gps_date)) {
         if (fix_age_ms != nullptr) *fix_age_ms = millis() - s_last_gps_update_ms;
         return false;
     }
     s_last_gps_ts = s_gps->ts;
+    s_last_gps_time = s_gps->time;
+    s_last_gps_date = s_gps->date;
     s_last_gps_update_ms = millis();
     if (fix_age_ms != nullptr) *fix_age_ms = 0;
+
+    /* HHMMSScc, the receiver's UTC time of day: the reference the NMEA path judges
+     * its buffer against. */
+    if (s_gps->time != 0) {
+        uint32_t t = s_gps->time;
+        s_gnss_tod_ms = ((t / 1000000u) * 3600u + ((t / 10000u) % 100u) * 60u + (t / 100u) % 100u) * 1000u +
+                        (t % 100u) * 10u;
+        s_gnss_tod_at_ms = s_last_gps_update_ms;
+    }
 
     memset(out, 0, sizeof(*out));
 
@@ -531,8 +564,12 @@ bool sensors_read_gnss(cairn_gnss_sample_t *out, uint32_t *fix_age_ms)
     /* The driver reports knots; the format wants cm/s. */
     out->speed_cmps   = (uint16_t)lroundf(s_gps->speed * 51.4444f);
     out->heading_cdeg = (uint16_t)(s_gps->heading * 100u);
-    out->hdop_e2      = (s_gps->hdop > 0) ? (uint16_t)(s_gps->hdop * 10u)
-                                          : CAIRN_U16_UNKNOWN;
+    /* The co-processor's $GNIFO reports HDOP x 100 already (91 on twelve satellites
+     * under open sky, i.e. 0.91), which is the format's unit. It was multiplied by ten
+     * again, so every stored HDOP read ten times too high and the dashboard's
+     * HDOP-derived accuracy was ten times too pessimistic. The driver keeps it in a
+     * uint8, so 255 means 2.55 or worse. */
+    out->hdop_e2      = (s_gps->hdop > 0) ? (uint16_t)s_gps->hdop : CAIRN_U16_UNKNOWN;
 
     /*
      * This receiver reports no accuracy estimates, so they are sentinels rather
@@ -565,125 +602,42 @@ bool sensors_read_gnss(cairn_gnss_sample_t *out, uint32_t *fix_age_ms)
 
 /* ── ATGRR-based 5 Hz GNSS ──────────────────────────────────────────────── */
 
-static bool s_nmea_available = true;
+/*
+ * The parsing is lib/cairn_gnss (host-tested); this is only the poll. ATGRR is a
+ * co-processor command not every firmware answers. One that answers with no NMEA at
+ * all five times running is taken not to support it, rather than the first empty
+ * buffer switching the path off for the life of the boot.
+ */
+static bool               s_nmea_available = true;
+static uint8_t            s_nmea_empty_polls;
+static cairn_nmea_state_t s_nmea;
+static bool               s_nmea_ready;
 
-static const char *skip_field(const char *p)
-{
-    while (*p && *p != ',' && *p != '*') p++;
-    return (*p == ',') ? p + 1 : p;
-}
-
-static double nmea_to_degrees(double raw, char hemisphere)
-{
-    int deg = (int)(raw / 100.0);
-    double min = raw - deg * 100.0;
-    double result = deg + min / 60.0;
-    if (hemisphere == 'S' || hemisphere == 'W') result = -result;
-    return result;
-}
-
-static bool parse_gga(const char *sentence, cairn_gnss_sample_t *out)
-{
-    const char *p = sentence;
-
-    /* Skip talker+sentence id: "$GNGGA," or "$GPGGA," */
-    p = strchr(p, ',');
-    if (!p) return false;
-    p++;
-
-    /* 1: time — skip (we don't have date, so can't form UTC) */
-    p = skip_field(p);
-
-    /* 2: latitude */
-    if (*p == ',' || *p == '*') return false;
-    double lat_raw = strtod(p, nullptr);
-    p = skip_field(p);
-
-    /* 3: N/S */
-    if (*p == ',' || *p == '*') return false;
-    char lat_h = *p;
-    p = skip_field(p);
-
-    /* 4: longitude */
-    if (*p == ',' || *p == '*') return false;
-    double lon_raw = strtod(p, nullptr);
-    p = skip_field(p);
-
-    /* 5: E/W */
-    if (*p == ',' || *p == '*') return false;
-    char lon_h = *p;
-    p = skip_field(p);
-
-    /* 6: fix quality (0 = no fix) */
-    int quality = atoi(p);
-    if (quality == 0) return false;
-    p = skip_field(p);
-
-    /* 7: satellites */
-    int sats = atoi(p);
-    p = skip_field(p);
-
-    /* 8: HDOP */
-    double hdop = strtod(p, nullptr);
-    p = skip_field(p);
-
-    /* 9: altitude */
-    double alt = strtod(p, nullptr);
-
-    double lat = nmea_to_degrees(lat_raw, lat_h);
-    double lon = nmea_to_degrees(lon_raw, lon_h);
-
-    memset(out, 0, sizeof(*out));
-    out->lat_e7      = (int32_t)lround(lat * 1e7);
-    out->lon_e7      = (int32_t)lround(lon * 1e7);
-    out->alt_cm      = (int32_t)lround(alt * 100.0);
-    out->hdop_e2     = (hdop > 0) ? (uint16_t)(hdop * 100) : CAIRN_U16_UNKNOWN;
-    out->sats_used   = (uint8_t)sats;
-    out->sats_visible = CAIRN_U8_UNKNOWN;
-    out->h_acc_cm    = CAIRN_U16_UNKNOWN;
-    out->v_acc_cm    = CAIRN_U16_UNKNOWN;
-    out->speed_cmps  = 0;
-    out->heading_cdeg = 0;
-    out->fix_type    = (sats >= 4 && alt != 0) ? 3 : (sats >= 3 ? 2 : 0);
-    out->source_flags = 0;
-    out->utc_offset_ms = 0;
-    out->utc_acc_ms  = CAIRN_U16_UNKNOWN;
-
-    return (out->lat_e7 != 0 || out->lon_e7 != 0);
-}
-
-int sensors_read_gnss_nmea(cairn_gnss_sample_t *out, int max_out)
+int sensors_read_gnss_nmea(cairn_nmea_fix_t *out, int max_out)
 {
     if (!s_nmea_available || s_status == nullptr || !s_status->gnss) return 0;
+    if (!s_nmea_ready) { cairn_nmea_reset(&s_nmea); s_nmea_ready = true; }
 
     char buf[512];
-    int len = s_sys.gpsGetNMEA(buf, sizeof(buf));
-    if (len <= 0) {
-        s_nmea_available = false;
+    int len = s_sys.gpsGetNMEA(buf, sizeof(buf) - 1);
+    if (len <= 0 || memchr(buf, '$', (size_t)len) == nullptr) {
+        if (++s_nmea_empty_polls >= 5) {
+            s_nmea_available = false;
+            CAIRN_LOGW(TAG, "ATGRR returned no NMEA five times running; 5 Hz path off");
+        }
         return 0;
     }
+    s_nmea_empty_polls = 0;
+    if (len > (int)sizeof(buf) - 1) len = (int)sizeof(buf) - 1;
+    buf[len] = '\0';
 
-    int count = 0;
-    char *p = buf;
-    while (count < max_out && p < buf + len) {
-        char *start = strstr(p, "$G");
-        if (!start || start >= buf + len) break;
+    /* The receiver's own clock now: its last summary's time of day, advanced by the
+     * time since it was read. */
+    uint32_t ref = CAIRN_NMEA_NO_TOD;
+    if (s_gnss_tod_ms != CAIRN_NMEA_NO_TOD)
+        ref = (s_gnss_tod_ms + (millis() - s_gnss_tod_at_ms)) % CAIRN_NMEA_DAY_MS;
 
-        /* Find end of this sentence (next '$' or end of buffer). */
-        char *end = strchr(start + 1, '$');
-        if (!end || end > buf + len) end = buf + len;
-
-        /* Only parse GGA sentences. */
-        if (start + 6 < end &&
-            (strncmp(start + 3, "GGA,", 4) == 0)) {
-            char saved = *end;
-            *end = '\0';
-            if (parse_gga(start, &out[count])) count++;
-            *end = saved;
-        }
-        p = end;
-    }
-    return count;
+    return cairn_nmea_collect(buf, (size_t)len, ref, &s_nmea, out, max_out);
 }
 
 bool sensors_gnss_utc(uint64_t *utc_ms, uint32_t *acc_ms)
@@ -1311,7 +1265,6 @@ void sensors_gnss_save_aiding(const cairn_gnss_sample_t *fix)
     prefs.putInt("lat", fix->lat_e7);
     prefs.putInt("lon", fix->lon_e7);
     prefs.putInt("alt", fix->alt_cm);
-    prefs.putUInt("mono", millis());
     prefs.end();
 }
 
