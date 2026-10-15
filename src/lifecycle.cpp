@@ -25,6 +25,9 @@
 
 static const char *TAG = "LIFE";
 
+static void close_gnss_gap(Lifecycle *lc, uint8_t cause);
+static void seal_and_reopen(Lifecycle *lc, uint8_t reason);
+
 const char *capture_state_name(CaptureState s)
 {
     switch (s) {
@@ -473,6 +476,24 @@ static void enforce_bus_silence(Lifecycle *lc)
                     CAIRN_LOGW(TAG, "bench mode: USB power, raw supply %u mV, no OBD rail; "
                                     "radio and MCU will stay up until reset",
                                (unsigned)lc->last_supply_mv_raw);
+
+                    /*
+                     * A trip resumed from NVS or triggered by boot vibration is
+                     * not a real drive on a bench. End it so the uplink schedule
+                     * can reach Idle and upload pending bundles over Wi-Fi.
+                     */
+                    if (lc->capture != CaptureState::Idle) {
+                        CAIRN_LOGW(TAG, "bench mode: ending capture so bundles can upload");
+                        if (lc->capture == CaptureState::Active ||
+                            lc->capture == CaptureState::Trailing) {
+                            close_gnss_gap(lc, CAIRN_GAP_NO_FIX);
+                            emit_trip_event(lc, CAIRN_EVENT_TRIP_END, "bench");
+                            cairn_kv_set_u32("trip_active", 0);
+                        }
+                        set_capture_state(lc, CaptureState::Idle, 2, 0);
+                        lc->idle_since_ms = millis();
+                        seal_and_reopen(lc, 0);
+                    }
                 }
             } else if (lc->last_supply_mv_raw > 0) {
                 lc->bench_hits = 0;
@@ -1402,7 +1423,7 @@ void lifecycle_tick(Lifecycle *lc)
 
     switch (lc->capture) {
     case CaptureState::Idle:
-        if (lc->motion_since_ms != 0) {
+        if (lc->motion_since_ms != 0 && !lc->bench_mode) {
             set_capture_state(lc, CaptureState::Pretrip, 1, 0);
         }
         break;
