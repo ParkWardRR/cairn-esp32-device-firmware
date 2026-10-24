@@ -61,6 +61,27 @@
 | UART RX | GPIO 34 |
 | UART TX | GPIO 26 |
 | Baud | 38400 (soft serial) |
+| Read paths | `ATGPS`, a parsed ~1 Hz summary; `ATGRR`, the raw NMEA buffer at 5 Hz. Both go through the OBD co-processor link |
+
+Three things about these paths cost real drives and are worth knowing before touching them
+(all fixed in `2d262f9`, 2026-10-15):
+
+- **`gpsData.ts` is not a fix time.** FreematicsPlus sets it to `millis()` on every link
+  read, so "unchanged ts" never meant "no new fix". Staleness is judged from the receiver's
+  own date and time of day.
+- **HDOP from `ATGPS` is already ×100.** It was multiplied by 10 again, so stored HDOP read
+  ten times too high. It is passed through as the format's HDOP ×100.
+- **An `ATGRR` buffer holds several fixes and can repeat across polls.** Each fix is a
+  checksummed GGA paired with the RMC of the same time of day (GGA alone has no speed or
+  course), aged from its own time of day. The receiver says nothing about solution
+  quality, so `lib/cairn_gnss` vets every fix against OBD speed and the IMU before it is
+  written (see the README's Status table).
+
+The co-processor link is shared by OBD, GNSS and the supply-voltage read. It has no
+protocol for interleaving, so since `6e62b44` (2026-10-23) every exchange holds
+`sensors_link_lock`, and only the sensing task reads the voltage. Before that, the
+controller's `getVoltage()` exchanges collided with GNSS and OBD traffic and about half
+the rail readings while driving came back as 9000 mV, 16000 mV or unreadable.
 
 ### ADC Channel Map
 
@@ -187,6 +208,24 @@ screen /dev/ttyUSB0 115200
 
 Exit: `Ctrl-A` then `\` then `y`.
 
+### Flashing the car's dongle
+
+There is one dongle and no spare. A channel build goes over USB with
+`scripts/release-firmware.sh <beta|stable> --flash`, which **backs up NVS before
+uploading** — a lost storage root makes every sealed bundle on the card unreadable. The
+latest is a `beta` build of `6e62b44`, flashed this way on 2026-10-23.
+
+**Opening the USB serial port resets the dongle**, monitor included: the adapter's control
+lines drive the ESP32's reset (the snippet below relies on it). So attaching a monitor
+ends the running boot. That is harmless now — the next boot seals a capture left open by
+the earlier one rather than extending it (`f940c84`) — but do not attach to a dongle in
+the middle of a drive you want recorded whole.
+
+**When no radio delivers**, as on 2026-10-23 (Wi-Fi refused at the router, LTE
+registration denied, BLE too weak from a Mac), the card can be read on a computer and its
+sealed bundles uploaded with the server's `cmd/cairn-push`. The bundles are ciphertext, and
+the dongle still prunes nothing until it holds a verified receipt.
+
 ### Reset without reflashing
 
 ```bash
@@ -245,11 +284,10 @@ cp include/secrets.h.example include/secrets.h
 # then edit secrets.h: server host/port, pinned receipt key, enrolment key, CA
 ```
 
-Production Wi-Fi credentials and the mTLS client key are not compiled in: they
-are provisioned into NVS over USB with `cairn-provision`
-(see [device-provisioning.md](https://github.com/ParkWardRR/cairn-vehicle-server/blob/main/docs/device-provisioning.md)). The `CAIRN_WIFI_*`
-defines in `secrets.h` are only a development fallback, active with
-`-DCAIRN_COMPILED_WIFI_FALLBACK=1`. A missing or placeholder `secrets.h` fails
+Since the uplink went live (2026-10-07) the network credentials — Wi-Fi SSID and
+passphrase, the pinned CA, this device's mTLS client certificate and key, the APN — are
+compiled in from `secrets.h`, so they sit in plaintext flash; the README's Security
+posture states what a flash dump costs. A missing or placeholder `secrets.h` fails
 open to an unconfigured device that uploads but never prunes, so check the boot
 log after flashing rather than assuming.
 
@@ -274,8 +312,13 @@ the name is the only stable handle.
 
 ### Pending tests
 
-1. GNSS fix acquisition outdoors
-2. Full car test: OBD + battery + trip recording
-3. WiFi home sync — see [hardware-roundtrip.md](hardware-roundtrip.md)
-4. Standby current measurement
-5. Power-loss recovery
+The bring-up list that stood here (GNSS outdoors, a full car test, home sync, power-loss
+recovery) has been done on the v3 firmware. What is still open, as of 2026-10-24:
+
+1. A drive on `6e62b44`: that the link lock ends the garbled rail readings, that a trip
+   starts and stays open on a smooth road, and that OBD answers once the bus opens
+   (#37, #42)
+2. A drive with the GNSS gate: refusals near parking, none while really driving, and
+   bundles sealed within a boot dated by the carried UTC basis
+3. Wi-Fi to the home network, which refused association on 2026-10-23 (#31)
+4. Standby current measurement (#10)

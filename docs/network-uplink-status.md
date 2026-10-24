@@ -1,10 +1,41 @@
 # Network uplink: what is proven, what is not, and is it ready to drive
 
-State as of 2026-10-08, all of it measured on the car's dongle (ESP32-D0WDQ6 rev 1,
-device `8777228e31648b23f6f783d28eee3e26`) against the live server. Nothing below is
-inferred from a datasheet unless it says so.
+State as of 2026-10-08, with the 2026-10-14 and 2026-10-23 updates below, all of it
+measured on the car's dongle (ESP32-D0WDQ6 rev 1, device
+`8777228e31648b23f6f783d28eee3e26`) against the live server. Nothing below is inferred
+from a datasheet unless it says so.
 
-## Short answer: the drive happened, and the network half worked
+## Update 2026-10-23: nothing delivered from the car, and little was recorded
+
+**No transport delivered.** On 2026-10-23, with the dongle in the car:
+
+- **Wi-Fi** to the home network failed at the router: `AUTH_FAIL`, then
+  `HANDSHAKE_TIMEOUT`, although the compiled credentials match the network's. This is no
+  longer the BLE-coexistence failure of #31 (that one was answered on 2026-10-14, below);
+  the router is refusing the station.
+- **LTE** registration was **denied** — a SIM or plan matter, not firmware.
+- **BLE** from a Mac was too weak to hold a transfer.
+
+The bundles on the card were recovered by reading the SD card on a Mac and uploading them
+with the server's `cmd/cairn-push`. Nothing was pruned on the way, so nothing was at risk.
+
+**What was on the card was thin**, and that was not a network fault. Between 2026-10-15 and
+2026-10-23 the dongle lost almost every drive: the controller's supply-voltage reads and
+the sensing task's GNSS and OBD traffic shared the co-processor link with no lock, about
+half the rail readings while driving were garbage, drive confirmation never completed, OBD
+was never polled, and smooth driving ended the few trips that did start. Fixed in
+`6e62b44` (the README's Status table has the detail) and flashed the same day as a `beta`
+build; **not yet proven on a drive**.
+
+## Update 2026-10-14: Wi-Fi switched on in `env:cairn`
+
+`2e06252` stops the BLE controller for the length of a Wi-Fi slot with
+`NimBLEDevice::deinit(false)`, which keeps the GATT objects that `deinit(true)` freed (and
+the next scan then called into). The schedule marks Wi-Fi available and the home scan
+reports what it finds. The commit records three bundles delivered and pruned over Wi-Fi
+on hardware, with a clean BLE re-init.
+
+## 2026-10-08: the drive happened, and the network half worked
 
 Updated 2026-10-08. The previous verdict here was "yes, drive it", with the automatic
 LTE trigger as the one thing a bench could not test. It was driven on 2026-10-07 and
@@ -53,7 +84,7 @@ during the one confirmed 8.6 psi boost event.
 |---|---|
 | Capture and seal | Bundles sealed repeatedly, including a 1.17 MB one. `resuming interrupted capture` works across reboots. |
 | BLE -> phone -> server | **9 bundles** receipted on the server, all `"path":"ble-relay"`. |
-| Wi-Fi -> server, mTLS | **4 bundles** delivered and pruned, `env:cairn-wifiup`. |
+| Wi-Fi -> server, mTLS | **4 bundles** delivered and pruned, `env:cairn-wifiup`; then **3** in `env:cairn` with the BLE controller stopped for the slot (2026-10-14, `2e06252`). |
 | LTE -> server, mTLS over Funnel | **1 bundle on the bench**, 158,906 bytes, delivered and pruned. T-Mobile US (PLMN 311480), PDP address assigned, TLSv1.2 ECDHE-ECDSA-AES128-GCM in 5.2 s, 3 requests over 1 connection. Then **a real drive, unattended**: 1,295,714 bytes in 386 s, 3.35 KB/s, 0.23% overhead. |
 | The automatic LTE trigger | **Proven 2026-10-07.** Trip-end edge, settle delay, send, receipted prune — no console, no bench env. This was the last thing a bench could not test. |
 | TLS actually verifies | Correct CA -> VERIFIED. Wrong CA (`env:cairn-tlsneg`) -> REJECTED, flags `0x8` NOT_TRUSTED, mbedTLS `-0x2700`. |
@@ -64,6 +95,9 @@ during the one confirmed 8.6 psi boost event.
 
 - **The OBD fail-fast bound** (#37). Bench power reports `obd=absent`, so the read path
   never runs on the desk. Only a drive can show whether the outages are gone.
+- **The co-processor link lock** (`6e62b44`). The unlocked link garbled the rail readings
+  and is a likely contributor to the OBD outages as well (#37, #42); only a drive on the
+  locked build can say how much of either it explains.
 - **Resume across two sessions over cellular.** The code path is host-tested (a killed
   link resends only what is missing) but has not been exercised on a real interrupted
   cellular transfer. Less likely to be hit now the slot limit exceeds a whole bundle.
@@ -73,11 +107,13 @@ during the one confirmed 8.6 psi boost event.
 
 ## Known limitations you will meet
 
-**Wi-Fi is switched off in `env:cairn`** (#31). It works, but not while the BLE controller
-is initialised: association fails in the WPA2 four-way handshake, reason 204
-`HANDSHAKE_TIMEOUT`, after 25 s, every time. Four mitigations were tried; the only one that
-works (`NimBLEDevice::deinit`) panics on the next scan. LTE carries the data instead. Do
-not spend time rediscovering this — read #31 first.
+**Wi-Fi needs the BLE controller stopped, not just quiet** (#31). With the controller
+initialised, association fails in the WPA2 four-way handshake, reason 204
+`HANDSHAKE_TIMEOUT`, after 25 s, every time; stopping advertising and preferring Wi-Fi in
+coexistence do not help, and `deinit(true)` panics on the next scan. `deinit(false)` is
+what works (since 2026-10-14). A `HANDSHAKE_TIMEOUT` now, as on 2026-10-23 after an
+`AUTH_FAIL`, is worth checking at the router before suspecting coexistence again. Read #31
+before spending time on either.
 
 **One bundle on the card is stranded** (#32). 1.17 MB, sealed at 96 chunks before
 `CAIRN_MAX_CHUNKS` had to drop to 64. It reports as `1 unreadable` each session, costs
@@ -86,7 +122,8 @@ drops pre-v3 manifests, deliberately).
 
 **The phone is not told before a Wi-Fi slot** (#34). The announce and check-in fields are
 unreleased BLE contract surface, so the runner reports them done and logs that it did not
-actually send anything. Harmless while Wi-Fi is off.
+actually send anything. Harmless while Wi-Fi was off; since 2026-10-14 a connected phone
+loses the dongle without warning for the length of a slot.
 
 **On USB bench power the device believes it is driving.** It reads the floating OBD rail,
 latches bench mode, and the provisioning console refuses `BEGIN` with "a trip is active"
@@ -137,7 +174,7 @@ lib/cairn_intake      offer -> chunks -> commit. 63 host rows.
 lib/cairn_bundle      reads a sealed bundle; borrows its decode scratch. 24 host rows.
 src/net_http          HTTP/1.1 over any Client, connection held across requests.
 src/tls_client        mbedTLS over any Client. Verification REQUIRED.
-src/wifi_link         association + WiFiClientSecure.          [gated off, #31]
+src/wifi_link         association + WiFiClientSecure. BLE controller stopped for the slot (#31).
 src/lte_link          modem bring-up + a Client over AT.
 lib/cairn_modem       SIMCom reply parsing. 57 host rows, fixtures from this unit.
 ```

@@ -16,17 +16,19 @@ side of it.
 | path | state |
 |---|---|
 | LTE | **Live.** Proven on the car's dongle: attach, TLS through the public Funnel ingress, 158,906 bytes uploaded, receipt verified, bundle pruned. |
-| Wi-Fi | **Implemented and proven, but marked unavailable to the schedule.** It cannot associate while the BLE controller is initialised ([#31](https://github.com/ParkWardRR/cairn-esp32-device-firmware/issues/31)). |
+| Wi-Fi | **Available to the schedule since 2026-10-14 (`2e06252`).** It cannot associate while the BLE controller is initialised, so the slot stops the controller with `NimBLEDevice::deinit(false)` and restarts it afterwards ([#31](https://github.com/ParkWardRR/cairn-esp32-device-firmware/issues/31)). On 2026-10-23 the home router refused it (`AUTH_FAIL`), a different failure. |
 | BLE | Phone-driven by `lib/cairn_offload`, as before. |
 
 Two actions the runner cannot yet really perform, and reports as done so the schedule does
 not stall: `ANNOUNCE_SLOT` and `CHECKIN`, both unreleased BLE contract fields
 ([#34](https://github.com/ParkWardRR/cairn-esp32-device-firmware/issues/34)).
 
-The home scan works — it finds the configured network in about 1.7 s — but reports a miss
-while Wi-Fi is unavailable, because a scan hit marks the device "at home" and being at home
-is what suppresses the LTE trigger. A truthful scan would disable the only working network
-path in order to enable one that cannot associate.
+The home scan finds the configured network in about 1.7 s. Until 2026-10-14 it reported a
+miss on purpose, because a scan hit marks the device "at home" and being at home is what
+suppresses the LTE trigger: a truthful scan would have disabled the only working network
+path in favour of one that could not associate. Now it reports what it finds — so at home,
+a router that refuses the dongle (as on 2026-10-23) holds LTE off for as long as the scan
+hit is fresh.
 
 The credential gate was not met; it was **traded, knowingly**. Flash and NVS encryption
 (#7, gate #18) need eFuse burns the car's revision v1.0 dongle may not take, so credentials
@@ -128,8 +130,9 @@ triggers a different policy.
   Time-slicing by stopping advertising is not enough: with the Bluetooth controller still
   initialised, Wi-Fi association fails in the WPA2 four-way handshake (reason 204
   `HANDSHAKE_TIMEOUT`) after 25 s, every attempt. Genuinely releasing the controller
-  (`NimBLEDevice::deinit`) does let Wi-Fi associate and then panics on the next scan. So
-  there *was* something to measure, and the Wi-Fi path is off until it is resolved
+  (`NimBLEDevice::deinit(true)`) does let Wi-Fi associate and then panics on the next scan.
+  So there *was* something to measure. Resolved 2026-10-14 with `deinit(false)`, which
+  stops the controller and keeps the GATT objects
   ([#31](https://github.com/ParkWardRR/cairn-esp32-device-firmware/issues/31)). LTE is
   unaffected: its modem has a separate antenna.
 - The slot length is now measured rather than a placeholder: cellular moves about 3 KB/s on
