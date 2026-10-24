@@ -40,6 +40,14 @@ uint32_t sensor_task_dropped(void);
 void sensor_task_request_retry(void);
 
 /*
+ * The latest supply-rail reading the sensing task took (every CAIRN_BATTERY_POLL_MS):
+ * the vehicle-range value (CAIRN_U16_UNKNOWN when unreadable), the raw value, and when.
+ * Returns a sequence number that changes with each new reading, so a caller can tell a
+ * fresh sample from the one it already used. Before the first reading the sequence is 0 and the voltage unknown.
+ */
+uint32_t sensor_task_supply(uint16_t *battery_mv, uint16_t *raw_mv, uint32_t *at_ms);
+
+/*
  * Set the sampling periods.
  *
  * The controller decides these, because classifying what the vehicle is doing

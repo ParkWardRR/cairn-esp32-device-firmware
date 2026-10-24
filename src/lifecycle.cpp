@@ -18,6 +18,7 @@
 #include "cairn_prune.h"
 #include "config.h"
 #include "policy.h"
+#include "cairn_trip.h"
 #include "preroll.h"
 #include "sensor_task.h"
 #include "sensors.h"
@@ -341,8 +342,10 @@ bool lifecycle_begin(Lifecycle *lc)
         seal_and_reopen(lc, 2);
     }
 
+    cairn_trip_init(&lc->trip, cairn_engine_params()->engine_on_mv);
     if (cairn_kv_get_u32("trip_active", 0)) {
         lc->capture = CaptureState::Active;
+        cairn_trip_force(&lc->trip, CAIRN_TRIP_ACTIVE, millis());
         emit_policy_snapshot(lc);
         emit_trip_event(lc, CAIRN_EVENT_TRIP_START, "resumed");
         CAIRN_LOGI(TAG, "trip %u resumed across reboot", (unsigned)lc->trip_seq);
@@ -359,7 +362,6 @@ bool lifecycle_begin(Lifecycle *lc)
     }
 
     uint32_t now = millis();
-    lc->still_since_ms = now;
     lc->idle_since_ms  = now;
 
     /* The boot itself is a journal event, including why the device woke. */
@@ -386,191 +388,124 @@ bool lifecycle_begin(Lifecycle *lc)
     return true;
 }
 
-/* ── motion scoring ───────────────────────────────────────────────────────── */
+/* ── supply rail and trip detection ───────────────────────────────────────── */
 
 /*
- * Combine the evidence available rather than trusting a single source. The IMU
- * sees motion with no ECU and no sky; OBD speed is authoritative when the ECU
- * answers; GNSS speed is good but can lag or be absent in a garage. Scores are
- * hundredths so they can be recorded in the transition payload exactly as they
- * were computed.
+ * Take the newest supply reading from the sensing task, which owns the co-processor
+ * link (the controller used to read it here, on the same link, from another task; see
+ * sensors_link_lock()). Bench detection and the ignition-off flush stay here because
+ * they act on the capture. Returns true and the vehicle-range reading when there is a
+ * new sample since the last call.
  */
-static void update_motion_scores(Lifecycle *lc)
+static bool read_supply(Lifecycle *lc, uint16_t *fresh_mv)
 {
-    const cairn_gnss_sample_t *gnss = &lc->last_gnss;
-    const cairn_obd_snapshot_t *obd = &lc->last_obd;
-    bool have_gnss = lc->have_recent_gnss;
-    bool have_obd  = lc->have_recent_obd;
+    uint16_t batt = CAIRN_U16_UNKNOWN, raw = 0;
+    uint32_t seq = sensor_task_supply(&batt, &raw, nullptr);
+    if (seq == 0 || seq == lc->supply_seq) return false;
+    lc->supply_seq = seq;
+    lc->last_battery_mv = batt;
+    *fresh_mv = batt;
 
-    uint32_t score = 0;
+    lc->prev_supply_mv_raw = lc->last_supply_mv_raw;
+    lc->last_supply_mv_raw = raw;
 
-    /*
-     * The accelerometer figure comes from the last FACT_MOTION rather than from
-     * the driver: the controller must not read sensor state the sensing task
-     * owns, and the fact carries the value as measured.
-     */
-    uint16_t rms = lc->last_accel_rms_mg;
-    if (rms >= CAIRN_MOTION_ACCEL_RMS_MG) {
-        score += 100u * rms / CAIRN_MOTION_ACCEL_RMS_MG;
+    uint16_t engine_on = cairn_engine_params()->engine_on_mv;
+    if (lc->prev_supply_mv_raw >= engine_on &&
+        lc->last_supply_mv_raw > 0 &&
+        lc->last_supply_mv_raw < engine_on &&
+        lc->capture != CaptureState::Idle) {
+        CAIRN_LOGW(TAG, "ignition off (supply %u -> %u mV); forcing flush",
+                   (unsigned)lc->prev_supply_mv_raw, (unsigned)lc->last_supply_mv_raw);
+        lc->cap.last_flush_ms = 0;
     }
 
-    if (have_obd && obd->speed_kph != CAIRN_I16_UNKNOWN && obd->speed_kph > 3) {
-        score += 100;
+    /* Bench-mode auto-detect from the raw co-processor voltage. USB-only power leaves
+     * OBD-II pin 16 floating; in the car with ignition off the pin is on unswitched
+     * battery (~12.4 V). The bench range is well below any car reading, so a few
+     * consecutive hits is a safe latch. One-way: once bench, stays bench until reset,
+     * so plugging into a car later does not silently drop into standby mid-development. */
+    if (!lc->bench_mode) {
+        bool in_bench_range = (raw >= 3000 && raw <= 7500);
+        if (in_bench_range) {
+            if (lc->bench_hits < 3) lc->bench_hits++;
+            if (lc->bench_hits >= 3) {
+                lc->bench_mode = true;
+                CAIRN_LOGW(TAG, "bench mode: USB power, raw supply %u mV, no OBD rail; "
+                                "radio and MCU will stay up until reset", (unsigned)raw);
+                /* A trip resumed from NVS or triggered by boot vibration is not a real
+                 * drive on a bench. End it so the uplink schedule can reach Idle and
+                 * upload pending bundles over Wi-Fi. */
+                if (lc->capture != CaptureState::Idle) {
+                    CAIRN_LOGW(TAG, "bench mode: ending capture so bundles can upload");
+                    if (lc->capture == CaptureState::Active ||
+                        lc->capture == CaptureState::Trailing) {
+                        close_gnss_gap(lc, CAIRN_GAP_NO_FIX);
+                        emit_trip_event(lc, CAIRN_EVENT_TRIP_END, "bench");
+                        cairn_kv_set_u32("trip_active", 0);
+                    }
+                    set_capture_state(lc, CaptureState::Idle, 2, 0);
+                    cairn_trip_force(&lc->trip, CAIRN_TRIP_IDLE, millis());
+                    lc->idle_since_ms = millis();
+                    seal_and_reopen(lc, 0);
+                }
+            }
+        } else if (raw > 0) {
+            lc->bench_hits = 0;
+        }
     }
-    if (have_gnss && gnss->speed_cmps != CAIRN_U16_UNKNOWN &&
-        gnss->speed_cmps >= CAIRN_MOTION_SPEED_CMPS) {
-        score += 100;
-    }
+    return true;
+}
 
-    lc->start_score_e2 = (uint16_t)((score > 0xFFFF) ? 0xFFFF : score);
+/* Feed the trip detector (lib/cairn_trip) one tick of evidence. */
+static cairn_trip_event_t trip_step(Lifecycle *lc)
+{
+    cairn_trip_input_t in;
+    memset(&in, 0, sizeof(in));
+    in.now_ms = millis();
+    uint16_t mv = CAIRN_U16_UNKNOWN;
+    in.rail_fresh = read_supply(lc, &mv);
+    in.rail_mv = (mv == CAIRN_U16_UNKNOWN) ? CAIRN_TRIP_UNKNOWN_MV : mv;
+    in.accel_rms_mg = lc->last_accel_rms_mg;
+    in.obd_valid = lc->have_recent_obd && lc->last_obd.speed_kph != CAIRN_I16_UNKNOWN;
+    in.obd_kph = in.obd_valid ? lc->last_obd.speed_kph : 0;
+    in.gnss_valid = lc->have_recent_gnss && lc->last_gnss.fix_type >= 2 &&
+                    lc->last_gnss.speed_cmps != CAIRN_U16_UNKNOWN;
+    in.gnss_cmps = in.gnss_valid ? lc->last_gnss.speed_cmps : 0;
+    in.bench = lc->bench_mode;
 
-    /*
-     * The stop score is not simply the inverse. Stopping requires the absence
-     * of evidence, and absence is weaker than presence, which is why the
-     * thresholds and dwells differ.
-     */
-    uint32_t stop = 0;
-    if (rms < CAIRN_MOTION_ACCEL_RMS_MG) stop += 50;
-    if (have_obd && obd->speed_kph != CAIRN_I16_UNKNOWN && obd->speed_kph <= 1) {
-        stop += 30;
-    }
-    if (have_gnss && gnss->speed_cmps < CAIRN_MOTION_SPEED_CMPS) stop += 20;
-
-    lc->stop_score_e2 = (uint16_t)stop;
-
-    uint32_t now = millis();
-    if (lc->start_score_e2 >= CAIRN_START_SCORE_THRESHOLD_E2) {
-        if (lc->motion_since_ms == 0) lc->motion_since_ms = now;
-        lc->still_since_ms = 0;
-    } else {
-        if (lc->still_since_ms == 0) lc->still_since_ms = now;
-        lc->motion_since_ms = 0;
-    }
+    cairn_trip_event_t e = cairn_trip_step(&lc->trip, &in);
+    lc->start_score_e2 = lc->trip.start_score_e2;
+    lc->stop_score_e2  = lc->trip.stop_score_e2;
+    return e;
 }
 
 /*
  * Enforce the parked-silence invariant, every tick.
  *
- * Two decisions, in order. First, has a drive started according to evidence the
- * vehicle network cannot see — the supply rail and the accelerometer? Second,
- * given that, may anything be transmitted onto the bus at all?
- *
- * Expressed as a predicate evaluated continuously rather than as a timeout,
- * because the previous arrangement was safe only by accident: a five-minute
- * idle threshold happened to fall inside BMW's eight-minute first sleep phase.
- * Nothing recorded that dependency and any change to either number would have
- * broken it silently. See cairn_power.h.
+ * Whether a drive has started is decided by lib/cairn_trip from evidence the vehicle
+ * network cannot see -- the supply rail and the accelerometer -- and latched for the
+ * life of a trip. This only turns that verdict into permission to transmit. See
+ * cairn_power.h for why a parked BMW's bus must stay silent.
  */
 static void enforce_bus_silence(Lifecycle *lc)
 {
-    uint32_t now = millis();
-
-    /*
-     * Sample the rail on its own short interval. getVoltage() reads the OBD
-     * connector's +12V at the dongle through the co-processor — a local
-     * measurement, no request onto the vehicle bus. This distinction is the
-     * whole reason a bus-silent parked mode is possible, so it is worth being
-     * explicit: this call is permitted while parked, readPID() is not.
-     */
-    if ((int32_t)(now - lc->next_battery_read_ms) >= 0) {
-        lc->next_battery_read_ms = now + CAIRN_BATTERY_POLL_MS;
-        lc->last_battery_mv = sensors_battery_mv();
-
-        /* Bench-mode auto-detect from the raw co-processor voltage. USB-only power leaves
-         * OBD-II pin 16 floating; in the car with ignition off the pin is on unswitched
-         * battery (~12.4 V). The bench range is well below any car reading, so a few
-         * consecutive hits is a safe latch. One-way: once bench, stays bench until reset,
-         * so plugging into a car later does not silently drop into standby mid-development. */
-        lc->prev_supply_mv_raw = lc->last_supply_mv_raw;
-        lc->last_supply_mv_raw = sensors_supply_mv_raw();
-
-        uint16_t engine_on = cairn_engine_params()->engine_on_mv;
-        if (lc->prev_supply_mv_raw >= engine_on &&
-            lc->last_supply_mv_raw > 0 &&
-            lc->last_supply_mv_raw < engine_on &&
-            lc->capture != CaptureState::Idle) {
-            CAIRN_LOGW(TAG, "ignition off (supply %u -> %u mV); forcing flush",
-                       (unsigned)lc->prev_supply_mv_raw,
-                       (unsigned)lc->last_supply_mv_raw);
-            lc->cap.last_flush_ms = 0;
-        }
-
-        if (!lc->bench_mode) {
-            bool in_bench_range = (lc->last_supply_mv_raw >= 3000 &&
-                                   lc->last_supply_mv_raw <= 7500);
-            if (in_bench_range) {
-                if (lc->bench_hits < 3) lc->bench_hits++;
-                if (lc->bench_hits >= 3) {
-                    lc->bench_mode = true;
-                    CAIRN_LOGW(TAG, "bench mode: USB power, raw supply %u mV, no OBD rail; "
-                                    "radio and MCU will stay up until reset",
-                               (unsigned)lc->last_supply_mv_raw);
-
-                    /*
-                     * A trip resumed from NVS or triggered by boot vibration is
-                     * not a real drive on a bench. End it so the uplink schedule
-                     * can reach Idle and upload pending bundles over Wi-Fi.
-                     */
-                    if (lc->capture != CaptureState::Idle) {
-                        CAIRN_LOGW(TAG, "bench mode: ending capture so bundles can upload");
-                        if (lc->capture == CaptureState::Active ||
-                            lc->capture == CaptureState::Trailing) {
-                            close_gnss_gap(lc, CAIRN_GAP_NO_FIX);
-                            emit_trip_event(lc, CAIRN_EVENT_TRIP_END, "bench");
-                            cairn_kv_set_u32("trip_active", 0);
-                        }
-                        set_capture_state(lc, CaptureState::Idle, 2, 0);
-                        lc->idle_since_ms = millis();
-                        seal_and_reopen(lc, 0);
-                    }
-                }
-            } else if (lc->last_supply_mv_raw > 0) {
-                lc->bench_hits = 0;
-            }
-        }
+    bool confirmed = lc->trip.drive_confirmed;
+    if (confirmed && !lc->drive_confirmed) {
+        CAIRN_LOGI(TAG, "drive confirmed from local evidence (rail %s, accel %u mg); opening the bus",
+                   cairn_trip_engine_running(&lc->trip, millis()) ? "engine running" : "not confirmed",
+                   (unsigned)lc->last_accel_rms_mg);
+        /* Ask for the ECU now rather than at the next minute's retry: the first
+         * minute of a drive is exactly the data that was going missing. */
+        if (!lc->sensors.obd) sensor_task_request_retry();
     }
-
-    /* Dwell tracking for the supply rail. Local measurement; no bus traffic. */
-    bool rail_up = (lc->last_battery_mv != CAIRN_U16_UNKNOWN &&
-                    lc->last_battery_mv >= cairn_engine_params()->engine_on_mv);
-    if (rail_up) {
-        if (lc->voltage_high_since_ms == 0) lc->voltage_high_since_ms = now;
-    } else {
-        lc->voltage_high_since_ms = 0;
-    }
-
-    cairn_drive_evidence_t de;
-    memset(&de, 0, sizeof(de));
-    de.battery_mv      = lc->last_battery_mv;
-    de.voltage_high_ms = rail_up ? (now - lc->voltage_high_since_ms) : 0;
-    de.accel_rms_mg    = lc->last_accel_rms_mg;
-    de.motion_ms       = (lc->motion_since_ms != 0) ? (now - lc->motion_since_ms) : 0;
-
-    /*
-     * Latched while a capture is open. A drive that is already being recorded
-     * stays confirmed even through a traffic light, where both the rail sags
-     * and the car stops moving; un-confirming there would close the bus
-     * mid-trip and lose OBD for the rest of the journey.
-     */
-    if (lc->capture != CaptureState::Idle) {
-        lc->drive_confirmed = true;
-    } else if (cairn_drive_confirmed(&de)) {
-        if (!lc->drive_confirmed) {
-            CAIRN_LOGI(TAG, "drive confirmed from local evidence (rail %u mV for "
-                            "%u ms, accel %u mg for %u ms); opening the bus",
-                       (unsigned)de.battery_mv, (unsigned)de.voltage_high_ms,
-                       (unsigned)de.accel_rms_mg, (unsigned)de.motion_ms);
-            if (!lc->sensors.obd)
-                sensor_task_request_retry();
-        }
-        lc->drive_confirmed = true;
-    } else {
-        lc->drive_confirmed = false;
-    }
+    lc->drive_confirmed = confirmed;
 
     cairn_bus_evidence_t be;
     memset(&be, 0, sizeof(be));
-    be.trip_active     = (lc->capture != CaptureState::Idle);
+    /* A trip, not a candidate: PRETRIP is reached by a door slam on a parked car,
+     * and opening the bus for it is exactly the wake-up the invariant forbids. */
+    be.trip_active     = (lc->capture == CaptureState::Active ||
+                          lc->capture == CaptureState::Trailing);
     be.drive_confirmed = lc->drive_confirmed;
     be.in_standby      = false; /* this runs only while awake */
     be.last_wake       = lc->last_wake;
@@ -1179,7 +1114,7 @@ static void maybe_standby(Lifecycle *lc)
     /* Same reasoning as the OTA precondition: the voltage is readable with the
      * ignition off, and gating it on a live ECU meant the engine-voltage standby
      * gate could never fire, since it only matters while parked. */
-    e.battery_mv = sensors_battery_mv();
+    e.battery_mv = lc->last_battery_mv;
     e.pending_bundles = lc->pending_bundles;
     /* A phone working the offload counts as a live link: standing by switches the
      * radio off, which would drop a transfer in progress and strand the bundles it
@@ -1285,8 +1220,7 @@ static void maybe_standby(Lifecycle *lc)
      * letting the first pass after waking fire everything at once.
      */
     uint32_t now = millis();
-    lc->still_since_ms = now;
-    lc->motion_since_ms = 0;
+    cairn_trip_force(&lc->trip, CAIRN_TRIP_IDLE, now);
     lc->last_wake = r.wake_reason;
 
     /* The receiver was powered down, so position is unknown until it reacquires
@@ -1404,7 +1338,7 @@ void lifecycle_tick(Lifecycle *lc)
         }
     }
 
-    update_motion_scores(lc);
+    const cairn_trip_event_t trip_event = trip_step(lc);
     enforce_bus_silence(lc);
 
     /*
@@ -1468,101 +1402,67 @@ void lifecycle_tick(Lifecycle *lc)
 
     /* ── capture region ───────────────────────────────────────────────────── */
 
-    switch (lc->capture) {
-    case CaptureState::Idle:
-        if (lc->motion_since_ms != 0 && !lc->bench_mode) {
-            set_capture_state(lc, CaptureState::Pretrip, 1, 0);
-        }
+    /* The decisions are lib/cairn_trip's; this performs what each one means. */
+    switch (trip_event) {
+    case CAIRN_TRIP_NONE:
         break;
 
-    case CaptureState::Pretrip:
-        if (lc->motion_since_ms == 0) {
-            /*
-             * The motion did not persist, so nothing is written. The ring keeps
-             * filling and evicting while idle, which is what lets a real drive
-             * recover its first seconds without a parked car producing bundles.
-             *
-             * idle_since_ms is deliberately NOT rebased here. This branch is
-             * the pre-roll *rejecting* a candidate — it has just decided the
-             * movement was not a drive — so the vehicle has been idle all
-             * along and the standby dwell should keep running. Rebasing it
-             * treated a rejected candidate as activity, and since the dwell is
-             * five minutes while a rejection takes well under a second, any
-             * stray bump reset the clock to zero.
-             *
-             * Measured on the bench: a single 638 ms transient
-             * (IDLE -> PRETRIP -> IDLE, start score 2.58 then 0.00) was enough,
-             * and the device never reached standby. In a car parked on a street
-             * — passing lorries, doors, someone leaning on a wing — it would
-             * never have slept at all. Only a genuine trip ending, the
-             * Active -> Idle transition below after the stop dwell, marks the
-             * moment the vehicle actually became idle.
-             */
-            set_capture_state(lc, CaptureState::Idle, 2, 0);
-        } else if (now - lc->motion_since_ms >= CAIRN_START_DWELL_MS) {
-            /*
-             * Confirmed. The state is set first so the flushed frames are
-             * written through rather than pushed straight back into the ring,
-             * and so their PRETRIP flag is the only thing marking them apart.
-             */
-            set_capture_state(lc, CaptureState::Active, 1, 0);
-
-            lc->trip_seq++;
-            cairn_kv_set_u32("trip_seq", lc->trip_seq);
-            cairn_kv_set_u32("trip_active", 1);
-
-            /* Policy first, then the pre-roll: the snapshot describes the
-             * thresholds that admitted those very records, so it belongs ahead
-             * of them in the chain. */
-            emit_policy_snapshot(lc);
-            cairn_preroll_flush(&lc->preroll, &lc->cap);
-
-            /*
-             * After the pre-roll, so the event marks where the *trip* was
-             * declared rather than where the buffered history begins. The
-             * PRETRIP flag already distinguishes those records.
-             */
-            emit_trip_event(lc, CAIRN_EVENT_TRIP_START, nullptr);
-
-            /* A bundle that resumed an interrupted write says so in the data,
-             * not only in the manifest's recovery_state. */
-            if (lc->cap.recovery_state != CAIRN_RECOVERY_CLEAN) {
-                char detail[CAIRN_MAX_EVENT_DETAIL];
-                snprintf(detail, sizeof(detail), "state=%u discarded=%u",
-                         (unsigned)lc->cap.recovery_state,
-                         (unsigned)lc->cap.discarded_tail_bytes);
-                emit_trip_event(lc, CAIRN_EVENT_CAPTURE_RECOVERED, detail);
-            }
-        }
+    case CAIRN_TRIP_TO_PRETRIP:
+        set_capture_state(lc, CaptureState::Pretrip, 1, 0);
         break;
 
-    case CaptureState::Active:
-        if (lc->still_since_ms != 0 &&
-            lc->stop_score_e2 >= CAIRN_STOP_SCORE_THRESHOLD_E2) {
-            set_capture_state(lc, CaptureState::Trailing, 3, 0);
-        }
+    case CAIRN_TRIP_TO_IDLE_REJECTED:
+        /*
+         * The motion did not persist, so nothing is written. The ring keeps filling
+         * and evicting while idle, which is what lets a real drive recover its first
+         * seconds without a parked car producing bundles. idle_since_ms is
+         * deliberately NOT rebased: a rejected candidate is not activity, and
+         * rebasing it once kept a parked car out of standby indefinitely.
+         */
+        set_capture_state(lc, CaptureState::Idle, 2, 0);
         break;
 
-    case CaptureState::Trailing:
-        if (lc->motion_since_ms != 0 &&
-            now - lc->motion_since_ms >= CAIRN_TRAILING_REENTRY_DWELL_MS) {
-            /* Moving again before the stop dwell expired: the same trip
-             * continues. The re-entry dwell requires sustained motion so
-             * a single accelerometer spike from engine vibration does not
-             * bounce the state back to Active and reset the stop dwell. */
-            set_capture_state(lc, CaptureState::Active, 1, 1);
-        } else if (lc->still_since_ms != 0 &&
-                   now - lc->still_since_ms >= CAIRN_STOP_DWELL_MS) {
-            set_capture_state(lc, CaptureState::Idle, 2, 0);
-            lc->idle_since_ms = now;
-            cairn_kv_set_u32("trip_active", 0);
+    case CAIRN_TRIP_TO_ACTIVE: {
+        /* Confirmed. The state is set first so the flushed frames are written
+         * through rather than pushed straight back into the ring. */
+        set_capture_state(lc, CaptureState::Active, 1, 0);
+        lc->trip_seq++;
+        cairn_kv_set_u32("trip_seq", lc->trip_seq);
+        cairn_kv_set_u32("trip_active", 1);
 
-            /* Close any open gap before sealing, so the bundle's last word
-             * about GNSS is accurate. */
-            close_gnss_gap(lc, CAIRN_GAP_NO_FIX);
-            emit_trip_event(lc, CAIRN_EVENT_TRIP_END, nullptr);
-            seal_and_reopen(lc, 0);
+        /* Policy first, then the pre-roll: the snapshot describes the thresholds
+         * that admitted those very records, so it belongs ahead of them. */
+        emit_policy_snapshot(lc);
+        cairn_preroll_flush(&lc->preroll, &lc->cap);
+        emit_trip_event(lc, CAIRN_EVENT_TRIP_START, nullptr);
+
+        if (lc->cap.recovery_state != CAIRN_RECOVERY_CLEAN) {
+            char detail[CAIRN_MAX_EVENT_DETAIL];
+            snprintf(detail, sizeof(detail), "state=%u discarded=%u",
+                     (unsigned)lc->cap.recovery_state,
+                     (unsigned)lc->cap.discarded_tail_bytes);
+            emit_trip_event(lc, CAIRN_EVENT_CAPTURE_RECOVERED, detail);
         }
+        break;
+    }
+
+    case CAIRN_TRIP_TO_TRAILING:
+        set_capture_state(lc, CaptureState::Trailing, 3, 0);
+        break;
+
+    case CAIRN_TRIP_TO_ACTIVE_RESUMED:
+        set_capture_state(lc, CaptureState::Active, 1, 1);
+        break;
+
+    case CAIRN_TRIP_TO_IDLE_ENDED:
+        set_capture_state(lc, CaptureState::Idle, 2, 0);
+        lc->idle_since_ms = now;
+        cairn_kv_set_u32("trip_active", 0);
+        /* Close any open gap before sealing, so the bundle's last word about GNSS
+         * is accurate. */
+        close_gnss_gap(lc, CAIRN_GAP_NO_FIX);
+        emit_trip_event(lc, CAIRN_EVENT_TRIP_END, nullptr);
+        seal_and_reopen(lc, 0);
         break;
     }
 

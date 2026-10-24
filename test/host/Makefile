@@ -44,6 +44,7 @@ INTAKE_DIR  := ../../lib/cairn_intake
 BUNDLE_DIR  := ../../lib/cairn_bundle
 MODEM_DIR   := ../../lib/cairn_modem
 GNSS_DIR    := ../../lib/cairn_gnss
+TRIP_DIR    := ../../lib/cairn_trip
 
 FORMAT_SRC := $(wildcard $(FORMAT_DIR)/*.c)
 STORE_SRC  := $(wildcard $(STORE_DIR)/*.c)
@@ -97,14 +98,14 @@ CFLAGS  ?= -std=c11 -O1 -g -D_DEFAULT_SOURCE \
            -Wall -Wextra -Werror -Wno-format-truncation \
            -Wshadow -Wpointer-arith -Wcast-qual -Wstrict-prototypes \
            -Wmissing-prototypes -Wno-unused-parameter \
-           -I$(FORMAT_DIR) -I$(STORE_DIR) -I$(FS_DIR) -I$(LOG_DIR) -I$(PROV_DIR) -I$(INCLUDE_DIR) -I$(SRC_DIR) -I$(OTA_DIR) -I$(POWER_DIR) -I$(OFFLOAD_DIR) -I$(BOOTTIME_DIR) -I$(UPLINK_DIR) -I$(CONFIG_DIR) -I$(DEVINFO_DIR) -I$(CHECKIN_DIR) -I$(INTAKE_DIR) -I$(BUNDLE_DIR) -I$(MODEM_DIR) -I$(GNSS_DIR) -I.
+           -I$(FORMAT_DIR) -I$(STORE_DIR) -I$(FS_DIR) -I$(LOG_DIR) -I$(PROV_DIR) -I$(INCLUDE_DIR) -I$(SRC_DIR) -I$(OTA_DIR) -I$(POWER_DIR) -I$(OFFLOAD_DIR) -I$(BOOTTIME_DIR) -I$(UPLINK_DIR) -I$(CONFIG_DIR) -I$(DEVINFO_DIR) -I$(CHECKIN_DIR) -I$(INTAKE_DIR) -I$(BUNDLE_DIR) -I$(MODEM_DIR) -I$(GNSS_DIR) -I$(TRIP_DIR) -I.
 
 # Every header the sources can include. Without this a change to a shared header
 # (config.h, cairn_platform.h, policy.h) leaves a stale binary in build/ and a
 # result that describes yesterday's code — which already produced one false
 # failure and could as easily produce a false pass.
 HEADERS := $(wildcard $(OFFLOAD_DIR)/*.h $(PROV_DIR)/*.h $(FORMAT_DIR)/*.h $(STORE_DIR)/*.h $(FS_DIR)/*.h $(LOG_DIR)/*.h \
-                      $(INCLUDE_DIR)/*.h $(SRC_DIR)/*.h $(OTA_DIR)/*.h $(POWER_DIR)/*.h $(BOOTTIME_DIR)/*.h $(UPLINK_DIR)/*.h $(CONFIG_DIR)/*.h $(DEVINFO_DIR)/*.h $(CHECKIN_DIR)/*.h $(INTAKE_DIR)/*.h $(BUNDLE_DIR)/*.h $(MODEM_DIR)/*.h $(GNSS_DIR)/*.h *.h)
+                      $(INCLUDE_DIR)/*.h $(SRC_DIR)/*.h $(OTA_DIR)/*.h $(POWER_DIR)/*.h $(BOOTTIME_DIR)/*.h $(UPLINK_DIR)/*.h $(CONFIG_DIR)/*.h $(DEVINFO_DIR)/*.h $(CHECKIN_DIR)/*.h $(INTAKE_DIR)/*.h $(BUNDLE_DIR)/*.h $(MODEM_DIR)/*.h $(GNSS_DIR)/*.h $(TRIP_DIR)/*.h *.h)
 
 SAN := -fsanitize=address,undefined -fno-omit-frame-pointer
 
@@ -113,7 +114,7 @@ BUILD := build
 # Engine profiles (lib/cairn_engine): see engine.mk.
 include engine.mk
 
-.PHONY: all run asan clean conformance faults ble-vectors mtprobe prov offload offload-sim boottime blesec uplink config devinfo nvswipe intake bundle modem gnss
+.PHONY: all run asan clean conformance faults ble-vectors mtprobe prov offload offload-sim boottime blesec uplink config devinfo nvswipe intake bundle modem gnss trip
 
 all: run
 
@@ -180,6 +181,14 @@ $(BUILD)/gnss: $(GNSS_DIR)/cairn_gnss.c gnss_test.c $(HEADERS) | $(BUILD)
 
 gnss: $(BUILD)/gnss
 	$(BUILD)/gnss
+
+# Trip detection: the drives lost between 2026-10-15 and 10-23 (garbled rail, OBD
+# silent, smooth roads) are captured; idling, door slams and bench power are not trips.
+$(BUILD)/trip: $(TRIP_DIR)/cairn_trip.c trip_test.c $(HEADERS) | $(BUILD)
+	$(CC) $(CFLAGS) $(TRIP_DIR)/cairn_trip.c trip_test.c -o $@
+
+trip: $(BUILD)/trip
+	$(BUILD)/trip
 
 $(BUILD)/blesec: $(BLESEC_DIR)/cairn_blesec.h blesec_test.c | $(BUILD)
 	$(CC) $(CFLAGS) -I$(BLESEC_DIR) blesec_test.c -o $@
@@ -267,7 +276,7 @@ else
 $(info device-info vectors not in this contracts pin (needs contracts-v0.2.0): devinfo row skipped)
 endif
 
-run: conformance faults ble-vectors mtprobe prov offload boottime blesec uplink config nvswipe intake bundle modem gnss
+run: conformance faults ble-vectors mtprobe prov offload boottime blesec uplink config nvswipe intake bundle modem gnss trip
 
 # Undefined behaviour in the scan path would be a parser reading past a torn
 # segment — exactly the case the format exists to handle safely.
@@ -288,6 +297,8 @@ asan: | $(BUILD)
 	$(BUILD)/boottime-asan
 	$(CC) $(CFLAGS) $(SAN) $(GNSS_DIR)/cairn_gnss.c gnss_test.c -lm -o $(BUILD)/gnss-asan
 	$(BUILD)/gnss-asan
+	$(CC) $(CFLAGS) $(SAN) $(TRIP_DIR)/cairn_trip.c trip_test.c -o $(BUILD)/trip-asan
+	$(BUILD)/trip-asan
 	$(CC) $(CFLAGS) $(SAN) $(UPLINK_DIR)/cairn_uplink.c uplink_test.c -o $(BUILD)/uplink-asan
 	$(BUILD)/uplink-asan
 	$(CC) $(CFLAGS) $(SAN) $(FS_DIR)/cairn_nvs_wipe.c nvs_wipe_test.c -o $(BUILD)/nvswipe-asan

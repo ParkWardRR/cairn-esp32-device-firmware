@@ -197,6 +197,17 @@ void sensors_fill_health(cairn_device_health_t *out, uint8_t health_state,
  */
 void sensors_gnss_power_down(void);
 
+/* The co-processor link lock (recursive). Every sensors_* function that talks to the
+ * link takes it; code outside this module that must make several calls as one
+ * exchange may take it around them. */
+void sensors_link_lock(void);
+void sensors_link_unlock(void);
+
+/* One supply reading: the vehicle-range value (CAIRN_U16_UNKNOWN outside 9-18 V) and
+ * the raw value (0 if unreadable). Called by the sensing task, which owns the link;
+ * everyone else reads its cache (sensor_task_supply). */
+void sensors_read_supply(uint16_t *battery_mv, uint16_t *raw_mv);
+
 /*
  * Put the OBD coprocessor into its low-power mode, or bring it back.
  *

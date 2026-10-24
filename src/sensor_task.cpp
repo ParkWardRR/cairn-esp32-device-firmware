@@ -49,6 +49,13 @@ static SensorStatus  *s_status;
 static volatile uint32_t s_dropped;
 static volatile bool  s_retry_requested;
 
+/* The supply rail, sampled here because this task owns the co-processor link. Under a
+ * spinlock: the ESP32 is 32-bit, and a reader must not see a voltage paired with the
+ * wrong time. */
+static portMUX_TYPE s_supply_lock = portMUX_INITIALIZER_UNLOCKED;
+static uint16_t s_supply_batt = CAIRN_U16_UNKNOWN, s_supply_raw;
+static uint32_t s_supply_at, s_supply_seq;
+
 /*
  * Consecutive cycles in which the ECU answered nothing, and the shape of the
  * backoff that follows.
@@ -118,6 +125,7 @@ static void sensor_task(void *arg)
     uint32_t next_imu    = millis() + s_imu_window_ms;
     uint32_t next_health = millis();
     uint32_t next_motion = millis();
+    uint32_t next_supply = millis();
     uint32_t next_retry  = millis() + 60000;
 
     bool     have_utc_basis = false;
@@ -147,6 +155,15 @@ static void sensor_task(void *arg)
         /* Highest rate first, and unconditionally: this is the sample stream
          * the window statistics are computed from. */
         sensors_imu_accumulate();
+
+        if ((int32_t)(now - next_supply) >= 0) {
+            next_supply = now + CAIRN_BATTERY_POLL_MS;
+            uint16_t batt = CAIRN_U16_UNKNOWN, raw = 0;
+            sensors_read_supply(&batt, &raw);
+            portENTER_CRITICAL(&s_supply_lock);
+            s_supply_batt = batt; s_supply_raw = raw; s_supply_at = now; s_supply_seq++;
+            portEXIT_CRITICAL(&s_supply_lock);
+        }
 
         if ((int32_t)(now - next_motion) >= 0) {
             next_motion = now + MOTION_PERIOD_MS;
@@ -471,6 +488,18 @@ bool sensor_task_post_fact(const fact_t *f)
 uint32_t sensor_task_dropped(void) { return s_dropped; }
 
 void sensor_task_request_retry(void) { s_retry_requested = true; }
+
+uint32_t sensor_task_supply(uint16_t *battery_mv, uint16_t *raw_mv, uint32_t *at_ms)
+{
+    portENTER_CRITICAL(&s_supply_lock);
+    uint16_t b = s_supply_batt, r = s_supply_raw;
+    uint32_t a = s_supply_at, q = s_supply_seq;
+    portEXIT_CRITICAL(&s_supply_lock);
+    if (battery_mv) *battery_mv = b;
+    if (raw_mv)     *raw_mv     = r;
+    if (at_ms)      *at_ms      = a;
+    return q;
+}
 
 void sensor_task_set_rates(const cairn_rates_t *r)
 {

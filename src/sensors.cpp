@@ -4,6 +4,8 @@
 #include <FreematicsPlus.h>
 #include <Preferences.h>
 #include <math.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 #include "cairn_engine.h"
 #include "cairn_log.h"
@@ -115,6 +117,41 @@ static MEMS_I2C       *s_mems = nullptr;
 static GPS_DATA       *s_gps = nullptr;
 
 static SensorStatus   *s_status = nullptr;
+
+/*
+ * One lock for the co-processor link.
+ *
+ * GNSS (ATGPS, ATGRR), OBD (every PID), the supply voltage (ATVR) and the receiver's
+ * power all go over one serial link to the co-processor, as command and reply. Two
+ * tasks used it with nothing between them: the sensing task polling GNSS and OBD, and
+ * the controller reading the supply rail every 500 ms. Their replies interleaved. On
+ * the 2026-10-22 drives half the rail readings came back as 9000 mV, 16000 mV or
+ * unreadable while the engine was running, which kept the drive from ever being
+ * confirmed and so kept OBD silent for the whole drive. Every function here that
+ * talks to the link takes this lock for its whole exchange. It is recursive because
+ * some exchanges are made of others (a retry calls init, init sends aiding).
+ */
+static SemaphoreHandle_t s_link_mutex;
+
+void sensors_link_lock(void)
+{
+    if (s_link_mutex == nullptr) s_link_mutex = xSemaphoreCreateRecursiveMutex();
+    xSemaphoreTakeRecursive(s_link_mutex, portMAX_DELAY);
+}
+
+void sensors_link_unlock(void)
+{
+    if (s_link_mutex != nullptr) xSemaphoreGiveRecursive(s_link_mutex);
+}
+
+namespace {
+struct LinkGuard {
+    LinkGuard() { sensors_link_lock(); }
+    ~LinkGuard() { sensors_link_unlock(); }
+    LinkGuard(const LinkGuard &) = delete;
+    LinkGuard &operator=(const LinkGuard &) = delete;
+};
+}
 
 /* Accelerometer bias, measured at boot while the vehicle is presumed still. */
 static float s_acc_bias[3] = { 0, 0, 0 };
@@ -481,6 +518,7 @@ static bool engine_gate(const char *vin)
 
 bool sensors_begin(SensorStatus *status)
 {
+    LinkGuard link_guard;
     memset(status, 0, sizeof(*status));
     memset(&s_imu, 0, sizeof(s_imu));
     s_imu.window_start_ms = millis();
@@ -498,6 +536,7 @@ bool sensors_begin(SensorStatus *status)
 
 void sensors_retry_failed(SensorStatus *status, bool bus_open)
 {
+    LinkGuard link_guard;
     if (bus_open && !status->obd && status->coprocessor && !s_engine_refused &&
         engine_gate(nullptr)) {
         if (s_obd.init()) {
@@ -524,6 +563,7 @@ void sensors_retry_failed(SensorStatus *status, bool bus_open)
 
 bool sensors_read_gnss(cairn_gnss_sample_t *out, uint32_t *fix_age_ms)
 {
+    LinkGuard link_guard;
     if (s_status == nullptr || !s_status->gnss) return false;
     if (!s_sys.gpsGetData(&s_gps) || s_gps == nullptr) return false;
 
@@ -615,6 +655,7 @@ static bool               s_nmea_ready;
 
 int sensors_read_gnss_nmea(cairn_nmea_fix_t *out, int max_out)
 {
+    LinkGuard link_guard;
     if (!s_nmea_available || s_status == nullptr || !s_status->gnss) return 0;
     if (!s_nmea_ready) { cairn_nmea_reset(&s_nmea); s_nmea_ready = true; }
 
@@ -870,6 +911,7 @@ static bool pid_raw_u16(uint8_t pid, uint16_t *out)
  */
 bool sensors_read_obd_batch(obd_batch_t *out)
 {
+    LinkGuard link_guard;
     memset(out, 0, sizeof(*out));
 
     /*
@@ -979,6 +1021,7 @@ static bool field_pid(cairn_field_t f, byte *pid)
  */
 int sensors_obd_multi_probe(const uint8_t *pids, int n, char *out, size_t cap)
 {
+    LinkGuard link_guard;
     if (out == nullptr || cap == 0) return -1;
     out[0] = '\0';
     if (s_obd.link == nullptr || pids == nullptr || n <= 0 || n > 6) return -1;
@@ -1063,6 +1106,7 @@ static bool cold_pid(cairn_field_t f, byte *pid)
 
 bool sensors_read_obd(cairn_obd_snapshot_t *out, const obd_batch_t *batch)
 {
+    LinkGuard link_guard;
     if (s_status == nullptr || !s_status->obd) return false;
 
     memset(out, 0, sizeof(*out));
@@ -1200,6 +1244,7 @@ bool sensors_read_obd(cairn_obd_snapshot_t *out, const obd_batch_t *batch)
 
 uint16_t sensors_battery_mv(void)
 {
+    LinkGuard link_guard;
     if (s_status == nullptr || !s_status->coprocessor) return CAIRN_U16_UNKNOWN;
 
     /*
@@ -1245,8 +1290,29 @@ uint16_t sensors_battery_mv(void)
     return CAIRN_U16_UNKNOWN;
 }
 
+void sensors_read_supply(uint16_t *battery_mv, uint16_t *raw_mv)
+{
+    LinkGuard link_guard;
+    *battery_mv = CAIRN_U16_UNKNOWN;
+    *raw_mv = 0;
+    if (s_status == nullptr || !s_status->coprocessor) return;
+    /* One exchange answers both questions the controller asks: the raw figure for the
+     * bench-power test, the vehicle-range figure for everything else. They used to be
+     * two separate reads every 500 ms, from the controller's task, on a shared link. */
+    for (int attempt = 0; attempt < 3; attempt++) {
+        float v = s_obd.getVoltage();
+        if (v > 0.1f && v < 25.0f) {
+            *raw_mv = (uint16_t)lroundf(v * 1000.0f);
+            if (v >= 9.0f && v <= 18.0f) *battery_mv = *raw_mv;
+            return;
+        }
+        if (attempt < 2) delay(20);
+    }
+}
+
 uint16_t sensors_supply_mv_raw(void)
 {
+    LinkGuard link_guard;
     if (s_status == nullptr || !s_status->coprocessor) return 0;
     for (int attempt = 0; attempt < 3; attempt++) {
         float v = s_obd.getVoltage();
@@ -1270,6 +1336,7 @@ void sensors_gnss_save_aiding(const cairn_gnss_sample_t *fix)
 
 void sensors_gnss_power_down(void)
 {
+    LinkGuard link_guard;
     if (s_status == NULL || !s_status->gnss) return;
 
     s_sys.gpsEnd(true);
@@ -1281,6 +1348,7 @@ void sensors_gnss_power_down(void)
 
 void sensors_link_low_power(bool enable)
 {
+    LinkGuard link_guard;
     if (s_status == NULL || !s_status->coprocessor) return;
 
     if (enable) {
@@ -1359,6 +1427,7 @@ bool sensors_gnss_freshness(uint32_t *age_ms, uint8_t *sats)
 bool sensors_read_obd_extended(cairn_obd_extended_t *out,
                                const obd_batch_t *batch)
 {
+    LinkGuard link_guard;
     if (s_status == nullptr || !s_status->obd) return false;
 
     memset(out, 0, sizeof(*out));
@@ -1540,17 +1609,20 @@ bool sensors_obd_ready(void)
 
 bool sensors_obd_pid_supported(uint8_t pid)
 {
+    LinkGuard link_guard;
     return s_obd.isValidPID(pid);
 }
 
 uint8_t sensors_obd_pidmap_byte(uint8_t index)
 {
+    LinkGuard link_guard;
     if (index >= sizeof(s_obd.pidmap)) return 0;
     return s_obd.pidmap[index];
 }
 
 bool sensors_obd_converted_pid(uint8_t pid, int *out)
 {
+    LinkGuard link_guard;
     int v = 0;
     if (!s_obd.readPID(pid, v)) return false;
     *out = v;
@@ -1559,6 +1631,7 @@ bool sensors_obd_converted_pid(uint8_t pid, int *out)
 
 int sensors_obd_raw_pid(uint8_t pid, char *out, size_t cap)
 {
+    LinkGuard link_guard;
     if (out == nullptr || cap == 0) return -1;
     out[0] = '\0';
 
@@ -1625,6 +1698,7 @@ int sensors_obd_raw_pid(uint8_t pid, char *out, size_t cap)
  */
 int sensors_obd_command(const char *cmd, char *buf, size_t cap, uint32_t timeout_ms)
 {
+    LinkGuard link_guard;
     if (s_obd.link == nullptr || buf == nullptr || cap == 0) return 0;
     buf[0] = '\0';
     return s_obd.link->sendCommand(cmd, buf, (int)cap, timeout_ms);
@@ -1634,6 +1708,7 @@ int sensors_obd_command(const char *cmd, char *buf, size_t cap, uint32_t timeout
  * link's counter is a single byte, so callers keep cap at or under 255. */
 int sensors_obd_receive(char *buf, size_t cap, uint32_t timeout_ms)
 {
+    LinkGuard link_guard;
     if (s_obd.link == nullptr || buf == nullptr || cap == 0) return 0;
     buf[0] = '\0';
     return s_obd.link->receive(buf, (int)cap, timeout_ms);
@@ -1643,6 +1718,7 @@ int sensors_obd_receive(char *buf, size_t cap, uint32_t timeout_ms)
  * only to leave sniff mode when a plain request no longer works. */
 bool sensors_obd_recover(void)
 {
+    LinkGuard link_guard;
     return s_obd.init();
 }
 #endif /* CAIRN_MTPROBE */

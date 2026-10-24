@@ -24,6 +24,7 @@
 #include "cairn_power.h"
 #include "cairn_store.h"
 #include "policy.h"
+#include "cairn_trip.h"
 #include "preroll.h"
 #include "sensors.h"
 
@@ -103,14 +104,13 @@ struct Lifecycle {
     /*
      * Parked-silence state. See the invariant in cairn_power.h.
      *
-     * `drive_confirmed` is latched by local evidence only — supply rail and
-     * accelerometer — and is what opens the vehicle bus. `voltage_high_since_ms`
-     * tracks the dwell for that evidence. `last_wake` is carried so a
+     * `drive_confirmed` mirrors trip.drive_confirmed (lib/cairn_trip), which is
+     * latched by local evidence only — supply rail and accelerometer — and is what
+     * opens the vehicle bus. `last_wake` is carried so a
      * periodic-health wake can be refused the bus even though it is, briefly,
      * an awake device.
      */
     bool     drive_confirmed = false;
-    uint32_t voltage_high_since_ms = 0;
     cairn_wake_reason_t last_wake = CAIRN_WAKE_NONE;
     const char *last_bus_silence_reason = nullptr;
 
@@ -133,7 +133,6 @@ struct Lifecycle {
     uint32_t heartbeat_settle_until_ms = 0;
 
     uint16_t last_battery_mv = CAIRN_U16_UNKNOWN;
-    uint32_t next_battery_read_ms = 0;
 
     /* Bench-mode auto-detect. On USB power with no OBD, sensors_supply_mv_raw() reads
      * the floating OBD rail (a few volts, inside this threshold); in the car it reads
@@ -170,8 +169,10 @@ struct Lifecycle {
     /* Motion scoring. Hundredths, matching the STATE_TRANSITION payload. */
     uint16_t start_score_e2 = 0;
     uint16_t stop_score_e2  = 0;
-    uint32_t motion_since_ms = 0;
-    uint32_t still_since_ms  = 0;
+    /* Trip detection: lib/cairn_trip owns motion, stillness, the rail and the
+     * drive-confirmed latch. */
+    cairn_trip_t trip{};
+    uint32_t supply_seq = 0;
 
     /* GNSS gap accounting, so a gap is recorded as a gap. */
     uint32_t gnss_gap_started_ms = 0;

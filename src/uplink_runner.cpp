@@ -139,7 +139,8 @@ static bool should_abort(void *)
      * value when the slot began so a unit sitting on a steady 12.6 V rail is
      * not mistaken for one being started.
      */
-    uint16_t supply = sensors_supply_mv_raw();
+    uint16_t supply = 0;
+    sensor_task_supply(nullptr, &supply, nullptr);
     if (supply >= CAIRN_ENGINE_ON_MV &&
         s_slot.supply_at_start_mv < CAIRN_ENGINE_ON_MV) {
         s_slot.aborting = true;
@@ -162,7 +163,8 @@ static void slot_begin(uint32_t limit_ms)
 {
     s_slot.started_ms         = millis();
     s_slot.limit_ms           = limit_ms;
-    s_slot.supply_at_start_mv = sensors_supply_mv_raw();
+    s_slot.supply_at_start_mv = 0;
+    sensor_task_supply(nullptr, &s_slot.supply_at_start_mv, nullptr);
     s_slot.aborting           = false;
     s_slot.why                = nullptr;
 }
