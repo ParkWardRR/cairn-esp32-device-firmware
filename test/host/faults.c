@@ -303,9 +303,21 @@ static bool file_size_of(const char *rel, uint64_t *size)
 }
 
 /* Build and sign a receipt, so the prune rows can present genuine and forged
- * evidence rather than hand-written bytes. */
+ * evidence rather than hand-written bytes. It lists `n_objects` object ids at
+ * their longest, as a server's receipt for a large bundle does. */
+static size_t make_receipt_listing(const uint8_t seed[32], const uint8_t content_root[32],
+                                   const uint8_t bundle_id[16], size_t n_objects,
+                                   uint8_t *out, size_t cap);
+
 static size_t make_receipt(const uint8_t seed[32], const uint8_t content_root[32],
                            const uint8_t bundle_id[16], uint8_t *out, size_t cap)
+{
+    return make_receipt_listing(seed, content_root, bundle_id, 0, out, cap);
+}
+
+static size_t make_receipt_listing(const uint8_t seed[32], const uint8_t content_root[32],
+                                   const uint8_t bundle_id[16], size_t n_objects,
+                                   uint8_t *out, size_t cap)
 {
     uint8_t pub[32];
     cairn_ed25519_public_from_seed(seed, pub);
@@ -322,9 +334,13 @@ static size_t make_receipt(const uint8_t seed[32], const uint8_t content_root[32
     cairn_device_key_id(pub, r.server_key_id);
     snprintf(r.signature_algorithm, sizeof(r.signature_algorithm), "%s",
              CAIRN_SIGALG_ED25519);
-    r.object_id_count = 0;
+    r.object_id_count = n_objects;
+    for (size_t i = 0; i < n_objects; i++) {
+        memset(r.object_ids[i], 'a' + (int)i, CAIRN_MAX_OBJECT_ID_LEN - 1);
+        r.object_ids[i][CAIRN_MAX_OBJECT_ID_LEN - 1] = '\0';
+    }
 
-    uint8_t signing[1024];
+    uint8_t signing[2048];
     size_t  signing_len = 0;
     if (cairn_receipt_signing_bytes(&r, signing, sizeof(signing), &signing_len)
         != CAIRN_OK) {
@@ -1242,6 +1258,35 @@ static bool row_prune_rejects_wrong_key(void)
     CHECK(r == CAIRN_PRUNE_RECEIPT_UNVERIFIED,
           "result is %s, want RECEIPT_UNVERIFIED", cairn_prune_result_name(r));
     CHECK(bundle_still_present(id), "the bundle was deleted on an unverified receipt");
+
+    return true;
+}
+
+/*
+ * A server's receipt names the objects it stored, so a large bundle's receipt is
+ * larger. Measured 2026-10-25: two 703-byte receipts, genuine, were refused as
+ * RECEIPT_UNVERIFIED on every upload session, because the signed bytes were rebuilt
+ * into a 512-byte buffer that they overflowed. The bundles were never pruned.
+ */
+static bool row_prune_accepts_a_receipt_listing_every_object(void)
+{
+    char    id[27];
+    uint8_t root[32];
+    CHECK(sealed_bundle(id, root), "setup: seal failed");
+
+    uint8_t pinned[32];
+    cairn_ed25519_public_from_seed(SERVER_SEED, pinned);
+
+    static uint8_t receipt[2048];
+    uint8_t bundle_id[16];
+    CHECK(cairn_ulid_decode(id, bundle_id), "bad id");
+    size_t len = make_receipt_listing(SERVER_SEED, root, bundle_id, CAIRN_MAX_OBJECT_IDS,
+                                      receipt, sizeof(receipt));
+    CHECK(len > 703, "could not build a receipt larger than the measured one (%zu bytes)", len);
+
+    cairn_prune_result_t r = cairn_prune_if_receipted(id, receipt, len, pinned, root);
+    CHECK(r == CAIRN_PRUNE_OK, "result is %s, want OK", cairn_prune_result_name(r));
+    CHECK(!bundle_still_present(id), "a genuine receipt did not prune the bundle");
 
     return true;
 }
@@ -3488,6 +3533,7 @@ static const row_t ROWS[] = {
     { "seal",     "a live capture is not mistaken for a seal", row_live_capture_not_sealed },
     { "seal",     "a sealed bundle is never overwritten",     row_seal_never_overwrites },
     { "prune",    "rejects a receipt from an untrusted key",  row_prune_rejects_wrong_key },
+    { "prune",    "accepts a receipt listing every object",   row_prune_accepts_a_receipt_listing_every_object },
     { "prune",    "rejects a receipt for different content",  row_prune_rejects_wrong_root },
     { "prune",    "rejects a malformed receipt",              row_prune_rejects_malformed },
     { "prune",    "refuses without a pinned key",             row_prune_requires_pinned_key },

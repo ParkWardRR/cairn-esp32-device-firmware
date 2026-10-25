@@ -808,6 +808,15 @@ typedef struct {
     uint8_t  signature[64];
 } cairn_receipt_t;
 
+/*
+ * The longest signing encoding a decodable receipt can have: the fixed fields (about
+ * 140 bytes) with room to spare, and every object id at its longest. A server's
+ * receipt grows with the objects it names; sizing the buffer for a typical receipt
+ * refused the genuine 703-byte receipts of two large bundles as unverified, on every
+ * upload session, so they were never pruned (2026-10-25).
+ */
+#define CAIRN_RECEIPT_SIGNING_MAX (256u + CAIRN_MAX_OBJECT_IDS * (CAIRN_MAX_OBJECT_ID_LEN + 2u))
+
 /* The deterministic encoding of keys 1..10 — what the signature covers. */
 cairn_err_t cairn_receipt_signing_bytes(const cairn_receipt_t *r,
                                         uint8_t *out, size_t out_cap, size_t *written);

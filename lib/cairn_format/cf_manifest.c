@@ -716,7 +716,7 @@ cairn_err_t cairn_receipt_decode(const uint8_t *buf, size_t len,
 
 cairn_err_t cairn_receipt_verify(const cairn_receipt_t *r, const uint8_t pub[32])
 {
-    uint8_t signing[512];
+    uint8_t signing[CAIRN_RECEIPT_SIGNING_MAX];
     size_t  n = 0;
 
     cairn_err_t err = cairn_receipt_signing_bytes(r, signing, sizeof(signing), &n);
