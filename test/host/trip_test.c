@@ -33,7 +33,7 @@ typedef struct {
 } scene_t;
 
 typedef struct {
-    int active_ticks, trips_started, trips_ended, max_state;
+    int active_ticks, trips_started, trips_ended, max_state, trailing, resumed;
     uint32_t first_active_ms;
 } tally_t;
 
@@ -61,6 +61,8 @@ static void run(cairn_trip_t *t, uint32_t *now, uint32_t ms, const scene_t *s, t
         cairn_trip_event_t e = cairn_trip_step(t, &in);
         if (e == CAIRN_TRIP_TO_ACTIVE) { k->trips_started++; if (!k->first_active_ms) k->first_active_ms = *now; }
         if (e == CAIRN_TRIP_TO_IDLE_ENDED) k->trips_ended++;
+        if (e == CAIRN_TRIP_TO_TRAILING) k->trailing++;
+        if (e == CAIRN_TRIP_TO_ACTIVE_RESUMED) k->resumed++;
         if (t->state == CAIRN_TRIP_ACTIVE) k->active_ticks++;
         if ((int)t->state > k->max_state) k->max_state = t->state;
     }
@@ -152,6 +154,31 @@ static void test_stops(void)
     CHECK("after parking the bus closes on a valid low rail", !t.drive_confirmed);
 }
 
+static void test_a_stop_is_one_transition_each_way(void)
+{
+    /* 2026-10-24, the M240i (boot 9261cd5b): 1208 transitions in one evening. At every
+     * stop the trip went ACTIVE -> TRAILING on the stop evidence and straight back on the
+     * drive's own motion, which the start-score hysteresis keeps for 2 s -- every 100 ms
+     * tick, 20 times a stop. Engine running, OBD 0 kph, 40-60 mg at the light. */
+    cairn_trip_t t; cairn_trip_init(&t, 13200);
+    uint32_t now = 1000; tally_t k = {0};
+    scene_t drive = {14800, 0, 110, 20, 50, 1400, 0};
+    scene_t light = {14600, 0, 50, 10, 0, 0, 0};
+    run(&t, &now, 3 * 60000, &drive, &k);
+    run(&t, &now, 45000, &light, &k);
+    CHECK("stopping at a light is one move to TRAILING", k.trailing == 1 && k.resumed == 0);
+    run(&t, &now, 2 * 60000, &drive, &k);
+    CHECK("and driving off is one resume", k.trailing == 1 && k.resumed == 1 && t.state == CAIRN_TRIP_ACTIVE);
+
+    /* A bump while waiting (a pothole, a door) is one tick of motion, not a drive. */
+    tally_t k2 = {0};
+    scene_t bump = {14600, 0, 300, 0, 0, 0, 0};
+    run(&t, &now, 30000, &light, &k2);
+    run(&t, &now, 100, &bump, &k2);
+    run(&t, &now, 10000, &light, &k2);
+    CHECK("a bump at a stop does not resume the trip", k2.trailing == 1 && k2.resumed == 0);
+}
+
 static void test_rail_tolerance(void)
 {
     cairn_trip_t t; cairn_trip_init(&t, 13200);
@@ -186,6 +213,7 @@ int main(void)
     test_engine_and_accelerometer_alone();
     test_what_must_not_start_a_trip();
     test_stops();
+    test_a_stop_is_one_transition_each_way();
     test_rail_tolerance();
     test_resume_and_force();
     printf("trip: %d passed, %d failed\n", g_pass, g_fail);

@@ -1164,6 +1164,16 @@ bool sensors_read_obd(cairn_obd_snapshot_t *out, const obd_batch_t *batch)
         out->rpm = CAIRN_I16_UNKNOWN;
     }
 
+    /*
+     * 0xFF for vehicle speed with the engine stopped is the DME saying "not available",
+     * not 255 km/h. Measured 2026-10-24 on the M240i (B58): minutes of 255 km/h at rpm 0
+     * after parking, which read as a 158 mph trip maximum and, fed to the trip detector
+     * as a fresh speed, as motion that kept a parked car's trip from ending.
+     */
+    if (out->speed_kph == 255 && out->rpm == 0) {
+        out->speed_kph = CAIRN_I16_UNKNOWN;
+    }
+
     if (have_batch && batch_has(batch, CAIRN_FIELD_THROTTLE_PCT)) {
         out->throttle_pct = batch->throttle_pct;
         requested++; answered++;

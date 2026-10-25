@@ -146,10 +146,21 @@ cairn_trip_event_t cairn_trip_step(cairn_trip_t *t, const cairn_trip_input_t *in
         }
         break;
     case CAIRN_TRIP_ACTIVE:
-        if (t->still_since) { t->state = CAIRN_TRIP_TRAILING; return CAIRN_TRIP_TO_TRAILING; }
+        if (t->still_since) {
+            /* The stop evidence ends the drive's run of motion. Left set, the start
+             * score's hysteresis kept it for 2 s more and TRAILING resumed on it the
+             * next tick: every stop flapped ACTIVE <-> TRAILING at the tick rate (1208
+             * transitions in the M240i's evening of 2026-10-24). */
+            t->motion_since = 0;
+            t->motion_low_since = 0;
+            t->state = CAIRN_TRIP_TRAILING;
+            return CAIRN_TRIP_TO_TRAILING;
+        }
         break;
     case CAIRN_TRIP_TRAILING:
-        if (t->motion_since && since(now, t->motion_since) >= CAIRN_TRIP_REENTRY_DWELL_MS) {
+        /* Motion now, and since the stop for the re-entry dwell: one bump at a light
+         * starts a run the hysteresis would otherwise carry past the dwell. */
+        if (motion_now && t->motion_since && since(now, t->motion_since) >= CAIRN_TRIP_REENTRY_DWELL_MS) {
             t->state = CAIRN_TRIP_ACTIVE;
             return CAIRN_TRIP_TO_ACTIVE_RESUMED;
         }
