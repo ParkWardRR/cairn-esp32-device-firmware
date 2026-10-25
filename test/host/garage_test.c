@@ -17,9 +17,9 @@ static int g_pass, g_fail;
     } while (0)
 
 /* Made-up VINs with the two cars' engine codes at positions 4-8. */
-static const char *VIN_428 = "WBA3A5C50EXAMPLE";
-static const char *VIN_M240 = "WBA2J7C00HEXAMPL";
-static const char *VIN_OTHER_N20 = "WBA3A5C59FOTHER0";
+static const char *VIN_428 = "WBA3N3C50EXAMPLE0";
+static const char *VIN_M240 = "WBA2G1C30HEXAMPL0";
+static const char *VIN_OTHER_N20 = "WBA3N3C59FOTHER00";
 
 static void slot(cairn_garage_t *g, int i, uint8_t tag, const char *engine)
 {

@@ -25,7 +25,7 @@ applies_to:
   models: ["M240i (F22)"]
   years: { from: 2017, to: 2017 }
   vin_patterns: unknown
-  engine_codes: ["2J7C0"]  # BMW VDS positions 4-8 for F22 M240i B58
+  engine_codes: ["2G1C3"]  # VIN positions 4-8 of the owner's M240i, read by the dongle 2026-10-24 (was 2J7C0, which matched nothing)
 
 fuel:
   type: gasoline            # pidtest.cpp: stoichiometry discussed as gasoline vs E85

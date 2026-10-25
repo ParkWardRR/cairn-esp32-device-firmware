@@ -1021,6 +1021,15 @@ int main(int argc, char **argv)
             }
         }
     }
+    {
+        /* The owner's two cars, by the VIN prefixes the dongle read (positions 4-8; the
+         * rest made up). The codes first committed, 3A5C5 and 2J7C0, matched neither. */
+        const cairn_engine_catalogue_entry_t *h;
+        h = cairn_engine_match_code(cairn_engine_catalogue(), cairn_engine_catalogue_count(), "WBA3N3C50EXAMPLE0");
+        CHECK(h != NULL && strcmp(h->id, "bmw-n20") == 0);
+        h = cairn_engine_match_code(cairn_engine_catalogue(), cairn_engine_catalogue_count(), "WBA2G1C30HEXAMPL0");
+        CHECK(h != NULL && strcmp(h->id, "bmw-b58") == 0);
+    }
     test_params_follow_active(n20, NULL); /* no engine in the tree is a stub any more */
 
     /* Source tripwires: relative to test/host, where make runs this. */
