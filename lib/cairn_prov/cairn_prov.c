@@ -228,12 +228,53 @@ static bool is_hex32(const char *s, uint8_t out[16])
     return true;
 }
 
-static void set_field(cairn_prov_t *p, char *field, char *a1, char *a2)
+/* An engine profile id as engines/<id>.yaml spells it: lowercase, digits, '-'. */
+static bool is_engine_id(const char *s)
+{
+    size_t n = strlen(s);
+    if (n == 0 || n >= CAIRN_GARAGE_ENGINE_MAX) return false;
+    for (size_t i = 0; i < n; i++) {
+        char c = s[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-')) return false;
+    }
+    return true;
+}
+
+static void set_field(cairn_prov_t *p, char *field, char *a1, char *a2, char *a3, char *a4)
 {
     cairn_prov_staged_t *st = &p->st;
     char msg[96];
 
-    if (strcmp(field, "assignment") == 0 && a1 && a2) {
+    if (strcmp(field, "garage") == 0 && a1 && a2 && a3 && a4) {
+        uint8_t veh[16], asg[16];
+        if (strlen(a1) != 1 || a1[0] < '0' || a1[0] >= '0' + CAIRN_GARAGE_SLOTS) {
+            say(p, "ERR garage slot must be 0-3");
+            return;
+        }
+        if (!is_hex32(a2, veh) || !is_hex32(a3, asg) || all_zero(veh, 16) || all_zero(asg, 16)) {
+            say(p, "ERR garage needs <slot> <vehicle> <assignment> <engine>: two non-zero 32-hex ids");
+            return;
+        }
+        if (!is_engine_id(a4)) {
+            say(p, "ERR garage engine must be an engine profile id, e.g. bmw-b58");
+            return;
+        }
+        for (int i = 0; i < CAIRN_GARAGE_SLOTS; i++) {
+            const cairn_garage_slot_t *o = &st->garage.slot[i];
+            if (i != a1[0] - '0' && o->used && (memcmp(o->vehicle_id, veh, 16) == 0 ||
+                                                memcmp(o->assignment_id, asg, 16) == 0)) {
+                say(p, "ERR that vehicle or assignment is already in another garage slot");
+                return;
+            }
+        }
+        cairn_garage_slot_t *s = &st->garage.slot[a1[0] - '0'];
+        memset(s, 0, sizeof(*s));
+        s->used = true;
+        memcpy(s->vehicle_id, veh, 16);
+        memcpy(s->assignment_id, asg, 16);
+        snprintf(s->engine_id, sizeof(s->engine_id), "%s", a4);
+        st->have_garage = true;
+    } else if (strcmp(field, "assignment") == 0 && a1 && a2 && !a3) {
         uint8_t veh[16], asg[16];
         if (!is_hex32(a1, veh) || !is_hex32(a2, asg) || all_zero(veh, 16) || all_zero(asg, 16)) {
             say(p, "ERR assignment needs two non-zero 32-hex ids: <vehicle> <assignment>");
@@ -278,9 +319,9 @@ void cairn_prov_line(cairn_prov_t *p, const char *line, const cairn_prov_env_t *
     char buf[CAIRN_PROV_LINE_MAX];
     snprintf(buf, sizeof(buf), "%s", line);
 
-    char *tok[5] = { 0 };
+    char *tok[7] = { 0 };
     int nt = 0;
-    for (char *s = strtok(buf, " "); s && nt < 5; s = strtok(NULL, " ")) tok[nt++] = s;
+    for (char *s = strtok(buf, " "); s && nt < 7; s = strtok(NULL, " ")) tok[nt++] = s;
     if (nt == 0) { scrub(buf, sizeof(buf)); return; }
 
     if (strcmp(tok[0], "CAIRN-PROV") == 0 && nt == 2 && strcmp(tok[1], "BEGIN") == 0) {
@@ -393,11 +434,12 @@ void cairn_prov_line(cairn_prov_t *p, const char *line, const cairn_prov_env_t *
                 say(p, "ERR could not clear bonds");
             }
         }
-    } else if (strcmp(tok[0], "SET") == 0 && nt >= 3) {
-        set_field(p, tok[1], tok[2], nt >= 4 ? tok[3] : NULL);
+    } else if (strcmp(tok[0], "SET") == 0 && nt >= 3 && nt <= 6) {
+        set_field(p, tok[1], tok[2], nt >= 4 ? tok[3] : NULL, nt >= 5 ? tok[4] : NULL,
+                  nt >= 6 ? tok[5] : NULL);
     } else if (strcmp(tok[0], "COMMIT") == 0 && nt == 1) {
         cairn_prov_staged_t *st = &p->st;
-        bool any = st->have_assignment || st->have_floor;
+        bool any = st->have_assignment || st->have_floor || st->have_garage;
         if (!any) {
             say(p, "ERR nothing staged");
         } else {

@@ -667,6 +667,43 @@ static bool row_drop_and_clear(void)
     return true;
 }
 
+static bool row_garage(void)
+{
+    cairn_prov_t p;
+    reset_io(); cairn_prov_init(&p, &OPS);
+    cairn_prov_env_t env = { 1000, false, false };
+    send(&p, &env, "CAIRN-PROV BEGIN");
+
+    const char *bad[] = {
+        "SET garage 4 11111111111111111111111111111111 22222222222222222222222222222222 bmw-b58",
+        "SET garage 0 00000000000000000000000000000000 22222222222222222222222222222222 bmw-b58",
+        "SET garage 0 11111111111111111111111111111111 22222222222222222222222222222222 BMW_B58",
+        "SET garage 0 11111111111111111111111111111111 22222222222222222222222222222222",
+        "SET garage 0 11111111111111111111111111111111 22222222222222222222222222222222 bmw-b58 extra",
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        reset_io();
+        send(&p, &env, bad[i]);
+        CHECK(strstr(s_out, "ERR") && !p.st.have_garage, "accepted %s: %s", bad[i], s_out);
+    }
+
+    reset_io();
+    send(&p, &env, "SET garage 0 01a10dad2a2f797e976089f8854953f0 01a10daf2aeb70da9767e3fb61e954d4 bmw-n20");
+    send(&p, &env, "SET garage 1 01a10dad2a427a7eb5866efbf8bf40ab 01a17171119677aca853641bc83b5256 bmw-b58");
+    CHECK(p.st.have_garage && p.st.garage.slot[0].used && p.st.garage.slot[1].used &&
+          strcmp(p.st.garage.slot[1].engine_id, "bmw-b58") == 0, "two cars not staged: %s", s_out);
+
+    reset_io();
+    send(&p, &env, "SET garage 2 01a10dad2a427a7eb5866efbf8bf40ab 33333333333333333333333333333333 bmw-b58");
+    CHECK(strstr(s_out, "ERR") && !p.st.garage.slot[2].used, "one car in two slots was accepted: %s", s_out);
+
+    reset_io();
+    send(&p, &env, "COMMIT");
+    CHECK(s_applies == 1 && s_last.have_garage && !s_last.have_assignment && s_last.garage.slot[1].used,
+          "a garage alone did not commit: %s", s_out);
+    return true;
+}
+
 int main(void)
 {
     static const row_t ROWS[] = {
@@ -683,6 +720,7 @@ int main(void)
         { "no secret is ever echoed or logged (raw or base64)", row_no_secret_leaks },
         { "legacy Wi-Fi and key slots are erased, idempotently, touching nothing else", row_legacy_slots_are_erased },
         { "DROP legacy-bundles and CLEAR bonds obey the session and report", row_drop_and_clear },
+        { "SET garage stages up to four distinct cars and commits alone", row_garage },
     };
     for (size_t i = 0; i < sizeof(ROWS) / sizeof(ROWS[0]); i++) {
         bool ok = ROWS[i].fn();

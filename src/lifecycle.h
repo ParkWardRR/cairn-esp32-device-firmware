@@ -27,6 +27,7 @@
 #include "cairn_trip.h"
 #include "preroll.h"
 #include "sensors.h"
+#include "cairn_garage.h"
 
 /* Region 1: capture. What the device believes the vehicle is doing. */
 enum class CaptureState : uint8_t {
@@ -93,6 +94,15 @@ struct Lifecycle {
      * and the server will refuse them until the device is assigned.
      */
     cairn_storage_identity_t storage;
+
+    /*
+     * The cars this dongle moves between (lib/cairn_garage), and the last VIN acted
+     * on. Empty when no garage is provisioned: the device then keeps the one
+     * assignment in `storage`, as before garages existed.
+     */
+    cairn_garage_t garage;
+    bool           have_garage = false;
+    char           vin_seen[18] = { 0 };
 
     /*
      * The standby blocker reported last tick, so a reason is logged when it

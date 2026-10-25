@@ -17,6 +17,7 @@
 #include "cairn_power.h"
 #include "cairn_prune.h"
 #include "config.h"
+#include "garage_store.h"
 #include "policy.h"
 #include "cairn_trip.h"
 #include "preroll.h"
@@ -271,6 +272,88 @@ static void set_link_state(Lifecycle *lc, LinkState next, uint8_t reason)
 }
 
 
+/* ── the garage: which car this is ─────────────────────────────────────────── */
+
+/*
+ * At boot the device assumes the car it was last in: that car's assignment is the
+ * one in `storage`, and its engine profile is selected here, before the sensing task
+ * starts, so the trip thresholds and the OBD table are that car's from the first tick.
+ */
+static void garage_begin(Lifecycle *lc)
+{
+    lc->have_garage = garage_load(&lc->garage);
+    if (!lc->have_garage) return;
+    int i = cairn_garage_find_assignment(&lc->garage, lc->storage.assignment_id);
+    if (i < 0) {
+        CAIRN_LOGW(TAG, "garage: the installed assignment is not one of its cars; "
+                        "the first VIN read will choose");
+        return;
+    }
+    const cairn_garage_slot_t *s = &lc->garage.slot[i];
+    if (s->engine_id[0] != '\0' && cairn_engine_select(s->engine_id)) {
+        CAIRN_LOGI(TAG, "garage: assuming slot %d (engine %s) until the ECU gives its VIN", i,
+                   s->engine_id);
+    } else {
+        CAIRN_LOGW(TAG, "garage: slot %d names engine \"%s\", which this build does not carry",
+                   i, s->engine_id);
+    }
+}
+
+/*
+ * The VIN arrives when the ECU first answers (sensors_retry_failed, on the sensing
+ * task). If it is another car of the garage, bundles from now on are that car's: the
+ * assignment is switched and the open bundle sealed, so no bundle names two cars.
+ * The ones sealed earlier in this boot carry the car assumed at boot; a boot is one
+ * car (unplugging powers the dongle off), and the server files the whole boot under
+ * the car identified last.
+ */
+static void garage_check(Lifecycle *lc)
+{
+    if (!lc->have_garage) return;
+
+    char vin[sizeof(lc->sensors.vin)];
+    sensors_link_lock(); /* the sensing task writes it under the link lock */
+    memcpy(vin, lc->sensors.vin, sizeof(vin));
+    sensors_link_unlock();
+    vin[sizeof(vin) - 1] = '\0';
+    if (strlen(vin) != 17 || strcmp(vin, lc->vin_seen) == 0) return;
+    memcpy(lc->vin_seen, vin, sizeof(lc->vin_seen));
+
+    uint8_t h[CAIRN_GARAGE_VIN_HASH];
+    cairn_garage_vin_hash(vin, h);
+    const cairn_engine_catalogue_entry_t *hit =
+        cairn_engine_match_code(cairn_engine_catalogue(), cairn_engine_catalogue_count(), vin);
+    cairn_garage_how_t how;
+    int i = cairn_garage_pick(&lc->garage, h, hit != nullptr ? hit->id : nullptr, &how);
+    if (i < 0) {
+        CAIRN_LOGW(TAG, "garage: VIN read, but %s (engine %s): staying with the car assumed",
+                   cairn_garage_how_name(how), hit != nullptr ? hit->id : "unknown");
+        return;
+    }
+    cairn_garage_slot_t *s = &lc->garage.slot[i];
+    if (how == CAIRN_GARAGE_BY_ENGINE) {
+        s->has_vin = true;
+        memcpy(s->vin_hash, h, sizeof(h));
+        if (!garage_save(&lc->garage)) {
+            CAIRN_LOGW(TAG, "garage: could not store the VIN learned for slot %d", i);
+        }
+    }
+    if (memcmp(s->assignment_id, lc->storage.assignment_id, 16) == 0) {
+        CAIRN_LOGI(TAG, "garage: slot %d confirmed %s", i, cairn_garage_how_name(how));
+        return;
+    }
+    if (!cairn_storage_set_assignment(s->vehicle_id, s->assignment_id)) {
+        CAIRN_LOGE(TAG, "garage: slot %d identified, but its assignment could not be stored", i);
+        return;
+    }
+    memcpy(lc->storage.vehicle_id, s->vehicle_id, 16);
+    memcpy(lc->storage.assignment_id, s->assignment_id, 16);
+    lc->storage.assigned = true;
+    CAIRN_LOGW(TAG, "garage: this is slot %d, identified %s: switching assignment and "
+                    "sealing the open bundle", i, cairn_garage_how_name(how));
+    if (lc->bundle == BundleState::Open) seal_and_reopen(lc, 4);
+}
+
 /* ── init ─────────────────────────────────────────────────────────────────── */
 
 bool lifecycle_begin(Lifecycle *lc)
@@ -298,6 +381,7 @@ bool lifecycle_begin(Lifecycle *lc)
     if (!sensors_begin(&lc->sensors)) {
         CAIRN_LOGE(TAG, "coprocessor unavailable; capture will be degraded");
     }
+    garage_begin(lc);
     boot_timing_mark(CAIRN_BOOT_SENSORS_READY);
 
     /*
@@ -1338,6 +1422,7 @@ void lifecycle_tick(Lifecycle *lc)
         }
     }
 
+    garage_check(lc);
     const cairn_trip_event_t trip_event = trip_step(lc);
     enforce_bus_silence(lc);
 

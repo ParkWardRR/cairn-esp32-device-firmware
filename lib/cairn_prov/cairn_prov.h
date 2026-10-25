@@ -31,6 +31,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "cairn_garage.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -80,6 +82,12 @@ typedef struct {
 
     bool     have_floor;
     uint64_t counter_floor;
+
+    /* `SET garage` lines: the cars this dongle moves between. Any one of them in a
+     * session makes the garage exactly the slots set in that session (see
+     * lib/cairn_garage). */
+    bool           have_garage;
+    cairn_garage_t garage;
 } cairn_prov_staged_t;
 
 /* ── the console protocol ─────────────────────────────────────────────────── */

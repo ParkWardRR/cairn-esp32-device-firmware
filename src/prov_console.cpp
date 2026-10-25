@@ -13,6 +13,7 @@
 #include "ble_companion.h"
 #include "cairn_store.h"
 #include "config.h"
+#include "garage_store.h"
 
 static const char *TAG = "PROV";
 
@@ -132,6 +133,42 @@ static const char *op_apply(void *, const cairn_prov_staged_t *st)
         CAIRN_LOGW(TAG, "vehicle assignment changed by provisioning (takes effect "
                         "for the next bundle opened)");
         s_provisioned = true;
+    }
+    if (st->have_garage) {
+        /* The garage is exactly the slots set in this session; a slot provisioned
+         * again with the same assignment keeps the VIN it learned. */
+        cairn_garage_t g;
+        (void)garage_load(&g);
+        cairn_garage_replace(&g, &st->garage);
+        if (!garage_save(&g)) {
+            return "could not store the garage";
+        }
+        int n = 0;
+        for (int i = 0; i < CAIRN_GARAGE_SLOTS; i++) n += g.slot[i].used ? 1 : 0;
+        CAIRN_LOGW(TAG, "garage provisioned: %d car(s); the VIN chooses between them", n);
+
+        /* The car assumed at boot must be one of them. When no assignment came with
+         * the garage and the installed one is not in it, assume the first. */
+        cairn_storage_identity_t id;
+        bool have_id = cairn_storage_identity_load(&id);
+        bool current_in = have_id && id.assigned &&
+                          cairn_garage_find_assignment(&g, st->have_assignment ? st->assignment_id
+                                                                               : id.assignment_id) >= 0;
+        scrub(&id, sizeof(id));
+        if (!current_in && !st->have_assignment) {
+            for (int i = 0; i < CAIRN_GARAGE_SLOTS; i++) {
+                if (!g.slot[i].used) continue;
+                if (!cairn_storage_set_assignment(g.slot[i].vehicle_id, g.slot[i].assignment_id)) {
+                    return "could not store the vehicle assignment";
+                }
+                CAIRN_LOGW(TAG, "assuming garage slot %d until a VIN says otherwise", i);
+                s_provisioned = true;
+                break;
+            }
+        } else if (!current_in) {
+            CAIRN_LOGW(TAG, "the assignment provisioned is not in the garage: the VIN will "
+                            "switch away from it on the first drive");
+        }
     }
     if (st->have_floor) {
         if (!cairn_storage_raise_counter(st->counter_floor)) {
