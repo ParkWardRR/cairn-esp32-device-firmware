@@ -15,20 +15,65 @@
 #define CAIRN_ENGINES_SELECTION "bmw-b58,bmw-n20"
 #define CAIRN_ENGINES_COUNT 2
 #define CAIRN_ENGINES_CATALOGUE_COUNT 2
-#define CAIRN_ENGINES_IDENTITY_STRING "engines=bmw-b58@1/930622f33a7bccaa,bmw-n20@1/33ce4944f291a0ee build=793f14ff3a2df15d"
+#define CAIRN_ENGINES_IDENTITY_STRING "engines=bmw-b58@2/48475777c31ef6e7,bmw-n20@1/33ce4944f291a0ee build=91e543d54b1fed5b"
 
-/* ── bmw-b58 v1 (930622f33a7bccaaf81aa8212b4fb5def4cabcbe89fb8f80f5a74c1a91e6ac1b) ── */
+/* ── bmw-b58 v2 (48475777c31ef6e7ffdf73a1f637ccf4f0e045b8286dce285ea417b5cc291608) ── */
+static const uint8_t k_code_bmw_b58[] = { 0x10, 0x02, 0x00, 0x01, 0x22, 0x11, 0x20, 0x01, 0x04, 0x23, 0x10, 0x10, 0x01, 0x64, 0x22, 0x01, 0xff, 0x23, 0x10, 0x01, 0x02, 0x23, 0x01, 0x40, 0x21, 0x04, 0x81, 0x01, 0x7f, 0x32, 0x10, 0x10, 0x02, 0x00, 0x01, 0x22, 0x11, 0x20, 0x02, 0x10, 0x27, 0x22, 0x02, 0x00, 0x80, 0x23, 0x01, 0x00, 0x02, 0xfe, 0xff, 0x32, 0x10, 0x01, 0x64, 0x22, 0x01, 0xff, 0x23, 0x10, 0x01, 0x28, 0x21, 0x04, 0x81, 0x01, 0x7f, 0x32, 0x10, 0x01, 0x28, 0x21, 0x04, 0x81, 0x01, 0x7f, 0x32, 0x10, 0x02, 0x00, 0x01, 0x22, 0x11, 0x20, 0x01, 0x64, 0x23, 0x01, 0x64, 0x22, 0x10, 0x01, 0x28, 0x21, 0x04, 0x81, 0x01, 0x7f, 0x32, 0x10, 0x01, 0x80, 0x21, 0x01, 0x64, 0x22, 0x01, 0x80, 0x23, 0x10, 0x01, 0x80, 0x21, 0x01, 0x64, 0x22, 0x01, 0x80, 0x23, 0x10, 0x01, 0xfe, 0x30, 0x10, 0x02, 0x00, 0x01, 0x22, 0x11, 0x20, 0x10, 0x01, 0x64, 0x22, 0x01, 0xff, 0x23, 0x10, 0x01, 0x64, 0x22, 0x01, 0xff, 0x23 };
+static const cairn_pid_t k_pids_bmw_b58[] = {
+    /* 0x0C engine_speed */ { .pid = 0x000C, .service = 0x01, .nbytes = 2, .tier = CAIRN_TIER_HOT, .cold_slot = 0, .field = CAIRN_FIELD_RPM, .log = 1, .scale_e = 0, .range_min = 0, .range_max = 16383, .code_off = 0, .code_len = 10, .name = "engine_speed", .unit = "rpm" },
+    /* 0x0D vehicle_speed */ { .pid = 0x000D, .service = 0x01, .nbytes = 1, .tier = CAIRN_TIER_HOT, .cold_slot = 0, .field = CAIRN_FIELD_SPEED_KPH, .log = 1, .scale_e = 0, .range_min = 0, .range_max = 255, .code_off = 10, .code_len = 1, .name = "vehicle_speed", .unit = "km/h" },
+    /* 0x11 throttle_position */ { .pid = 0x0011, .service = 0x01, .nbytes = 1, .tier = CAIRN_TIER_HOT, .cold_slot = 0, .field = CAIRN_FIELD_THROTTLE_PCT, .log = 1, .scale_e = 0, .range_min = 0, .range_max = 100, .code_off = 11, .code_len = 7, .name = "throttle_position", .unit = "%" },
+    /* 0x0E timing_advance */ { .pid = 0x000E, .service = 0x01, .nbytes = 1, .tier = CAIRN_TIER_HOT, .cold_slot = 0, .field = CAIRN_FIELD_TIMING_ADVANCE_DEG, .log = 1, .scale_e = 0, .range_min = -64, .range_max = 63, .code_off = 18, .code_len = 12, .name = "timing_advance", .unit = "deg" },
+    /* 0x0B intake_map */ { .pid = 0x000B, .service = 0x01, .nbytes = 1, .tier = CAIRN_TIER_HOT, .cold_slot = 0, .field = CAIRN_FIELD_MAP_KPA, .log = 1, .scale_e = 0, .range_min = 0, .range_max = 255, .code_off = 30, .code_len = 1, .name = "intake_map", .unit = "kPa" },
+    /* 0x44 equivalence_ratio */ { .pid = 0x0044, .service = 0x01, .nbytes = 2, .tier = CAIRN_TIER_HOT, .cold_slot = 0, .field = CAIRN_FIELD_LAMBDA_E4, .log = 1, .scale_e = -4, .range_min = 0, .range_max = 19999, .code_off = 31, .code_len = 21, .name = "equivalence_ratio", .unit = "lambda" },
+    /* 0x04 engine_load */ { .pid = 0x0004, .service = 0x01, .nbytes = 1, .tier = CAIRN_TIER_COLD, .cold_slot = 0, .field = CAIRN_FIELD_ENGINE_LOAD_PCT, .log = 1, .scale_e = 0, .range_min = 0, .range_max = 100, .code_off = 52, .code_len = 7, .name = "engine_load", .unit = "%" },
+    /* 0x05 coolant_temp */ { .pid = 0x0005, .service = 0x01, .nbytes = 1, .tier = CAIRN_TIER_COLD, .cold_slot = 1, .field = CAIRN_FIELD_COOLANT_TEMP_C, .log = 1, .scale_e = 0, .range_min = -40, .range_max = 127, .code_off = 59, .code_len = 9, .name = "coolant_temp", .unit = "degC" },
+    /* 0x0F intake_air_temp */ { .pid = 0x000F, .service = 0x01, .nbytes = 1, .tier = CAIRN_TIER_COLD, .cold_slot = 2, .field = CAIRN_FIELD_INTAKE_TEMP_C, .log = 1, .scale_e = 0, .range_min = -40, .range_max = 127, .code_off = 68, .code_len = 9, .name = "intake_air_temp", .unit = "degC" },
+    /* 0x10 maf_flow */ { .pid = 0x0010, .service = 0x01, .nbytes = 2, .tier = CAIRN_TIER_COLD, .cold_slot = 3, .field = CAIRN_FIELD_MAF_CGPS, .log = 1, .scale_e = -2, .range_min = 0, .range_max = 65500, .code_off = 77, .code_len = 13, .name = "maf_flow", .unit = "g/s" },
+    /* 0x46 ambient_air_temp */ { .pid = 0x0046, .service = 0x01, .nbytes = 1, .tier = CAIRN_TIER_COLD, .cold_slot = 4, .field = CAIRN_FIELD_AMBIENT_TEMP_C, .log = 1, .scale_e = 0, .range_min = -40, .range_max = 127, .code_off = 90, .code_len = 9, .name = "ambient_air_temp", .unit = "degC" },
+    /* 0x06 fuel_trim_short_b1 */ { .pid = 0x0006, .service = 0x01, .nbytes = 1, .tier = CAIRN_TIER_COLD, .cold_slot = 5, .field = CAIRN_FIELD_FUEL_TRIM_SHORT_PCT, .log = 1, .scale_e = 0, .range_min = -100, .range_max = 99, .code_off = 99, .code_len = 10, .name = "fuel_trim_short_b1", .unit = "%" },
+    /* 0x07 fuel_trim_long_b1 */ { .pid = 0x0007, .service = 0x01, .nbytes = 1, .tier = CAIRN_TIER_COLD, .cold_slot = 6, .field = CAIRN_FIELD_FUEL_TRIM_LONG_PCT, .log = 1, .scale_e = 0, .range_min = -100, .range_max = 99, .code_off = 109, .code_len = 10, .name = "fuel_trim_long_b1", .unit = "%" },
+    /* 0x33 barometric_pressure */ { .pid = 0x0033, .service = 0x01, .nbytes = 1, .tier = CAIRN_TIER_COLD, .cold_slot = 7, .field = CAIRN_FIELD_BARO_KPA, .log = 1, .scale_e = 0, .range_min = 0, .range_max = 254, .code_off = 119, .code_len = 4, .name = "barometric_pressure", .unit = "kPa" },
+    /* 0x43 absolute_load */ { .pid = 0x0043, .service = 0x01, .nbytes = 2, .tier = CAIRN_TIER_COLD, .cold_slot = 8, .field = CAIRN_FIELD_ABS_LOAD_RAW, .log = 1, .scale_e = 0, .range_min = 0, .range_max = 65535, .code_off = 123, .code_len = 7, .name = "absolute_load", .unit = "raw" },
+    /* 0x2F fuel_level */ { .pid = 0x002F, .service = 0x01, .nbytes = 1, .tier = CAIRN_TIER_COLD, .cold_slot = 9, .field = CAIRN_FIELD_FUEL_LEVEL_PCT, .log = 1, .scale_e = 0, .range_min = 0, .range_max = 100, .code_off = 130, .code_len = 7, .name = "fuel_level", .unit = "%" },
+    /* 0x49 pedal_position */ { .pid = 0x0049, .service = 0x01, .nbytes = 1, .tier = CAIRN_TIER_COLD, .cold_slot = 10, .field = CAIRN_FIELD_PEDAL_PCT, .log = 1, .scale_e = 0, .range_min = 0, .range_max = 100, .code_off = 137, .code_len = 7, .name = "pedal_position", .unit = "%" },
+};
+static const cairn_probe_t k_probes_bmw_b58[] = {
+    { .pid = 0x04, .std_bytes = 1, .name = "ENGINE_LOAD" },
+    { .pid = 0x05, .std_bytes = 1, .name = "COOLANT_TEMP" },
+    { .pid = 0x0A, .std_bytes = 1, .name = "FUEL_PRESSURE" },
+    { .pid = 0x0C, .std_bytes = 2, .name = "RPM" },
+    { .pid = 0x0D, .std_bytes = 1, .name = "SPEED" },
+    { .pid = 0x0E, .std_bytes = 1, .name = "TIMING_ADVANCE" },
+    { .pid = 0x0F, .std_bytes = 1, .name = "INTAKE_TEMP" },
+    { .pid = 0x11, .std_bytes = 1, .name = "THROTTLE" },
+    { .pid = 0x0B, .std_bytes = 1, .name = "INTAKE_MAP" },
+    { .pid = 0x33, .std_bytes = 1, .name = "BAROMETRIC" },
+    { .pid = 0x10, .std_bytes = 2, .name = "MAF_FLOW" },
+    { .pid = 0x44, .std_bytes = 2, .name = "EQUIV_RATIO" },
+    { .pid = 0x43, .std_bytes = 2, .name = "ABSOLUTE_LOAD" },
+    { .pid = 0x46, .std_bytes = 1, .name = "AMBIENT_TEMP" },
+    { .pid = 0x06, .std_bytes = 1, .name = "FUEL_TRIM_SHORT" },
+    { .pid = 0x07, .std_bytes = 1, .name = "FUEL_TRIM_LONG" },
+    { .pid = 0x49, .std_bytes = 1, .name = "PEDAL_POS_D" },
+    { .pid = 0x4A, .std_bytes = 1, .name = "PEDAL_POS_E" },
+    { .pid = 0x51, .std_bytes = 1, .name = "FUEL_TYPE" },
+    { .pid = 0x52, .std_bytes = 1, .name = "ETHANOL_PCT" },
+    { .pid = 0x4F, .std_bytes = 4, .name = "MAX_VALUES" },
+    { .pid = 0x87, .std_bytes = 5, .name = "IMAP_WIDE" },
+    { .pid = 0x70, .std_bytes = 5, .name = "BOOST_CONTROL" },
+};
 
 static const cairn_engine_profile_t k_profile_bmw_b58 = {
-    .id = "bmw-b58", .name = "BMW B58 (M240i)", .version = 1, .status = CAIRN_ENGINE_STUB,
-    .sha256 = { 0x93, 0x06, 0x22, 0xf3, 0x3a, 0x7b, 0xcc, 0xaa, 0xf8, 0x1a, 0xa8, 0x21, 0x2b, 0x4f, 0xb5, 0xde, 0xf4, 0xca, 0xbc, 0xbe, 0x89, 0xfb, 0x8f, 0x80, 0xf5, 0xa7, 0x4c, 0x1a, 0x91, 0xe6, 0xac, 0x1b },
-    .known = 0,
-    .pids = NULL, .n_pids = 0, .n_hot = 0, .code = NULL,
-    .cold_slots = 0, .obd_period_ms = 0, .obd_batch_period_ms = 0,
-    .engine_on_mv = 0, .standby_idle_ms = 0u, .standby_heartbeat_ms = 0u,
-    .drive_voltage_dwell_ms = 0u, .drive_motion_dwell_ms = 0u, .drive_both_dwell_ms = 0u,
-    .bus_first_sleep_phase_ms = 0u, .supply_min_mv = 0, .supply_max_mv = 0,
-    .probes = NULL, .n_probes = 0,
+    .id = "bmw-b58", .name = "BMW B58 (M240i)", .version = 2, .status = CAIRN_ENGINE_DERIVED,
+    .sha256 = { 0x48, 0x47, 0x57, 0x77, 0xc3, 0x1e, 0xf6, 0xe7, 0xff, 0xdf, 0x73, 0xa1, 0xf6, 0x37, 0xcc, 0xf4, 0xf0, 0xe0, 0x45, 0xb8, 0x28, 0x6d, 0xce, 0x28, 0x5e, 0xa4, 0x17, 0xb5, 0xcc, 0x29, 0x16, 0x08 },
+    .known = CAIRN_K_PIDS | CAIRN_K_OBD_PERIOD | CAIRN_K_OBD_BATCH_PERIOD | CAIRN_K_COLD_SLOTS | CAIRN_K_ENGINE_ON_MV | CAIRN_K_STANDBY_IDLE | CAIRN_K_STANDBY_HEARTBEAT | CAIRN_K_DRIVE_VOLTAGE_DWELL | CAIRN_K_DRIVE_MOTION_DWELL | CAIRN_K_DRIVE_BOTH_DWELL | CAIRN_K_BUS_SLEEP_PHASE | CAIRN_K_SUPPLY_RANGE,
+    .pids = k_pids_bmw_b58, .n_pids = 17, .n_hot = 6, .code = k_code_bmw_b58,
+    .cold_slots = 11, .obd_period_ms = 1200, .obd_batch_period_ms = 200,
+    .engine_on_mv = 13200, .standby_idle_ms = 300000u, .standby_heartbeat_ms = 21600000u,
+    .drive_voltage_dwell_ms = 15000u, .drive_motion_dwell_ms = 10000u, .drive_both_dwell_ms = 2000u,
+    .bus_first_sleep_phase_ms = 480000u, .supply_min_mv = 9000, .supply_max_mv = 18000,
+    .probes = k_probes_bmw_b58, .n_probes = 23,
 };
 
 /* ── bmw-n20 v1 (33ce4944f291a0ee727c5145adbabbaa189d6bf02a53930ec7a04093fc7c9033) ── */
@@ -109,7 +154,7 @@ static const cairn_engine_catalogue_entry_t k_engine_catalogue[] = {
 static const cairn_engine_identity_t k_engine_identity = {
     .selection = CAIRN_ENGINES_SELECTION,
     .count = CAIRN_ENGINES_COUNT,
-    .build_sha256 = { 0x79, 0x3f, 0x14, 0xff, 0x3a, 0x2d, 0xf1, 0x5d, 0xf6, 0x09, 0xe0, 0xa6, 0x6f, 0x48, 0x92, 0x9e, 0x3f, 0x6b, 0x1b, 0x62, 0x4a, 0xf8, 0x37, 0x79, 0xce, 0xbd, 0x85, 0xfc, 0x7a, 0xe4, 0xa2, 0xcf },
+    .build_sha256 = { 0x91, 0xe5, 0x43, 0xd5, 0x4b, 0x1f, 0xed, 0x5b, 0xa7, 0x2a, 0x8a, 0x16, 0xb8, 0x1f, 0xe0, 0xb9, 0x28, 0xed, 0xa5, 0xbe, 0x5a, 0x90, 0xa2, 0xb1, 0xe6, 0xda, 0x37, 0x2b, 0x55, 0x39, 0x67, 0xca },
     .string = CAIRN_ENGINES_IDENTITY_STRING,
 };
 

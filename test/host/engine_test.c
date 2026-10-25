@@ -867,7 +867,9 @@ static void test_gate_real(const char *expect_selection)
         }
         if (strcmp(expect_selection, "bmw-b58,bmw-n20") == 0) {
             CHECK_EQ(cairn_engine_installed_count(), 2);
-            CHECK(cairn_engine_active() == cairn_engine_find("bmw-n20"));
+            /* The first installed engine that claims something: the B58 since it stopped
+             * being a stub. The firmware selects the garage car's engine over it. */
+            CHECK(cairn_engine_active() == cairn_engine_find("bmw-b58"));
         }
     }
 }
@@ -1001,11 +1003,25 @@ int main(int argc, char **argv)
         printf("  bmw-n20 is not installed in this build: equivalence checks skipped\n");
     }
     if (b58 != NULL) {
-        CHECK_EQ(b58->status, CAIRN_ENGINE_STUB);
-        CHECK_EQ(b58->known, 0);
-        CHECK_EQ(b58->n_pids, 0);
+        /* Derived from the N20's table, which answered in full on the M240i
+         * (2026-10-24): claimed PIDs, and when both are built, the same ones. */
+        CHECK_EQ(b58->status, CAIRN_ENGINE_DERIVED);
+        CHECK(b58->n_pids > 0);
+        if (n20 != NULL) {
+            size_t i;
+            CHECK_EQ(b58->n_pids, n20->n_pids);
+            CHECK_EQ(b58->n_hot, n20->n_hot);
+            for (i = 0; i < b58->n_pids && i < n20->n_pids; i++) {
+                CHECK_EQ(b58->pids[i].pid, n20->pids[i].pid);
+                CHECK_EQ(b58->pids[i].nbytes, n20->pids[i].nbytes);
+                CHECK_EQ(b58->pids[i].field, n20->pids[i].field);
+                CHECK_EQ(b58->pids[i].tier, n20->pids[i].tier);
+                CHECK_EQ(b58->pids[i].range_min, n20->pids[i].range_min);
+                CHECK_EQ(b58->pids[i].range_max, n20->pids[i].range_max);
+            }
+        }
     }
-    test_params_follow_active(n20, b58);
+    test_params_follow_active(n20, NULL); /* no engine in the tree is a stub any more */
 
     /* Source tripwires: relative to test/host, where make runs this. */
     if (n20 != NULL) {
