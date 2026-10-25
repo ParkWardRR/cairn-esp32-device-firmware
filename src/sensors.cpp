@@ -544,7 +544,26 @@ void sensors_retry_failed(SensorStatus *status, bool bus_open)
             CAIRN_LOGI(TAG, "ECU connected");
 
             char buf[128] = { 0 };
-            if (s_obd.getVIN(buf, sizeof(buf))) {
+            bool have_vin = s_obd.getVIN(buf, sizeof(buf));
+            if (!have_vin) {
+                /*
+                 * The garage chooses the car by this VIN, and until 2026-10-25 a failed
+                 * read said nothing: the M240i's drives of 2026-10-24 show it was never
+                 * matched, but not why. getVIN parses the reply in place and leaves it
+                 * untouched when it does not find "0: 49 02 01", so what the ECU (or
+                 * ECUs: several modules can answer 0902 on these cars) said is here.
+                 */
+                char shown[sizeof(buf)];
+                size_t n = 0;
+                for (size_t i = 0; i < sizeof(buf) - 1 && buf[i] != '\0'; i++) {
+                    char c = buf[i];
+                    shown[n++] = (c == '\r' || c == '\n') ? '|' : (c >= 0x20 && c < 0x7f) ? c : '?';
+                }
+                shown[n] = '\0';
+                CAIRN_LOGW(TAG, "VIN not read (garage cannot identify the car); 0902 reply: \"%s\"",
+                           shown);
+            }
+            if (have_vin) {
                 snprintf(status->vin, sizeof(status->vin), "%.17s", buf);
                 CAIRN_LOGI(TAG, "VIN %s", status->vin);
 
