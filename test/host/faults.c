@@ -1781,14 +1781,15 @@ static bool row_preroll_refuses_oversized(void)
     cairn_preroll_t ring;
     cairn_preroll_reset(&ring);
 
-    uint8_t big[CAIRN_PREROLL_MAX_PAYLOAD + 1];
+    uint8_t big[CAIRN_PREROLL_LARGE_MAX_PAYLOAD + 1];
     memset(big, 0x5A, sizeof(big));
 
     CHECK(!cairn_preroll_push(&ring, CAIRN_REC_IMU_RAW_WINDOW, 1, 0, 1000, big,
                               sizeof(big)),
           "an oversized payload was accepted");
-    CHECK(ring.count == 0, "the ring holds %u entries after a refusal",
-          (unsigned)ring.count);
+    CHECK(ring.count == 0 && ring.large_count == 0,
+          "the ring holds %u + %u entries after a refusal",
+          (unsigned)ring.count, (unsigned)ring.large_count);
 
     /* A payload at exactly the limit must still be accepted. */
     CHECK(cairn_preroll_push(&ring, CAIRN_REC_GNSS_SAMPLE, 1, 0, 1000, big,
@@ -1796,6 +1797,155 @@ static bool row_preroll_refuses_oversized(void)
           "a payload at the limit was refused");
     CHECK(ring.count == 1, "the ring holds %u entries, want 1",
           (unsigned)ring.count);
+
+    /* One byte over goes to the large slots, not the ring, and so does the largest
+     * WIFI_SCAN. */
+    CHECK(cairn_preroll_push(&ring, CAIRN_REC_WIFI_SCAN, 1, 0, 1000, big,
+                             CAIRN_PREROLL_MAX_PAYLOAD + 1),
+          "a 33-byte payload was refused");
+    CHECK(cairn_preroll_push(&ring, CAIRN_REC_WIFI_SCAN, 1, 0, 1000, big,
+                             CAIRN_WIFI_SCAN_MAX_PAYLOAD),
+          "a 16-entry WIFI_SCAN was refused");
+    CHECK(ring.count == 1 && ring.large_count == 2,
+          "ring %u, large %u; want 1 and 2", (unsigned)ring.count,
+          (unsigned)ring.large_count);
+
+    return true;
+}
+
+static int      g_wifi_seen, g_wifi_frame;
+static int      g_wifi_index[4];
+static uint32_t g_wifi_mono[4];
+static size_t   g_wifi_len[4];
+static uint8_t  g_wifi_bytes[4][CAIRN_WIFI_SCAN_MAX_PAYLOAD];
+
+static bool wifi_collect_cb(const cairn_frame_t *f, void *user)
+{
+    (void)user;
+    if (f->record_type == CAIRN_REC_WIFI_SCAN && g_wifi_seen < 4 &&
+        f->payload_len <= CAIRN_WIFI_SCAN_MAX_PAYLOAD) {
+        g_wifi_index[g_wifi_seen] = g_wifi_frame;
+        g_wifi_mono[g_wifi_seen]  = f->monotonic_ms;
+        g_wifi_len[g_wifi_seen]   = f->payload_len;
+        memcpy(g_wifi_bytes[g_wifi_seen], f->payload, f->payload_len);
+        g_wifi_seen++;
+    }
+    g_wifi_frame++;
+    return true;
+}
+
+/*
+ * A Wi-Fi scan taken in the pretrip -- the garage exit with a cold receiver, the case
+ * the record exists for -- is too big for the ring and is held beside it. On
+ * confirmation it must come out in its place among the ring's records, flagged
+ * PRETRIP, byte for byte; only the newest scans are kept; and a scan older than
+ * everything the ring still holds goes with the window it belonged to.
+ */
+static bool row_preroll_holds_wifi_scans(void)
+{
+    uint8_t device_id[16], seed[32], pub[32];
+    uint32_t boot = 0;
+    CHECK(cairn_identity_load(device_id, seed, pub, &boot), "identity load failed");
+
+    uint8_t boot_id[16];
+    cairn_new_boot_id(boot_id);
+
+    cairn_capture_t cap;
+    CHECK(cairn_capture_open_or_resume(&cap, device_id, boot_id, &g_ident), "open failed");
+
+    char id[27];
+    CHECK(current_capture_id(id, sizeof(id)), "no capture directory");
+
+    cairn_preroll_t ring;
+    cairn_preroll_reset(&ring);
+
+    /* 4 GNSS, scan A, 4 GNSS, scan B, 4 GNSS, scan C, 2 GNSS: only B and C are kept. */
+    cairn_wifi_scan_t sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.count = 16;
+    sc.flags = CAIRN_WIFI_SCAN_ACTIVE;
+    for (int i = 0; i < 16; i++) {
+        sc.ap[i].bssid[0] = 0x88;
+        sc.ap[i].bssid[5] = (uint8_t)i;
+        sc.ap[i].rssi_dbm = (int8_t)(-40 - i);
+        sc.ap[i].channel  = 6;
+    }
+    uint8_t scan_bytes[3][CAIRN_WIFI_SCAN_MAX_PAYLOAD];
+    size_t  scan_len = 0;
+    uint32_t scan_ms[3] = { 0, 0, 0 };
+
+    int gnss = 0;
+    for (int block = 0; block < 4; block++) {
+        int n = (block == 3) ? 2 : 4;
+        for (int i = 0; i < n; i++) {
+            uint8_t payload[32];
+            make_gnss_payload(payload, gnss++);
+            cairn_host_advance(1000);
+            CHECK(cairn_preroll_push(&ring, CAIRN_REC_GNSS_SAMPLE, 1, 0, cairn_millis(),
+                                     payload, sizeof(payload)), "gnss push failed");
+        }
+        if (block == 3) break;
+        sc.scan_ms = (uint16_t)(2000 + block);
+        CHECK(cairn_encode_wifi_scan(&sc, scan_bytes[block], sizeof(scan_bytes[block]),
+                                     &scan_len) == CAIRN_OK, "encode failed");
+        cairn_host_advance(500);
+        scan_ms[block] = cairn_millis();
+        CHECK(cairn_preroll_push(&ring, CAIRN_REC_WIFI_SCAN, 1, 0, scan_ms[block],
+                                 scan_bytes[block], scan_len), "scan push failed");
+    }
+    CHECK(scan_len == 132, "a 16-entry scan is %zu bytes", scan_len);
+    CHECK(ring.large_count == 2 && ring.overwritten == 1,
+          "large %u, overwritten %u; want 2 and 1 (scan A evicted by C)",
+          (unsigned)ring.large_count, (unsigned)ring.overwritten);
+
+    uint16_t written = cairn_preroll_flush(&ring, &cap);
+    CHECK(written == 14 + 2, "flushed %u frames, want 16", (unsigned)written);
+
+    tally_t t;
+    CHECK(scan_capture_segment(id, &t), "the segment does not scan cleanly");
+    CHECK(t.seen == 16 && t.pretrip == 16, "%d frames, %d PRETRIP; want 16 and 16",
+          t.seen, t.pretrip);
+    CHECK(t.monotonic_ok, "frames were written out of observation order");
+
+    /* The scans' places and bytes, read back with the key. */
+    char rel[256];
+    snprintf(rel, sizeof(rel), "%s/%s/seg-00000000.seg", CAIRN_DIR_CAPTURE, id);
+    g_wifi_seen = 0;
+    g_wifi_frame = 0;
+    cairn_scan_result_t res;
+    cairn_file_t *f = cairn_fs_open(rel, CAIRN_FS_READ);
+    CHECK(f != NULL, "cannot open the segment");
+    cairn_scan_state_t st = { 0, 0 };
+    cairn_scan_opts_t opts = keyed_opts(wifi_collect_cb, NULL);
+    cairn_err_t err = cairn_scan_segment_stream(fs_read_for_test, f, cairn_fs_size(f), st,
+                                                &opts, &res);
+    cairn_fs_close(f);
+    CHECK(err == CAIRN_OK, "keyed scan failed: %s", cairn_strerror(err));
+    CHECK(g_wifi_seen == 2, "%d WIFI_SCAN frames, want 2", g_wifi_seen);
+    CHECK(g_wifi_index[0] == 8 && g_wifi_index[1] == 13,
+          "scans at frames %d and %d, want 8 and 13 (after the 8th and 12th fixes)",
+          g_wifi_index[0], g_wifi_index[1]);
+    CHECK(g_wifi_mono[0] == scan_ms[1] && g_wifi_mono[1] == scan_ms[2],
+          "scan times %u and %u, want %u and %u", (unsigned)g_wifi_mono[0],
+          (unsigned)g_wifi_mono[1], (unsigned)scan_ms[1], (unsigned)scan_ms[2]);
+    CHECK(g_wifi_len[0] == 132 && memcmp(g_wifi_bytes[0], scan_bytes[1], 132) == 0 &&
+          g_wifi_len[1] == 132 && memcmp(g_wifi_bytes[1], scan_bytes[2], 132) == 0,
+          "a held scan did not come back byte for byte");
+
+    /* A scan older than everything the ring still holds is dropped with its window. */
+    cairn_preroll_reset(&ring);
+    uint8_t one[32];
+    CHECK(cairn_preroll_push(&ring, CAIRN_REC_WIFI_SCAN, 1, 0, cairn_millis(),
+                             scan_bytes[0], 132), "scan push failed");
+    for (int i = 0; i < CAIRN_PREROLL_RING_SAMPLES + 1; i++) {
+        make_gnss_payload(one, i);
+        cairn_host_advance(100);
+        cairn_preroll_push(&ring, CAIRN_REC_GNSS_SAMPLE, 1, 0, cairn_millis(), one, 32);
+    }
+    written = cairn_preroll_flush(&ring, &cap);
+    CHECK(written == CAIRN_PREROLL_RING_SAMPLES,
+          "flushed %u, want %d: the stale scan should have gone with its window",
+          (unsigned)written, CAIRN_PREROLL_RING_SAMPLES);
 
     return true;
 }
@@ -3544,6 +3694,7 @@ static const row_t ROWS[] = {
     { "preroll",  "flush writes in order, flagged PRETRIP",    row_preroll_flush_marks_pretrip },
     { "preroll",  "a wrapped ring keeps the newest window",    row_preroll_wrap_keeps_newest },
     { "preroll",  "refuses an oversized payload",              row_preroll_refuses_oversized },
+    { "preroll",  "holds Wi-Fi scans beside the ring, in order", row_preroll_holds_wifi_scans },
     { "health",   "degraded bitmap round-trips through the card", row_health_bitmap_round_trips },
     { "policy",   "adaptive rates are never slower during a trip", row_adaptive_never_slower_during_trip },
     { "policy",   "dynamics classification responds to evidence", row_dynamics_classification },
