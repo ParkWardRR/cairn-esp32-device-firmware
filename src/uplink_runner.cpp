@@ -198,9 +198,21 @@ __attribute__((unused)) static bool run_home_scan(uint32_t max_ms)
     uint32_t t0 = millis();
     int n = WiFi.scanNetworks(/*async=*/false, /*show_hidden=*/false);
 
+    /* The strongest of the network's access points: the join goes to that one. */
     bool found = false;
-    for (int i = 0; i < n && !found; i++) {
-        if (WiFi.SSID(i) == CAIRN_WIFI_SSID) found = true;
+    int best = -1, aps = 0;
+    for (int i = 0; i < n; i++) {
+        if (WiFi.SSID(i) != CAIRN_WIFI_SSID) continue;
+        found = true;
+        aps++;
+        if (best < 0 || WiFi.RSSI(i) > WiFi.RSSI(best)) best = i;
+    }
+    if (best >= 0) {
+        wifi_link_prefer_ap(WiFi.BSSID(best), WiFi.channel(best));
+        CAIRN_LOGI(TAG, "home scan: %d access point(s) for the network; strongest on channel %d at %d dBm, auth %d",
+                   aps, (int)WiFi.channel(best), (int)WiFi.RSSI(best), (int)WiFi.encryptionType(best));
+    } else {
+        wifi_link_forget_ap();
     }
 
     WiFi.scanDelete();

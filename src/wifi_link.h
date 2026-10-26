@@ -32,6 +32,16 @@
  * the radio off. */
 bool wifi_link_connect(uint32_t timeout_ms);
 
+/*
+ * The access point to join, from the home scan that found the network: its BSSID and
+ * channel. A network with several access points (Grizzle has more than one) is joined
+ * at the strongest one the scan heard rather than the first the driver happens to
+ * find. Cleared by wifi_link_forget_ap(); without one, the join scans every channel and
+ * takes the strongest.
+ */
+void wifi_link_prefer_ap(const uint8_t bssid[6], int32_t channel);
+void wifi_link_forget_ap(void);
+
 /* Drop the association and power the radio down, so BLE may have it back. */
 void wifi_link_disconnect(void);
 

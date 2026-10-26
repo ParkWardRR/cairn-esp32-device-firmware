@@ -38,6 +38,24 @@ static WiFiClientSecure s_tls;
 
 /* ── association ──────────────────────────────────────────────────────────── */
 
+/* The driver's reason for the last disconnect, so a failed join says why in the device's
+ * own log (the Arduino core prints it only at debug level, on the console). */
+static volatile uint8_t s_last_reason;
+static bool             s_reason_hooked;
+
+static bool    s_have_ap;
+static uint8_t s_ap_bssid[6];
+static int32_t s_ap_channel;
+
+void wifi_link_prefer_ap(const uint8_t bssid[6], int32_t channel)
+{
+    memcpy(s_ap_bssid, bssid, 6);
+    s_ap_channel = channel;
+    s_have_ap = true;
+}
+
+void wifi_link_forget_ap(void) { s_have_ap = false; }
+
 bool wifi_link_connect(uint32_t timeout_ms)
 {
     CAIRN_LOGI(TAG, "joining \"%s\"", CAIRN_WIFI_SSID);
@@ -72,7 +90,29 @@ bool wifi_link_connect(uint32_t timeout_ms)
      * UART, the card and the server, not by Wi-Fi latency, and a parked car has
      * no reason to favour microseconds over milliamps.
      */
-    WiFi.begin(CAIRN_WIFI_SSID, CAIRN_WIFI_PSK);
+    /*
+     * Which access point. WiFi.begin(ssid, psk) defaults to a fast scan that joins the
+     * first access point it hears with the SSID, not the strongest. Grizzle is served by
+     * more than one; measured 2026-10-25 on the bench, a join that the home scan had just
+     * found the network for failed AUTH_FAIL (202) and then HANDSHAKE_TIMEOUT (204) twice,
+     * while a Pi pinned to the 2.4 GHz BSSID on channel 11 joined in 3 s. So: the BSSID
+     * and channel the home scan measured strongest, else every channel sorted by signal.
+     */
+    if (!s_reason_hooked) {
+        WiFi.onEvent([](arduino_event_id_t, arduino_event_info_t info) {
+            s_last_reason = info.wifi_sta_disconnected.reason;
+        }, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+        s_reason_hooked = true;
+    }
+    s_last_reason = 0;
+
+    if (s_have_ap) {
+        WiFi.begin(CAIRN_WIFI_SSID, CAIRN_WIFI_PSK, s_ap_channel, s_ap_bssid, true);
+    } else {
+        WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
+        WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
+        WiFi.begin(CAIRN_WIFI_SSID, CAIRN_WIFI_PSK);
+    }
 
     uint32_t t0 = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - t0 < timeout_ms) {
@@ -80,8 +120,11 @@ bool wifi_link_connect(uint32_t timeout_ms)
     }
 
     if (WiFi.status() != WL_CONNECTED) {
-        CAIRN_LOGW(TAG, "not associated after %u ms (status %d); radio off",
-                   (unsigned)(millis() - t0), (int)WiFi.status());
+        /* 202 AUTH_FAIL and 204 HANDSHAKE_TIMEOUT are what Grizzle gave on 2026-10-25,
+         * with BLE down, one access point at -72 dBm and the right password: the access
+         * point refusing this client rather than the radio losing frames. */
+        CAIRN_LOGW(TAG, "not associated after %u ms (status %d, last disconnect reason %u); radio off",
+                   (unsigned)(millis() - t0), (int)WiFi.status(), (unsigned)s_last_reason);
         wifi_link_disconnect();
         return false;
     }
