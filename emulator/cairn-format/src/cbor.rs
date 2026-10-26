@@ -13,6 +13,8 @@
 //! the decoder rejects any input it would not itself have produced, because
 //! accepting a non-canonical encoding would mean verifying bytes other than
 //! those received.
+#[allow(unused_imports)]
+use crate::prelude::*;
 
 use super::{FormatError, Result};
 
@@ -287,7 +289,7 @@ impl<'a> Decoder<'a> {
         if self.pos + n > self.buf.len() {
             return Err(FormatError::TruncatedCbor);
         }
-        let out = std::str::from_utf8(&self.buf[self.pos..self.pos + n])
+        let out = core::str::from_utf8(&self.buf[self.pos..self.pos + n])
             .map_err(|e| FormatError::Malformed(format!("invalid UTF-8 in text string: {e}")))?
             .to_string();
         self.pos += n;

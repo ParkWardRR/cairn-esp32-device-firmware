@@ -5,6 +5,8 @@
 //! that a recoverable record exists. Only a receipt justifies deletion, and only
 //! when both its signature verifies against the pinned server key *and* its
 //! content root equals what the device uploaded.
+#[allow(unused_imports)]
+use crate::prelude::*;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 

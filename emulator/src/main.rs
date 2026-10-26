@@ -4,7 +4,7 @@
 //! format v3 against the committed vectors; `fault-matrix` runs the
 //! fault-injection property matrix.
 mod conformance;
-mod format;
+use cairn_format as format;
 mod v2;
 
 use std::path::PathBuf;

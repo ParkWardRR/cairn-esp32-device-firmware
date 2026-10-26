@@ -16,10 +16,12 @@
 //! | 92 | 8 | device_counter |
 //! | 100 | 24 | reserved, zero |
 //! | 124 | 4 | header_crc32 over `[0, 124)` |
+#[allow(unused_imports)]
+use crate::prelude::*;
 
-use std::collections::BTreeMap;
+use alloc::collections::BTreeMap;
 
-use rand::RngCore;
+use rand_core::RngCore;
 
 use super::{
     FORMAT_VERSION, FormatError, Result,

@@ -13,6 +13,8 @@
 //! hands the parsed header to a [`KeyProvider`] and gets back the key for that
 //! segment or a reason it cannot have one, so there is no API through which a
 //! caller could pick a key for a segment the header does not describe.
+#[allow(unused_imports)]
+use crate::prelude::*;
 
 use hkdf::Hkdf;
 use sha2::Sha256;
@@ -105,8 +107,8 @@ impl RootKeyProvider {
 
 // Never print key material, including in a panic message or a debug dump of a
 // struct that happens to hold a provider.
-impl std::fmt::Debug for RootKeyProvider {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for RootKeyProvider {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("RootKeyProvider")
             .field("root", &"<redacted>")
             .field("version", &self.version)
@@ -132,7 +134,7 @@ impl KeyProvider for RootKeyProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::format::{segment::JOURNAL_SEGMENT_INDEX, unhex_array};
+    use crate::{segment::JOURNAL_SEGMENT_INDEX, unhex_array};
 
     fn ids(first: u8) -> [u8; 16] {
         let mut id = [0u8; 16];
@@ -170,11 +172,11 @@ mod tests {
     fn matches_worked_example() {
         let root = vector_root();
         assert_eq!(
-            crate::format::hex(&derive_segment_key(&root, &vector_header(0))),
+            crate::hex(&derive_segment_key(&root, &vector_header(0))),
             "24f7191a4156d6ac88a626e1922ecf5ce32157734499a3055b9d8b4ebfcae979"
         );
         assert_eq!(
-            crate::format::hex(&derive_segment_key(
+            crate::hex(&derive_segment_key(
                 &root,
                 &vector_header(JOURNAL_SEGMENT_INDEX)
             )),

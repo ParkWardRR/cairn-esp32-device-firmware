@@ -6,6 +6,8 @@
 //! vectors cannot see, such as how the writer chooses nonces — still fails.
 //! Each test names the single property it guards; they are the targets of the
 //! mutation checks recorded with the v3 port.
+#[allow(unused_imports)]
+use crate::prelude::*;
 
 use rand::SeedableRng;
 use rand::rngs::StdRng;

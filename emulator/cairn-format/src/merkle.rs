@@ -1,4 +1,6 @@
 //! Domain-separated binary Merkle tree, and the bundle content root.
+#[allow(unused_imports)]
+use crate::prelude::*;
 
 use sha2::{Digest, Sha256};
 
@@ -108,7 +110,7 @@ pub fn content_root(members: &[Member]) -> Result<[u8; 32]> {
 }
 
 fn validate_members(members: &[Member]) -> Result<()> {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = alloc::collections::BTreeSet::new();
     for m in members {
         if m.name.is_empty() {
             return Err(FormatError::Malformed("member with empty name".into()));

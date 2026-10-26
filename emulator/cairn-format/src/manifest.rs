@@ -1,6 +1,8 @@
 //! The immutable, signed description of a sealed bundle.
+#[allow(unused_imports)]
+use crate::prelude::*;
 
-use std::collections::BTreeMap;
+use alloc::collections::BTreeMap;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};

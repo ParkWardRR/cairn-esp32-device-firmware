@@ -22,6 +22,22 @@
 // Keeping the whole format in one place, tested against the vectors, is how it
 // stays a single artifact rather than three partial ones.
 #![allow(dead_code, unused_imports)]
+#![no_std]
+
+extern crate alloc;
+#[cfg(any(feature = "std", test))]
+extern crate std;
+
+/// What `std`'s prelude would have given every module.
+mod prelude {
+    pub use alloc::boxed::Box;
+    pub use alloc::format;
+    pub use alloc::string::{String, ToString};
+    pub use alloc::vec;
+    pub use alloc::vec::Vec;
+}
+
+use prelude::*;
 
 pub mod aead;
 pub mod bind;
@@ -135,8 +151,8 @@ pub enum FormatError {
     },
 }
 
-impl std::fmt::Display for FormatError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for FormatError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::BadMagic => write!(f, "bad segment magic"),
             Self::BadHeaderCrc { computed, stored } => write!(
@@ -198,13 +214,13 @@ impl std::fmt::Display for FormatError {
     }
 }
 
-impl std::error::Error for FormatError {}
+impl core::error::Error for FormatError {}
 
-pub type Result<T> = std::result::Result<T, FormatError>;
+pub type Result<T> = core::result::Result<T, FormatError>;
 
 /// Lowercase hex, used throughout for identifiers and digests.
 pub fn hex(bytes: &[u8]) -> String {
-    use std::fmt::Write;
+    use core::fmt::Write;
     let mut out = String::with_capacity(bytes.len() * 2);
     for b in bytes {
         let _ = write!(out, "{b:02x}");

@@ -120,10 +120,18 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabihf
 
-      - name: Unit tests
+      - name: Unit tests (the emulator and cairn-format)
         working-directory: emulator
-        run: cargo test
+        run: cargo test --workspace
+
+      # cairn-format also ships on a device (the trail logger, ESP32-S3): it must
+      # build where there is no std at all.
+      - name: cairn-format builds without std
+        working-directory: emulator
+        run: cargo build -p cairn-format --target thumbv7em-none-eabihf
 
       - name: Conformance against the pinned vectors
         working-directory: emulator

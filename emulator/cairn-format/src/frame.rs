@@ -8,6 +8,8 @@
 //! 48+N tag[16]
 //! 64+N crc32 over [0, 64+N)   — over the ciphertext frame
 //! ```
+#[allow(unused_imports)]
+use crate::prelude::*;
 
 use super::{
     FormatError, Result,

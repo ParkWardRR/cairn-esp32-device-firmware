@@ -13,8 +13,10 @@
 //! device at boot, intake before it has fetched a root, or a thief. With a key
 //! it additionally authenticates every frame, and adds exactly one stop reason:
 //! `AUTH_FAILED`. Nothing structural depends on the key.
+#[allow(unused_imports)]
+use crate::prelude::*;
 
-use std::collections::BTreeMap;
+use alloc::collections::BTreeMap;
 
 use super::{
     Result,
@@ -72,8 +74,8 @@ impl StopReason {
     }
 }
 
-impl std::fmt::Display for StopReason {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for StopReason {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(self.name())
     }
 }

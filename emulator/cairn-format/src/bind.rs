@@ -8,6 +8,8 @@
 //! the bytes it describes, and it needs no storage key: the identity fields are
 //! readable in the clear precisely so this can run before anything is
 //! decrypted.
+#[allow(unused_imports)]
+use crate::prelude::*;
 
 use super::{
     FormatError, Result, hex,

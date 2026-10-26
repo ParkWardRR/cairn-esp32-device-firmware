@@ -6,6 +6,8 @@
 //! mean finding the firmware build that defined that version, whereas the
 //! values make a trip captured under thresholds nobody remembers explainable
 //! from the trip itself.
+#[allow(unused_imports)]
+use crate::prelude::*;
 
 use serde::Deserialize;
 

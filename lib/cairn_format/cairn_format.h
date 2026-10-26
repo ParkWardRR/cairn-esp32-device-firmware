@@ -2,7 +2,7 @@
  * Cairn bundle format v3 — C implementation.
  *
  * The normative specification is contracts/format/v3/spec.md. This is the third
- * implementation of it, after Go (server/format) and Rust (emulator/src/format),
+ * implementation of it, after Go (server/format) and Rust (emulator/cairn-format),
  * and it is the one that matters most: a disagreement here means a device
  * writing bundles the server cannot recover.
  *

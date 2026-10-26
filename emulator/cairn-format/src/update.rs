@@ -4,6 +4,8 @@
 //! key says "this data is safe to delete"; the update key says "this code is
 //! safe to run". A server compromised enough to issue false receipts costs
 //! stored trips; one that could also sign firmware owns the device.
+#[allow(unused_imports)]
+use crate::prelude::*;
 
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 

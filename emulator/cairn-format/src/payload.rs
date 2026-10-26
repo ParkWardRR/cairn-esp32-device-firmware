@@ -8,6 +8,8 @@
 //! Sentinels are decoded to `None`, never to a number. "The ECU reported 0" and
 //! "the ECU did not answer" are different facts, and collapsing them fabricates
 //! data.
+#[allow(unused_imports)]
+use crate::prelude::*;
 
 use super::{FormatError, Result};
 
@@ -446,7 +448,7 @@ mod wifi_scan_tests {
 
     #[test]
     fn wifi_scan_is_a_known_type() {
-        use crate::format::RecordType;
+        use crate::RecordType;
         assert!(RecordType::WIFI_SCAN.known());
         assert_eq!(RecordType::WIFI_SCAN.0, 0x0C);
         assert_eq!(RecordType::WIFI_SCAN.name(), "WIFI_SCAN");
@@ -494,7 +496,7 @@ mod wifi_scan_tests {
         assert!(parse_wifi_scan(&long).is_err());
         assert!(parse_wifi_scan(&b[..3]).is_err());
         let mut over = vec![17u8, 0, 0, 0];
-        over.extend(std::iter::repeat_n(0u8, 17 * 8));
+        over.extend(core::iter::repeat_n(0u8, 17 * 8));
         assert!(parse_wifi_scan(&over).is_err());
         assert!(encode_wifi_scan(&scan(17, 0, 0)).is_err());
     }

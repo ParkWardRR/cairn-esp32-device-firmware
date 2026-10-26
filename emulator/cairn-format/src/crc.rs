@@ -1,4 +1,6 @@
 //! Frame and header checksum.
+#[allow(unused_imports)]
+use crate::prelude::*;
 
 /// CRC-32 with the reflected IEEE/zlib polynomial `0xEDB88320`.
 ///

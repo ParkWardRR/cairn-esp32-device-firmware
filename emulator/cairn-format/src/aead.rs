@@ -8,6 +8,8 @@
 //! | AAD       | the 24-byte frame header as written ‖ segment header `[0, header_len-4)` |
 //!
 //! The sealed body stored in a frame is `nonce[24] ‖ ciphertext[N] ‖ tag[16]`.
+#[allow(unused_imports)]
+use crate::prelude::*;
 
 use chacha20poly1305::{
     KeyInit, XChaCha20Poly1305, XNonce,
@@ -134,7 +136,7 @@ impl SegmentCipher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::format::unhex;
+    use crate::unhex;
 
     /// draft-irtf-cfrg-xchacha-03 §A.3.1, the AEAD_XChaCha20_Poly1305 test
     /// vector, run through the same crate entry points the cipher uses.
