@@ -39,6 +39,7 @@ void cairn_uplink_config_defaults(cairn_uplink_config_t *c)
     c->scan_min_interval_ms = 15u * 60u * 1000u;
     c->scan_max_ms          = 8u * 1000u;
     c->scan_hit_ttl_ms      = 30u * 1000u;
+    c->home_wifi_recent_ms  = 30u * 60u * 1000u;
     c->lte_auto             = true;    /* the owner's proposed default; still open */
     c->lte_after_trip_ms    = 60u * 1000u;
     c->lte_retry_ms         = 15u * 60u * 1000u;
@@ -64,6 +65,18 @@ bool cairn_uplink_wifi_may_run(const cairn_uplink_t *u)
 }
 
 /* ── the gates ────────────────────────────────────────────────────────────── */
+
+/*
+ * Home Wi-Fi just worked. Measured 2026-10-25 on the bench: a home slot delivered 4 of
+ * 6 bundles over Grizzle, the 30 s scan hit had expired by the slot's end, the next
+ * scan was 15 min away, and LTE -- allowed 10 min after the trip -- sent the other two
+ * over the SIM from the driveway. While this holds, a scan may follow a slot as soon as
+ * the slot gap allows, and LTE waits for it.
+ */
+static bool home_wifi_recent(const cairn_uplink_t *u, uint32_t now)
+{
+    return u->home_wifi_ok && !reached(now, u->home_wifi_ok_until_ms);
+}
 
 static cairn_home_trigger_t effective_home(const cairn_uplink_t *u, const cairn_uplink_evidence_t *ev,
                                            uint32_t now)
@@ -111,8 +124,11 @@ const char *cairn_uplink_scan_blocker(const cairn_uplink_t *u, const cairn_uplin
     if (ev->phone_connected)                                return "phone present";
     if (effective_home(u, ev, now_ms) != CAIRN_HOME_NONE)   return "home already known";
     if (!u->session_open && !reached(now_ms, u->next_session_ok_ms)) return "backing off";
-    if (u->scanned_ever && !reached(now_ms, u->last_scan_ms + u->cfg.scan_min_interval_ms))
+    if (home_wifi_recent(u, now_ms)) {
+        if (!reached(now_ms, u->next_slot_ok_ms)) return "scanned recently";
+    } else if (u->scanned_ever && !reached(now_ms, u->last_scan_ms + u->cfg.scan_min_interval_ms)) {
         return "scanned recently";
+    }
     return NULL;
 }
 
@@ -133,6 +149,7 @@ static bool lte_may_send(const cairn_uplink_t *u, const cairn_uplink_evidence_t 
     /* Away from home and with no phone to do it for free. */
     if (ev->phone_connected)                                return false;
     if (effective_home(u, ev, now) != CAIRN_HOME_NONE)      return false;
+    if (home_wifi_recent(u, now))                           return false;
     /* After a trip, not during one, and not before the car has settled. */
     if (!u->trip_ended_known)                               return false;
     if (!reached(now, u->trip_ended_ms + u->cfg.lte_after_trip_ms)) return false;
@@ -192,7 +209,10 @@ cairn_uplink_action_t cairn_uplink_tick(cairn_uplink_t *u, const cairn_uplink_ev
 {
     /* The trip edge: the start resets the session, the end starts the LTE clock. */
     if (ev->trip_active) {
-        if (!u->trip_was_active) reset_session_for_trip(u);
+        if (!u->trip_was_active) {
+            reset_session_for_trip(u);
+            u->home_wifi_ok = false; /* the car may be leaving home */
+        }
         u->trip_was_active = true;
         u->trip_ended_known = false;
         u->lte_sent_since_trip = false;
@@ -325,6 +345,8 @@ void cairn_uplink_slot_finished(cairn_uplink_t *u, const cairn_slot_result_t *r,
     if (r->committed > 0) {
         u->progress_this_session = true;
         u->backoff_ms = 0;
+        u->home_wifi_ok = true;
+        u->home_wifi_ok_until_ms = now + u->cfg.home_wifi_recent_ms;
     }
     u->abort_ordered = false;
     u->next_slot_ok_ms = now + u->cfg.min_slot_gap_ms;

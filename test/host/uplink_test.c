@@ -71,6 +71,7 @@ typedef struct {
     int kill_after[CAIRN_PATH_COUNT];
     uint32_t ms_per_chunk[CAIRN_PATH_COUNT];
     uint32_t trip_at;           /* a trip begins at this time (0 = never) */
+    int per_slot;               /* bundles one slot may carry (0 = all), as the runner caps it */
 
     /* what the caller observed */
     cairn_uplink_action_kind_t log[MAX_LOG];
@@ -260,6 +261,7 @@ static void run_slot(world_t *w, cairn_uplink_action_t a)
         r.bytes += d.bytes;
         if (d.delivered) r.committed++;
         else r.failed++;
+        if (w->per_slot > 0 && (int)r.committed >= w->per_slot) break;
         if (d.aborted) { r.aborted_by = w->last_abort_reason; break; }
     }
     r.ms = w->now - t0;
@@ -869,6 +871,37 @@ static void test_wrap(void)
     CHECK("the schedule still completes across a 32-bit clock wrap", exactly_once(&w, 0) && w.u.slots_total == 2);
 }
 
+/* 2026-10-25, the bench: Grizzle took 4 of 6 bundles in one slot, the scan hit expired,
+ * and LTE sent the other two over the SIM from the driveway. Home Wi-Fi that just worked
+ * gets the rest; LTE is for when it is not there -- including after driving away. */
+static void test_home_wifi_before_lte(void)
+{
+    world_t w;
+    world_init(&w, 3, 2);
+    w.ble_up = true; w.phone = false; w.network_in_range = true;
+    w.lte_cfg = true; w.lte_avail = true; w.lte_full = true;
+    w.per_slot = 2;
+    w.trip = true; drive(&w, 1000); w.trip = false;   /* a trip has just ended */
+
+    drive(&w, 25u * 60u * 1000u);
+    int all = 1;
+    for (int i = 0; i < 3; i++) all &= exactly_once(&w, i);
+    CHECK("home Wi-Fi that delivered carries the rest of the queue", all && w.leaves >= 2);
+    CHECK("and LTE is not used from the driveway", w.lte_sends == 0);
+
+    world_t a;
+    world_init(&a, 3, 2);
+    a.ble_up = true; a.phone = false; a.network_in_range = true;
+    a.lte_cfg = true; a.lte_avail = true; a.lte_full = true;
+    a.per_slot = 2;
+    drive(&a, 20u * 1000u);                            /* one home slot: 2 of 3 delivered */
+    a.network_in_range = false;
+    a.trip = true; drive(&a, 60u * 1000u); a.trip = false;   /* drive away */
+    drive(&a, 12u * 60u * 1000u);
+    CHECK("after driving away LTE sends the rest without waiting out the home window",
+          a.leaves >= 1 && a.lte_sends >= 1);
+}
+
 int main(void)
 {
     test_schedule();
@@ -887,6 +920,7 @@ int main(void)
     test_scan_conditions();
     test_lte_trigger();
     test_lte_after_reboot();
+    test_home_wifi_before_lte();
     test_wrap();
 
     printf("uplink manager: %d/%d passed\n", g_pass, g_pass + g_fail);

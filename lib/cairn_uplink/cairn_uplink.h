@@ -72,6 +72,7 @@ typedef struct {
     uint32_t scan_min_interval_ms;   /* the no-phone home scan is rate limited */
     uint32_t scan_max_ms;            /* and bounded: a few seconds of radio, not minutes */
     uint32_t scan_hit_ttl_ms;        /* how long a scan hit stays a valid home trigger */
+    uint32_t home_wifi_recent_ms;    /* after a slot that delivered: rescan freely, hold LTE back */
     bool     lte_auto;               /* LTE fires by itself after a trip, when away */
     uint32_t lte_after_trip_ms;      /* ...this long after the trip ended */
     uint32_t lte_retry_ms;           /* minimum spacing of LTE attempts */
@@ -175,6 +176,11 @@ typedef struct {
     uint32_t scan_started_ms;
     uint32_t scan_hit_until_ms;
     bool     scan_hit_valid;
+
+    /* Home Wi-Fi delivered recently: until this, more home slots are expected and LTE
+     * waits for them. Cleared when a trip starts (the car may be leaving home). */
+    bool     home_wifi_ok;
+    uint32_t home_wifi_ok_until_ms;
 
     /* trip edge, for the LTE trigger */
     bool     trip_was_active;
