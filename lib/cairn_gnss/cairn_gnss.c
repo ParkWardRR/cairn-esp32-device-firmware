@@ -19,6 +19,7 @@ const char *cairn_gnss_verdict_name(cairn_gnss_verdict_t v)
     case CAIRN_GNSS_REJECT_OBD:      return "obd";
     case CAIRN_GNSS_REJECT_STILL:    return "still";
     case CAIRN_GNSS_REJECT_ACCEL:    return "accel";
+    case CAIRN_GNSS_REJECT_FEW_SATS: return "few-sats";
     default:                         return "?";
     }
 }
@@ -36,7 +37,14 @@ cairn_gnss_verdict_t cairn_gnss_gate(cairn_gnss_gate_t *g, const cairn_gnss_samp
             v = CAIRN_GNSS_REJECT_SETTLING;
     }
 
-    if (v == CAIRN_GNSS_ACCEPT && moving && ctx != NULL && ctx->obd_valid &&
+    /* Under a roof the receiver keeps reporting, from too little of the sky. */
+    if (v == CAIRN_GNSS_ACCEPT && s->sats_used != CAIRN_U8_UNKNOWN &&
+        s->sats_used < CAIRN_GNSS_SETTLE_MIN_SATS)
+        v = CAIRN_GNSS_REJECT_FEW_SATS;
+
+    /* At any speed: the garage spur peaked at 7.8 m/s, under the old 8 m/s floor. The
+     * margin covers a receiver's jitter at a standstill. */
+    if (v == CAIRN_GNSS_ACCEPT && ctx != NULL && ctx->obd_valid &&
         ctx->obd_age_ms <= CAIRN_GNSS_OBD_FRESH_MS && ctx->obd_speed_kph >= 0) {
         /* kph to cm/s is x 1000/36. */
         uint32_t obd_cmps = (uint32_t)ctx->obd_speed_kph * 1000u / 36u;

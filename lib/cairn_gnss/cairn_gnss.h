@@ -20,7 +20,11 @@
  *                  accepted one needs at least CAIRN_GNSS_SETTLE_MIN_SATS satellites.
  *                  A receiver re-acquiring with four or five satellites is exactly
  *                  where the run above began.
- *      - OBD       the fix claims at least CAIRN_GNSS_MOVING_CMPS and more than a fresh
+ *      - FEW_SATS  any fix with fewer than CAIRN_GNSS_SETTLE_MIN_SATS satellites in use.
+ *                  Added 2026-10-25: pulling into a garage, the M240i's receiver fell to
+ *                  3-5 satellites and ran 8 -> 28 km/h, 70 m off, while OBD read 3-6
+ *                  km/h -- not after a silence, so SETTLING never applied.
+ *      - OBD       the fix claims more than a fresh
  *                  OBD reading (no older than CAIRN_GNSS_OBD_FRESH_MS) allows: the OBD
  *                  speed, plus what the car could have gained since at
  *                  CAIRN_GNSS_MAX_ACCEL_CMPS2, plus CAIRN_GNSS_OBD_MARGIN_CMPS. The wheel
@@ -77,6 +81,7 @@ typedef enum {
     CAIRN_GNSS_REJECT_OBD,
     CAIRN_GNSS_REJECT_STILL,
     CAIRN_GNSS_REJECT_ACCEL,
+    CAIRN_GNSS_REJECT_FEW_SATS,
     CAIRN_GNSS_VERDICTS
 } cairn_gnss_verdict_t;
 

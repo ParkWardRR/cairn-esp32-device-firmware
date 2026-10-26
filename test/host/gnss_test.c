@@ -152,7 +152,9 @@ static void test_physics(void)
     cairn_gnss_sample_t five = fix(10.0, 5), six = fix(10.0, 6);
     CHECK("a first fix on five satellites waits", cairn_gnss_gate(&h, &five, 1000, NULL) == CAIRN_GNSS_REJECT_SETTLING);
     CHECK("on six it is taken", cairn_gnss_gate(&h, &six, 2000, NULL) == CAIRN_GNSS_ACCEPT);
-    CHECK("once settled, five satellites are enough", cairn_gnss_gate(&h, &five, 3000, NULL) == CAIRN_GNSS_ACCEPT);
+    /* Changed 2026-10-25: settled fixes on 3-5 satellites drew the M240i's garage spur. */
+    CHECK("once settled, five satellites are still refused",
+          cairn_gnss_gate(&h, &five, 3000, NULL) == CAIRN_GNSS_REJECT_FEW_SATS);
     CHECK("after a 31 s silence it settles again", cairn_gnss_gate(&h, &five, 34000, NULL) == CAIRN_GNSS_REJECT_SETTLING);
 
     cairn_gnss_gate_t k;
@@ -284,6 +286,31 @@ static void test_nmea_midnight(void)
     CHECK("a buffer across midnight keeps both, in order", n == 2 && out[0].age_ms == 400 && out[1].age_ms == 200);
 }
 
+/* 2026-10-25, the M240i pulling into a garage (trip ...:1792975318335), fixes as stored:
+ * settled at 9-12 satellites, then the receiver loses the sky and runs while OBD creeps. */
+static void test_the_garage_spur_is_refused(void)
+{
+    static const struct { double mps; int sats; int obd_kph; } run[] = {
+        { 0.6, 9, 1 }, { 0.6, 9, 1 }, { 0.8, 9, 3 }, { 0.3, 7, 3 },   /* 01:22:07-15 */
+        { 2.2, 7, 3 }, { 2.8, 5, 4 }, { 2.5, 3, 5 }, { 2.8, 3, 5 },   /* 01:22:16-21 */
+        { 3.9, 5, 5 }, { 5.0, 5, 5 }, { 5.8, 5, 5 }, { 7.8, 4, 6 },   /* 01:22:22-26 */
+    };
+    cairn_gnss_gate_t g;
+    cairn_gnss_gate_reset(&g);
+    cairn_gnss_sample_t warm = fix(1.0, 12);
+    cairn_gnss_gate(&g, &warm, 0, NULL);
+    int spur_accepted = 0, settled_accepted = 0;
+    for (unsigned i = 0; i < sizeof run / sizeof run[0]; i++) {
+        cairn_gnss_sample_t s = fix(run[i].mps, run[i].sats);
+        cairn_gnss_context_t ctx = { true, (int16_t)run[i].obd_kph, 600, true, 120 };
+        cairn_gnss_verdict_t v = cairn_gnss_gate(&g, &s, 1000 + 1000 * i, &ctx);
+        if (run[i].sats < 6 && v == CAIRN_GNSS_ACCEPT) spur_accepted++;
+        if (run[i].sats >= 6 && v == CAIRN_GNSS_ACCEPT) settled_accepted++;
+    }
+    CHECK("the garage spur's low-satellite fixes are all refused", spur_accepted == 0);
+    CHECK("the creep before it, on 7-9 satellites, is kept", settled_accepted == 5);
+}
+
 int main(void)
 {
     printf("gnss\n");
@@ -291,6 +318,7 @@ int main(void)
     test_the_phantom_run_is_refused();
     test_a_hard_launch_is_not_refused();
     test_physics();
+    test_the_garage_spur_is_refused();
     test_nmea_pairs_and_ages();
     test_nmea_stale_buffer();
     test_nmea_repeats_across_polls();

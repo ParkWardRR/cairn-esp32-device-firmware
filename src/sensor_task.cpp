@@ -32,14 +32,15 @@ static bool vet_gnss(const fact_t *f, cairn_gnss_context_t *c, uint32_t obd_ms)
     if ((int32_t)(now - s_gnss_refusal_log_ms) >= 10000) {
         s_gnss_refusal_log_ms = now;
         CAIRN_LOGW(TAG, "GNSS fix refused (%s): %u cm/s on %u sats, obd %d kph %u ms old, imu %u mg; "
-                        "refused so far: settling %u obd %u still %u accel %u",
+                        "refused so far: settling %u obd %u still %u accel %u few-sats %u",
                    cairn_gnss_verdict_name(v), (unsigned)f->data.gnss.speed_cmps,
                    (unsigned)f->data.gnss.sats_used, c->obd_valid ? (int)c->obd_speed_kph : -1,
                    (unsigned)c->obd_age_ms, (unsigned)c->imu_rms_mg,
                    (unsigned)s_gnss_gate.rejected[CAIRN_GNSS_REJECT_SETTLING],
                    (unsigned)s_gnss_gate.rejected[CAIRN_GNSS_REJECT_OBD],
                    (unsigned)s_gnss_gate.rejected[CAIRN_GNSS_REJECT_STILL],
-                   (unsigned)s_gnss_gate.rejected[CAIRN_GNSS_REJECT_ACCEL]);
+                   (unsigned)s_gnss_gate.rejected[CAIRN_GNSS_REJECT_ACCEL],
+                   (unsigned)s_gnss_gate.rejected[CAIRN_GNSS_REJECT_FEW_SATS]);
     }
     return false;
 }
