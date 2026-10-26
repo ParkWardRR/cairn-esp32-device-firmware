@@ -77,6 +77,19 @@ Three things about these paths cost real drives and are worth knowing before tou
   quality, so `lib/cairn_gnss` vets every fix against OBD speed and the IMU before it is
   written (see the README's Status table).
 
+Two more, found reading the vendor driver for assisted GNSS (2026-10-25), neither yet
+seen to bite on a drive:
+
+- **`CLink_UART::receive` is not binary-safe and caps a reply at 255 bytes.** Its count is
+  an `unsigned char`, so a longer reply wraps and is written over its own start, and it
+  looks for the `\r>` prompt with `strstr`, which stops at the first zero byte. The 5 Hz
+  path reads `ATGRR` through it into a 512-byte buffer. `sensors_gnss_read_raw` reads
+  `ATGRR` byte by byte instead; only the receiver-identity probe uses it so far.
+- **Nobody knows whether `ATGRR` carries UBX.** The co-processor's firmware is not public
+  and the vendor library only ever reads NMEA from that buffer. The identity probe
+  (`src/gnss_assist.cpp`) is what finds out: it logs the identity it read, or how many
+  bytes and UBX frames it saw.
+
 The co-processor link is shared by OBD, GNSS and the supply-voltage read. It has no
 protocol for interleaving, so since `6e62b44` (2026-10-23) every exchange holds
 `sensors_link_lock`, and only the sensing task reads the voltage. Before that, the

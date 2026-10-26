@@ -18,6 +18,7 @@
 #include "cairn_prune.h"
 #include "config.h"
 #include "garage_store.h"
+#include "gnss_assist.h"
 #include "policy.h"
 #include "cairn_trip.h"
 #include "preroll.h"
@@ -440,6 +441,10 @@ bool lifecycle_begin(Lifecycle *lc)
      * there is somewhere to put it would have to be dropped, and dropping the
      * first seconds of a boot is exactly what the pre-roll exists to prevent.
      */
+    /* The stored orbits and receiver identity, before the sensing task starts
+     * injecting them. */
+    gnss_assist_begin();
+
     if (!sensor_task_start(&lc->sensors)) {
         CAIRN_LOGE(TAG, "sensing task failed to start; no data will be captured");
         return false;
@@ -736,6 +741,11 @@ static void on_time_observation(Lifecycle *lc, const fact_t *f)
     uint8_t payload[16];
     cairn_encode_time_observation(&obs, payload);
     emit_capture_record(lc, CAIRN_REC_TIME_OBSERVATION, 1, payload, sizeof(payload), f->monotonic_ms);
+
+    /* The phone's and the network's clocks also become the receiver's time aiding
+     * (src/gnss_assist.cpp); the receiver's own time is of no use to itself. */
+    gnss_assist_note_time(f->data.utc.utc_ms, f->data.utc.acc_ms, f->data.utc.source,
+                          f->monotonic_ms);
 
     if (!adopt) return;
 
@@ -1269,6 +1279,7 @@ static void maybe_standby(Lifecycle *lc)
 
     lc->total_standby_ms += r.standby_ms;
     lc->standby_count++;
+    gnss_assist_note_standby(r.standby_ms);
 
     /*
      * Close the pair. Without an exit record the journal shows a device going to
@@ -1608,6 +1619,7 @@ void lifecycle_tick(Lifecycle *lc)
      * last minute's, and before maybe_standby, so a slot that is about to run
      * is not raced by the device deciding to sleep.
      */
+    gnss_assist_controller_tick();
     uplink_runner_tick(lc);
 
     /*

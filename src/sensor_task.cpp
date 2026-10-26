@@ -6,6 +6,7 @@
 #include "cairn_gnss.h"
 #include "cairn_log.h"
 #include "config.h"
+#include "gnss_assist.h"
 #include "mtprobe.h"
 
 static const char *TAG = "SENSE";
@@ -257,6 +258,7 @@ static void sensor_task(void *arg)
             }
 
             if (accepted > 0) {
+                gnss_assist_on_fix();
                 have_reported_gap = false;
                 last_accepted_fix_ms = now;
             } else {
@@ -398,6 +400,13 @@ static void sensor_task(void *arg)
                 next_obd = now + period;
             }
         }
+
+        /*
+         * Assisted GNSS: at most one ATGDS line (or one ATGRR read while the receiver's
+         * identity is being asked for) per pass, paced inside, so injecting a day of
+         * orbits takes seconds of link time spread over the loop instead of a block.
+         */
+        gnss_assist_sense_step(now);
 
 #if CAIRN_MTPROBE
         /*

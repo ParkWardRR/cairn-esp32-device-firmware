@@ -7,6 +7,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
+#include "cairn_agnss.h"
 #include "cairn_engine.h"
 #include "cairn_log.h"
 #include "config.h"
@@ -290,25 +291,26 @@ static void init_imu(SensorStatus *status)
 
 /* ── GNSS aiding (hot/warm start) ────────────────────────────────────────── */
 
-static void ubx_checksum(const uint8_t *msg, int len, uint8_t *ck_a, uint8_t *ck_b)
-{
-    uint8_t a = 0, b = 0;
-    for (int i = 2; i < len; i++) { a += msg[i]; b += a; }
-    *ck_a = a;
-    *ck_b = b;
-}
+/*
+ * Which receiver path is in use, and how many times it has been started this boot.
+ * Assisted GNSS (src/gnss_assist.cpp) restarts its injection on every new
+ * generation, since a receiver powered down for standby comes back without the
+ * orbits it was given.
+ */
+static bool              s_gnss_internal;
+static volatile uint32_t s_gnss_generation;
 
-static void send_gnss_aiding(void)
+bool sensors_gnss_pos_hint(uint8_t out[28])
 {
     Preferences prefs;
-    if (!prefs.begin("cairn_gnss", true)) return;
+    if (!prefs.begin("cairn_gnss", true)) return false;
 
     int32_t lat = prefs.getInt("lat", 0);
     int32_t lon = prefs.getInt("lon", 0);
     int32_t alt = prefs.getInt("alt", 0);
     prefs.end();
 
-    if (lat == 0 && lon == 0) return;
+    if (lat == 0 && lon == 0) return false;
 
     /*
      * No age check. There was one -- millis() now against millis() when saved -- but
@@ -321,49 +323,89 @@ static void send_gnss_aiding(void)
      * over-confident hint is what can pull a receiver's first solutions off; a loose
      * one only costs a little of the speed-up.
      */
-    /* UBX-MGA-INI-POS_LLH: class 0x13, id 0x40, length 20. */
-    uint8_t msg[28];
-    msg[0] = 0xB5; msg[1] = 0x62;
-    msg[2] = 0x13; msg[3] = 0x40;
-    msg[4] = 20; msg[5] = 0;
-    msg[6] = 0x01;  /* type = LLH */
-    msg[7] = 0x00;  /* version */
-    msg[8] = 0x00; msg[9] = 0x00;  /* reserved */
-    memcpy(&msg[10], &lat, 4);
-    memcpy(&msg[14], &lon, 4);
-    memcpy(&msg[18], &alt, 4);
-    uint32_t acc = 1000000;  /* 10 km, in cm */
-    memcpy(&msg[22], &acc, 4);
-    ubx_checksum(msg, 26, &msg[26], &msg[27]);
+    return cairn_agnss_pos_llh_frame(lat, lon, alt, 1000000u /* 10 km, in cm */, out) == 28;
+}
 
-    if (s_sys.link == nullptr) return;
+static void send_gnss_aiding(void)
+{
+    /* UBX-MGA-INI-POS_LLH, built by lib/cairn_agnss (host-tested against an
+     * independent encoding of these same bytes). */
+    uint8_t msg[28];
+    if (!sensors_gnss_pos_hint(msg) || s_sys.link == nullptr) return;
 
     /* The co-processor's pass-through takes space-separated hex bytes, exactly as the
      * driver itself sends its receiver settings (FreematicsPlus gpsBegin); the bytes
      * used to be run together. */
-    char cmd[5 + 28 * 3 + 2];
-    int n = snprintf(cmd, sizeof(cmd), "ATGDS");
-    for (int i = 0; i < 28; i++) n += snprintf(cmd + n, sizeof(cmd) - (size_t)n, "%02X ", msg[i]);
-    cmd[n - 1] = '\r';
+    char cmd[CAIRN_AGNSS_LINE_CAP];
+    if (cairn_agnss_atgds_line(msg, sizeof(msg), cmd, sizeof(cmd)) == 0) return;
 
     char resp[32];
     s_sys.link->sendCommand(cmd, resp, sizeof(resp), 100);
-    CAIRN_LOGI(TAG, "sent GNSS aiding: lat=%d lon=%d alt=%d cm (+/- 10 km)", lat, lon, alt);
+    int32_t lat, lon, alt;
+    memcpy(&lat, &msg[10], 4);
+    memcpy(&lon, &msg[14], 4);
+    memcpy(&alt, &msg[18], 4);
+    CAIRN_LOGI(TAG, "sent GNSS aiding: lat=%d lon=%d alt=%d cm (+/- 10 km)", (int)lat, (int)lon, (int)alt);
 }
 
 static void init_gnss(SensorStatus *status)
 {
     if (s_sys.gpsBeginExt()) {
         status->gnss = true;
+        s_gnss_internal = false;
         CAIRN_LOGI(TAG, "GNSS ready (external)");
     } else if (s_sys.gpsBegin()) {
         status->gnss = true;
+        s_gnss_internal = true;
         CAIRN_LOGI(TAG, "GNSS ready (internal)");
         send_gnss_aiding();
+        s_gnss_generation = s_gnss_generation + 1;
     } else {
         status->gnss = false;
         CAIRN_LOGW(TAG, "GNSS not available");
     }
+}
+
+uint32_t sensors_gnss_generation(void) { return s_gnss_generation; }
+
+bool sensors_gnss_assistable(void)
+{
+    return s_status != nullptr && s_status->gnss && s_gnss_internal && s_sys.link != nullptr;
+}
+
+bool sensors_gnss_send_line(const char *line)
+{
+    LinkGuard link_guard;
+    if (!sensors_gnss_assistable()) return false;
+    char resp[32];
+    s_sys.link->sendCommand(line, resp, sizeof(resp), 100);
+    return true;
+}
+
+/*
+ * ATGRR, read byte by byte rather than through CLink_UART::receive, because the
+ * receiver's UBX replies are binary and that function is not: it keeps its count
+ * in an unsigned char (a reply over 255 bytes wraps and overwrites its own start),
+ * and looks for the "\r>" prompt with strstr, which stops at the first zero byte.
+ * Whether the co-processor puts UBX replies into this buffer at all is not known
+ * (its firmware is not public; the vendor library only ever reads NMEA from it),
+ * and this is the path that finds out.
+ */
+int sensors_gnss_read_raw(uint8_t *buf, size_t cap)
+{
+    LinkGuard link_guard;
+    if (!sensors_gnss_assistable() || cap < 2) return -1;
+    if (!s_sys.link->send("ATGRR\r")) return -1;
+
+    size_t   n = 0;
+    uint32_t t0 = millis();
+    while (millis() - t0 < 200) {
+        int c = s_sys.link->read();
+        if (c < 0) continue;              /* read() itself waits one tick */
+        if (n < cap) buf[n++] = (uint8_t)c;
+        if (c == '>' && n >= 2 && buf[n - 2] == '\r') break;
+    }
+    return (int)n;
 }
 
 /* ── engine profile ───────────────────────────────────────────────────────── */

@@ -15,6 +15,7 @@
 #define CAIRN_SENSORS_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "cairn_format.h"
@@ -187,6 +188,25 @@ uint16_t sensors_supply_mv_raw(void);
 
 void sensors_fill_health(cairn_device_health_t *out, uint8_t health_state,
                          uint8_t reboot_count, int rssi_dbm);
+
+/* ── assisted GNSS (src/gnss_assist.cpp) ──────────────────────────────────── */
+
+/* The position hint as a UBX-MGA-INI-POS_LLH frame, from the last accepted fix
+ * saved before standby; false when there is none. */
+bool sensors_gnss_pos_hint(uint8_t out[28]);
+
+/* Counts starts of the internal receiver this boot (0: never started). */
+uint32_t sensors_gnss_generation(void);
+
+/* True while the internal receiver is up behind the co-processor, the only path
+ * on which ATGDS reaches it. */
+bool sensors_gnss_assistable(void);
+
+/* One ATGDS line to the receiver, under the link lock. */
+bool sensors_gnss_send_line(const char *line);
+
+/* One ATGRR reply, binary-safe, into buf: its length, or -1. */
+int sensors_gnss_read_raw(uint8_t *buf, size_t cap);
 
 /* ── power ────────────────────────────────────────────────────────────────── */
 

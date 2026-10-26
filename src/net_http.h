@@ -54,6 +54,22 @@ void cairn_http_init(cairn_http_t *h, Client *client, const char *host, uint16_t
 /* Fill in the callbacks cairn_intake_deliver expects. */
 void cairn_http_as_intake(cairn_http_t *h, cairn_intake_http_t *out);
 
+/*
+ * One request outside the intake flow, on the same connection: the GNSS
+ * assistance exchange (src/gnss_assist.cpp) rides the session a bundle upload
+ * already opened. content_type may be NULL (a GET). resp holds up to resp_cap
+ * bytes of the body; the rest is drained. timeout_ms bounds the whole response,
+ * since a body of tens of kilobytes over LTE (~3 KB/s measured) outlasts
+ * CAIRN_HTTP_REPLY_TIMEOUT_MS, and should_abort (may be NULL) is polled while the
+ * body arrives so a trip starting mid-download stops it. False on a transport
+ * failure or an abort; any HTTP status is a successful exchange.
+ */
+bool cairn_http_request(cairn_http_t *h, const char *method, const char *path,
+                        const char *content_type, const char *extra_header,
+                        const uint8_t *body, size_t body_len,
+                        int *status, uint8_t *resp, size_t resp_cap, size_t *resp_len,
+                        uint32_t timeout_ms, bool (*should_abort)(void *), void *abort_ctx);
+
 /* Close the socket. Call once per transfer, after cairn_intake_deliver returns;
  * the intake module's own close() ends a request, not the connection. */
 void cairn_http_disconnect(cairn_http_t *h);

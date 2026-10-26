@@ -16,6 +16,7 @@
 #include "cairn_prune.h"
 #include "cairn_store.h"
 #include "config.h"
+#include "gnss_assist.h"
 #include "net_http.h"
 
 static const char *TAG = "UPLOAD";
@@ -214,6 +215,14 @@ void net_upload_pending(Client *client, const char *host, uint16_t port,
 
         cairn_bundle_close(s_bundle);
     }
+
+    /*
+     * GNSS assistance rides the connection the bundles opened, after them, so it
+     * never delays a bundle and never costs a handshake of its own: report the
+     * receiver once a boot, fetch orbits only when the card's copy is missing or
+     * short (format/v3 §6.4). It checks the abort first, and the download polls it.
+     */
+    gnss_assist_sync(&s_http, label, should_abort, abort_ctx);
 
     cairn_http_disconnect(&s_http);
     out->ms = millis() - t0;
