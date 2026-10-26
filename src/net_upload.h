@@ -53,4 +53,13 @@ void net_upload_pending(Client *client, const char *host, uint16_t port,
                         bool (*should_abort)(void *), void *abort_ctx,
                         net_upload_result_t *out);
 
+/*
+ * Bundles the last session found it could not open. They stay on the card (only a
+ * receipt deletes) but no session can send them, so the uplink does not count them as
+ * waiting: a card whose only bundle had a manifest that does not decode opened a Wi-Fi
+ * slot every few minutes that sent nothing (bench, 2026-10-26). A new bundle raises the
+ * pending count above this and a session recounts.
+ */
+uint32_t net_upload_unreadable_last(void);
+
 #endif /* CAIRN_NET_UPLOAD_H */

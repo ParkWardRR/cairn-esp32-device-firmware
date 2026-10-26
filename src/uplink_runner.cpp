@@ -15,6 +15,9 @@
 #include "sensor_task.h"
 #include "sensors.h"
 #include "wifiscan_runner.h"
+#if CAIRN_WIFI_UPLINK || CAIRN_LTE_UPLINK
+#include "net_upload.h"
+#endif
 
 #if CAIRN_WIFI_UPLINK
 #include <WiFi.h>
@@ -59,7 +62,13 @@ static void gather(const Lifecycle *lc, cairn_uplink_evidence_t *ev)
 
     ev->trip_active     = (lc->capture != CaptureState::Idle);
     ev->parked          = parked_enough(lc);
-    ev->bundles_waiting = lc->pending_bundles;
+    /* A bundle no session can open is not waiting to be sent (net_upload_unreadable_last). */
+#if CAIRN_WIFI_UPLINK || CAIRN_LTE_UPLINK
+    uint32_t unreadable = net_upload_unreadable_last();
+#else
+    uint32_t unreadable = 0;
+#endif
+    ev->bundles_waiting = lc->pending_bundles > unreadable ? lc->pending_bundles - unreadable : 0;
     ev->phone_connected = ble_companion_connected();
 
     /*

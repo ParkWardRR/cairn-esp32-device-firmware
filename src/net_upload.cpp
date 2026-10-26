@@ -86,6 +86,10 @@ static bool hex32(const char *hex, uint8_t out[32])
     return true;
 }
 
+static uint32_t s_unreadable_last;
+
+uint32_t net_upload_unreadable_last(void) { return s_unreadable_last; }
+
 void net_upload_pending(Client *client, const char *host, uint16_t port,
                         const char *label, uint32_t max_bundles,
                         bool (*should_abort)(void *), void *abort_ctx,
@@ -217,6 +221,7 @@ void net_upload_pending(Client *client, const char *host, uint16_t port,
 
     cairn_http_disconnect(&s_http);
     out->ms = millis() - t0;
+    s_unreadable_last = out->unreadable;
 
     CAIRN_LOGI(TAG, "[%s] session: %u delivered, %u retained, %u refused, "
                     "%u unreadable, %u failed, %u up, %u down, %u ms",
