@@ -7,6 +7,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
+#include "cairn_agnss.h"
 #include "cairn_engine.h"
 #include "cairn_log.h"
 #include "config.h"
@@ -290,25 +291,52 @@ static void init_imu(SensorStatus *status)
 
 /* ── GNSS aiding (hot/warm start) ────────────────────────────────────────── */
 
-static void ubx_checksum(const uint8_t *msg, int len, uint8_t *ck_a, uint8_t *ck_b)
-{
-    uint8_t a = 0, b = 0;
-    for (int i = 2; i < len; i++) { a += msg[i]; b += a; }
-    *ck_a = a;
-    *ck_b = b;
-}
+/*
+ * Which receiver path is up, how many times it has been started this boot, and when
+ * the latest start was. src/gnss_hint.cpp reads these to aid each start once (the
+ * receiver is powered down for standby and comes back without what it was told) and to
+ * time its first fix. Written under the link lock by whichever task starts the
+ * receiver; read by the controller.
+ */
+static portMUX_TYPE       s_gen_lock = portMUX_INITIALIZER_UNLOCKED;
+static bool               s_gnss_internal;
+static uint32_t           s_gnss_generation;
+static uint32_t           s_gnss_started_ms;
+static bool               s_gnss_lastfix_hint;
 
-static void send_gnss_aiding(void)
+bool sensors_gnss_saved_fix(int32_t *lat_e7, int32_t *lon_e7, int32_t *alt_cm)
 {
     Preferences prefs;
-    if (!prefs.begin("cairn_gnss", true)) return;
-
+    if (!prefs.begin("cairn_gnss", true)) return false;
     int32_t lat = prefs.getInt("lat", 0);
     int32_t lon = prefs.getInt("lon", 0);
     int32_t alt = prefs.getInt("alt", 0);
     prefs.end();
+    if (lat == 0 && lon == 0) return false;
+    *lat_e7 = lat;
+    *lon_e7 = lon;
+    *alt_cm = alt;
+    return true;
+}
 
-    if (lat == 0 && lon == 0) return;
+/* Lines to the receiver through the co-processor's pass-through, under the link lock.
+ * The caller holds the lock. Nothing comes back: the co-processor passes no UBX reply
+ * (bench, 2026-10-26), so the reply read here is only the co-processor's own prompt. */
+static bool send_frame_locked(const uint8_t *frame, size_t len)
+{
+    if (s_sys.link == nullptr) return false;
+    char line[CAIRN_AGNSS_LINE_CAP];
+    char resp[32];
+    unsigned i = 0;
+    for (; cairn_agnss_frame_line(frame, len, i, line, sizeof(line)) != 0; i++)
+        s_sys.link->sendCommand(line, resp, sizeof(resp), 100);
+    return i > 0;
+}
+
+static bool send_gnss_aiding(void)
+{
+    int32_t lat, lon, alt;
+    if (!sensors_gnss_saved_fix(&lat, &lon, &alt)) return false;
 
     /*
      * No age check. There was one -- millis() now against millis() when saved -- but
@@ -320,50 +348,69 @@ static void send_gnss_aiding(void)
      * 10 km accuracy covers anything short of the car being moved without it. An
      * over-confident hint is what can pull a receiver's first solutions off; a loose
      * one only costs a little of the speed-up.
+     *
+     * The Wi-Fi hint (src/gnss_hint.cpp) follows this one when the first scan without
+     * a fix places the car, about 14 s after boot; it is sent after it, so it is the
+     * position the receiver holds last. This stays the fallback, sent at once, because
+     * a scan may place nothing.
      */
-    /* UBX-MGA-INI-POS_LLH: class 0x13, id 0x40, length 20. */
+    /* UBX-MGA-INI-POS_LLH, built by lib/cairn_agnss (host-tested against an
+     * independent encoding of these same bytes). */
     uint8_t msg[28];
-    msg[0] = 0xB5; msg[1] = 0x62;
-    msg[2] = 0x13; msg[3] = 0x40;
-    msg[4] = 20; msg[5] = 0;
-    msg[6] = 0x01;  /* type = LLH */
-    msg[7] = 0x00;  /* version */
-    msg[8] = 0x00; msg[9] = 0x00;  /* reserved */
-    memcpy(&msg[10], &lat, 4);
-    memcpy(&msg[14], &lon, 4);
-    memcpy(&msg[18], &alt, 4);
-    uint32_t acc = 1000000;  /* 10 km, in cm */
-    memcpy(&msg[22], &acc, 4);
-    ubx_checksum(msg, 26, &msg[26], &msg[27]);
-
-    if (s_sys.link == nullptr) return;
+    if (cairn_agnss_pos_llh_frame(lat, lon, alt, 1000000u /* 10 km, in cm */, msg) != sizeof(msg))
+        return false;
 
     /* The co-processor's pass-through takes space-separated hex bytes, exactly as the
      * driver itself sends its receiver settings (FreematicsPlus gpsBegin); the bytes
      * used to be run together. */
-    char cmd[5 + 28 * 3 + 2];
-    int n = snprintf(cmd, sizeof(cmd), "ATGDS");
-    for (int i = 0; i < 28; i++) n += snprintf(cmd + n, sizeof(cmd) - (size_t)n, "%02X ", msg[i]);
-    cmd[n - 1] = '\r';
-
-    char resp[32];
-    s_sys.link->sendCommand(cmd, resp, sizeof(resp), 100);
-    CAIRN_LOGI(TAG, "sent GNSS aiding: lat=%d lon=%d alt=%d cm (+/- 10 km)", lat, lon, alt);
+    if (!send_frame_locked(msg, sizeof(msg))) return false;
+    CAIRN_LOGI(TAG, "sent GNSS aiding: lat=%d lon=%d alt=%d cm (+/- 10 km)", (int)lat, (int)lon, (int)alt);
+    return true;
 }
 
 static void init_gnss(SensorStatus *status)
 {
     if (s_sys.gpsBeginExt()) {
         status->gnss = true;
+        s_gnss_internal = false;
         CAIRN_LOGI(TAG, "GNSS ready (external)");
     } else if (s_sys.gpsBegin()) {
         status->gnss = true;
+        s_gnss_internal = true;
         CAIRN_LOGI(TAG, "GNSS ready (internal)");
-        send_gnss_aiding();
+        uint32_t started = millis();
+        bool hinted = send_gnss_aiding();
+        portENTER_CRITICAL(&s_gen_lock);
+        s_gnss_generation++;
+        s_gnss_started_ms   = started;
+        s_gnss_lastfix_hint = hinted;
+        portEXIT_CRITICAL(&s_gen_lock);
     } else {
         status->gnss = false;
         CAIRN_LOGW(TAG, "GNSS not available");
     }
+}
+
+uint32_t sensors_gnss_generation(uint32_t *started_ms, bool *lastfix_hint)
+{
+    portENTER_CRITICAL(&s_gen_lock);
+    uint32_t g = s_gnss_generation;
+    if (started_ms) *started_ms = s_gnss_started_ms;
+    if (lastfix_hint) *lastfix_hint = s_gnss_lastfix_hint;
+    portEXIT_CRITICAL(&s_gen_lock);
+    return g;
+}
+
+bool sensors_gnss_assistable(void)
+{
+    return s_status != nullptr && s_status->gnss && s_gnss_internal && s_sys.link != nullptr;
+}
+
+bool sensors_gnss_send_ubx(const uint8_t *frame, size_t len)
+{
+    LinkGuard link_guard;
+    if (!sensors_gnss_assistable()) return false;
+    return send_frame_locked(frame, len);
 }
 
 /* ── engine profile ───────────────────────────────────────────────────────── */

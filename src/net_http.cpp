@@ -11,6 +11,17 @@ static const char *TAG = "HTTP";
 
 /* ── reading ──────────────────────────────────────────────────────────────── */
 
+/*
+ * An abort check for the body reads of cairn_http_request, which may run for tens
+ * of seconds over LTE. Set only for the duration of that call, on the one task that
+ * does uploads; the intake flow polls its own abort check between requests and
+ * leaves this unset.
+ */
+static bool (*s_abort_fn)(void *);
+static void *s_abort_ctx;
+
+static bool aborting(void) { return s_abort_fn != NULL && s_abort_fn(s_abort_ctx); }
+
 /* One CRLF-terminated line, without the terminator. Returns false on timeout
  * or a closed socket. */
 static bool read_line(Client *c, char *out, size_t cap, uint32_t deadline)
@@ -43,6 +54,7 @@ static bool read_exact(Client *c, uint8_t *out, size_t len, uint32_t deadline)
 
     while (got < len) {
         if ((int32_t)(millis() - deadline) >= 0) return false;
+        if (aborting()) return false;
 
         int avail = c->available();
         if (avail <= 0) {
@@ -110,11 +122,10 @@ static bool ensure_connected(cairn_http_t *h)
     return true;
 }
 
-static bool http_begin(void *ctx, const char *method, const char *path,
-                       const char *extra_header, size_t content_length)
+static bool http_begin_typed(cairn_http_t *h, const char *method, const char *path,
+                             const char *content_type, const char *extra_header,
+                             size_t content_length)
 {
-    cairn_http_t *h = (cairn_http_t *)ctx;
-
     if (!ensure_connected(h)) return false;
 
     /* Keep-alive is explicit. A bundle is around thirty requests and a
@@ -124,11 +135,16 @@ static bool http_begin(void *ctx, const char *method, const char *path,
                       "%s %s HTTP/1.1\r\n"
                       "Host: %s:%u\r\n"
                       "Connection: keep-alive\r\n"
-                      "Content-Length: %u\r\n"
-                      "Content-Type: application/cbor\r\n",
+                      "Content-Length: %u\r\n",
                       method, path, h->host, (unsigned)h->port,
                       (unsigned)content_length);
     if (n <= 0 || (size_t)n >= sizeof(head)) return false;
+
+    if (content_type != NULL) {
+        int m = snprintf(head + n, sizeof(head) - (size_t)n, "Content-Type: %s\r\n", content_type);
+        if (m <= 0 || (size_t)(n + m) >= sizeof(head)) return false;
+        n += m;
+    }
 
     if (extra_header != NULL && extra_header[0] != '\0') {
         int m = snprintf(head + n, sizeof(head) - (size_t)n, "%s\r\n", extra_header);
@@ -149,6 +165,13 @@ static bool http_begin(void *ctx, const char *method, const char *path,
     h->request_open = true;
     h->requests++;
     return true;
+}
+
+static bool http_begin(void *ctx, const char *method, const char *path,
+                       const char *extra_header, size_t content_length)
+{
+    return http_begin_typed((cairn_http_t *)ctx, method, path, "application/cbor",
+                            extra_header, content_length);
 }
 
 static bool http_write(void *ctx, const uint8_t *data, size_t len)
@@ -172,19 +195,17 @@ static bool http_write(void *ctx, const uint8_t *data, size_t len)
     return true;
 }
 
-static bool http_finish(void *ctx, int *status, uint8_t *resp, size_t resp_cap,
-                        size_t *resp_len)
+static bool http_finish_within(cairn_http_t *h, int *status, uint8_t *resp, size_t resp_cap,
+                               size_t *resp_len, uint32_t timeout_ms)
 {
-    cairn_http_t *h = (cairn_http_t *)ctx;
     *status   = 0;
     *resp_len = 0;
 
-    uint32_t deadline = millis() + CAIRN_HTTP_REPLY_TIMEOUT_MS;
+    uint32_t deadline = millis() + timeout_ms;
     char     line[256];
 
     if (!read_line(h->client, line, sizeof(line), deadline)) {
-        CAIRN_LOGW(TAG, "no status line within %u ms",
-                   (unsigned)CAIRN_HTTP_REPLY_TIMEOUT_MS);
+        CAIRN_LOGW(TAG, "no status line within %u ms", (unsigned)timeout_ms);
         h->must_reconnect = true;
         return false;
     }
@@ -217,6 +238,18 @@ static bool http_finish(void *ctx, int *status, uint8_t *resp, size_t resp_cap,
         } else if (header_is(line, "Connection")) {
             if (strcasestr(header_value(line), "close") != NULL) close_after = true;
         }
+    }
+
+    /*
+     * 304 and 204 never have a body, whatever the headers say, and Go sends a 304
+     * without Content-Length. Read as "no length, so the body runs to the end of
+     * the connection", a 304 on a keep-alive socket would wait out the whole
+     * deadline for a close that never comes. (RFC 9112 §6.3; 1xx is not
+     * something this client asks for.)
+     */
+    if (*status == 304 || *status == 204) {
+        if (close_after) h->must_reconnect = true;
+        return true;
     }
 
     if (chunked) {
@@ -306,6 +339,13 @@ static bool http_finish(void *ctx, int *status, uint8_t *resp, size_t resp_cap,
     return true;
 }
 
+static bool http_finish(void *ctx, int *status, uint8_t *resp, size_t resp_cap,
+                        size_t *resp_len)
+{
+    return http_finish_within((cairn_http_t *)ctx, status, resp, resp_cap, resp_len,
+                              CAIRN_HTTP_REPLY_TIMEOUT_MS);
+}
+
 static void http_close(void *ctx)
 {
     cairn_http_t *h = (cairn_http_t *)ctx;
@@ -335,6 +375,30 @@ void cairn_http_as_intake(cairn_http_t *h, cairn_intake_http_t *out)
     out->write  = http_write;
     out->finish = http_finish;
     out->close  = http_close;
+}
+
+bool cairn_http_request(cairn_http_t *h, const char *method, const char *path,
+                        const char *content_type, const char *extra_header,
+                        const uint8_t *body, size_t body_len,
+                        int *status, uint8_t *resp, size_t resp_cap, size_t *resp_len,
+                        uint32_t timeout_ms, bool (*should_abort)(void *), void *abort_ctx)
+{
+    *status = 0;
+    *resp_len = 0;
+    if (!http_begin_typed(h, method, path, content_type, extra_header, body_len)) return false;
+    if (body_len > 0 && !http_write(h, body, body_len)) {
+        h->request_open = false;
+        return false;
+    }
+    s_abort_fn  = should_abort;
+    s_abort_ctx = abort_ctx;
+    bool ok = http_finish_within(h, status, resp, resp_cap, resp_len, timeout_ms);
+    s_abort_fn  = NULL;
+    s_abort_ctx = NULL;
+    /* Stopped part-way, the socket holds the rest of a body: it cannot be reused. */
+    if (!ok) h->must_reconnect = true;
+    h->request_open = false;
+    return ok;
 }
 
 void cairn_http_disconnect(cairn_http_t *h)

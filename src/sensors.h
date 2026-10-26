@@ -15,6 +15,7 @@
 #define CAIRN_SENSORS_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "cairn_format.h"
@@ -171,6 +172,23 @@ bool sensors_obd_recover(void);
 #endif
 
 void sensors_gnss_save_aiding(const cairn_gnss_sample_t *fix);
+
+/* ── the receiver's aiding (src/gnss_hint.cpp) ────────────────────────────── */
+
+/* The last accepted fix saved before standby (the +/- 10 km hint's source). */
+bool sensors_gnss_saved_fix(int32_t *lat_e7, int32_t *lon_e7, int32_t *alt_cm);
+
+/* How many times the internal receiver has been started this boot (0: never), when the
+ * latest start was, and whether the last-fix hint went with it. */
+uint32_t sensors_gnss_generation(uint32_t *started_ms, bool *lastfix_hint);
+
+/* True while the internal receiver is up behind the co-processor, the only path on
+ * which ATGDS reaches it. */
+bool sensors_gnss_assistable(void);
+
+/* One whole UBX frame to the receiver as ATGDS lines, under the link lock. Unacknowledged
+ * by construction; false only when there was no receiver to send it to. */
+bool sensors_gnss_send_ubx(const uint8_t *frame, size_t len);
 
 /* Battery voltage in millivolts, read through the coprocessor. */
 uint16_t sensors_battery_mv(void);

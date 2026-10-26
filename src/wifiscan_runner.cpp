@@ -14,6 +14,7 @@
 #include "cairn_log.h"
 #include "cairn_wifiscan.h"
 #include "config.h"
+#include "gnss_hint.h"
 #include "lifecycle.h"
 #include "uplink_runner.h"
 
@@ -316,6 +317,10 @@ bool wifiscan_runner_tick(const Lifecycle *lc, uint8_t *payload, size_t cap, siz
                (unsigned)st.dropped_filter, (unsigned)st.dropped_dup,
                (unsigned)(st.dropped_cap + beyond), beyond ? " (list truncated)" : "",
                (unsigned)took, learning ? "learning" : "position", (unsigned)s_heap_at_start);
+
+    /* A scan without a fix may place the car for the receiver (src/gnss_hint.cpp). The
+     * kept access points are the strongest sixteen, filtered as the record is. */
+    gnss_hint_on_scan(&rec, learning);
 
     if (cairn_encode_wifi_scan(&rec, payload, cap, len) != CAIRN_OK) {
         CAIRN_LOGE(TAG, "WIFI_SCAN would not encode into %u bytes", (unsigned)cap);

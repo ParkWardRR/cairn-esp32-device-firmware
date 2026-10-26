@@ -322,3 +322,17 @@ recovery) has been done on the v3 firmware. What is still open, as of 2026-10-24
    bundles sealed within a boot dated by the carried UTC basis
 3. Wi-Fi to the home network, which refused association on 2026-10-23 (#31)
 4. Standby current measurement (#10)
+5. The receiver's position and time hints (README, "The receiver's position and time
+   hints"). This needs the server's `GET /api/v2/wifi-anchors` deployed and some learned
+   access points.
+   - After the first upload session, expect `[wifi] Wi-Fi anchors downloaded: N access
+     points` and, on the next boot, `Wi-Fi anchors on the card: N`.
+   - About 14 s into a boot indoors (no fix), expect `Wi-Fi hint sent: +/- ... m` with a
+     `from the last saved fix` distance of metres to hundreds of metres. `Wi-Fi hint: not
+     from this scan (...)` names the rule that refused the scan.
+   - On the first fix, expect the `TTFF start=...` line.
+   - The co-processor returns no UBX replies, so neither hint can be confirmed directly.
+     One indirect check for the time hint: on the bench with no fix, does a
+     `TIME_OBSERVATION` with source 1 (the receiver's own date and time) appear in the
+     bundle soon after `time hint sent`? That would mean the receiver took the time,
+     including the frame split over two `ATGDS` lines. Then compare `ttff` across drives with and without `wifi=sent`.

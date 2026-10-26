@@ -256,6 +256,59 @@ GNSS is missing exactly where a trip starts: a cold receiver takes a minute or t
 - **BLE stays up.** A scan is asynchronous (polled each tick, so capture is never blocked), passive by default (it sends no probe requests carrying the ESP32's fixed MAC), 200 ms per channel, about 2.6 s in all, with the coexistence arbiter on its balanced split. A slot tears BLE down because WPA2's handshake has a deadline; a scan has none. **Not yet verified on the car's unit:** that the phone link survives a scan, how many access points a passive scan hears under coexistence, and the heap left with both stacks up (`CAIRN_WIFI_SCAN=0` turns it off).
 - **Privacy.** No SSID is ever recorded or logged; the per-scan log line gives counts only. An access point is left out when its BSSID is locally administered (bit 1 of the first octet: phone hotspots, randomised addresses) or its SSID ends in `_nomap` or `_optout` (matched case-insensitively). The 16 strongest are kept, strongest first; a scan that heard nothing is still written, with count 0. Scans taken before a trip is confirmed wait in two pre-roll slots of their own, since a 132-byte record does not fit the ring's 32-byte entries.
 
+### The receiver's position and time hints
+
+A cold receiver in the M240i drew nothing for the first eight minutes of the drive of 2026-10-25. At each receiver start it is told only where the car was last fixed, at ±10 km (`UBX-MGA-INI-POS_LLH`, `src/sensors.cpp`). `src/gnss_hint.cpp` adds two more hints, each sent at most once per receiver start and only before that start's first accepted fix:
+
+- **Wi-Fi position.** A position scan (no fix) is looked up in the access-point positions the server has learned for this dongle's cars. The server reads them from `v_wifi_ap_learned` and serves them as `GET /api/v2/wifi-anchors`, format v3 §6.4. The first scan comes about 14 s after boot. When the scan places the car, `MGA-INI-POS_LLH` is sent with that position. Because it is sent after the last-fix hint, it is the position the receiver holds last. A scan that does not place the car is retried at the next scan, until a fix arrives. The rules are in `lib/cairn_wifiloc` (host-tested, `wifiloc_test.c`):
+  - **Two or more known access points:** accepted only if a strict majority of the known ones agree. Agreeing means within 300 m of their signal-weighted centre (weight `10^(dBm/20)`), after the strays are dropped.
+  - **Exactly one known access point:** accepted only if it is heard at −60 dBm or stronger.
+  - **Anything else is refused:** no known access point, one heard weakly, or two places in one scan.
+  - **Accuracy:** the largest of 100 m, the worst learned accuracy among the access points used, and their RMS distance from the centre. Altitude allowance is added on top: ±200 m when the last saved fix is within 10 km, ±1 km within 100 km, and otherwise sea level at ±3 km. These allowances are judgement, not measurement, and they err loose.
+- **Time.** The first phone or network time (`TIME_OBSERVATION`) is sent as `MGA-INI-TIME_UTC` (`lib/cairn_agnss`, host-tested, `agnss_test.c`).
+  - Its accuracy is the observation's own, plus 200 ms for the transit through the co-processor, plus clock drift since: 50 ppm awake and 2 % in light sleep.
+  - It is not sent once that accuracy passes 15 min.
+  - This frame is 32 bytes, so it goes as two `ATGDS` lines (28 + 4). It is the first frame this firmware splits across lines.
+- **The anchor table** is fetched by an upload session that is already open, over Wi-Fi or LTE.
+  - It goes after the session's bundles, and only if no bundle failed on the link.
+  - It is fetched when the card has no copy or the copy is a day old. Without a clock, it is fetched once per boot. Attempts are never closer than an hour apart.
+  - The request carries `If-None-Match` with the copy's SHA-256, so an unchanged table costs a 304.
+  - The download is bounded at 30 s and the slot's own abort applies throughout, so it cannot hold a slot past a trip start.
+  - It is kept in PSRAM. The card copy, `/cairn/state/wifi-anchors.bin`, is **sealed** with XChaCha20-Poly1305 under a key derived from the storage root. The table maps the owner's routers to where they live, and the card is the easiest part to walk away with.
+  - Writes are atomic: written to `.tmp`, then renamed.
+
+**Limits.** These hints are not orbits. They spare the receiver its search for where and when it is, not the ephemeris download, so they help most when the receiver still has an almanac. Nothing is acknowledged: the co-processor returns no UBX replies (bench, 2026-10-26), so the firmware cannot know whether the receiver took a hint. That is why every accuracy claimed errs loose. An over-confident hint is what u-blox warns can stall a start. `CAIRN_GNSS_HINTS=0` sends neither hint. The last-fix hint and the TTFF line stay. The only measure is the time to first fix.
+
+#### Reading the TTFF line
+
+One `INFO` line from tag `HINT` is written per receiver start (boot, and each wake from standby) when that start's first fix is accepted. It is `key=value` so drives can be compared with `grep TTFF`:
+
+```
+TTFF start=1 ttff=74.3s boot=76.0s sats=7 lastfix=sent wifi=sent@14.2s acc=224m hacc=100m aps=3/4/9 from_lastfix=310m time=network@31.0s tacc=2210ms anchors=312
+```
+
+| Key | Meaning |
+|---|---|
+| `start` | Receiver start this boot: 1 at boot, +1 for each wake from standby |
+| `ttff` | Time from this receiver start to its first accepted fix (the GNSS gate's, `fix_type` ≥ 2). **This is the number to compare** |
+| `boot` | The same fix, as time since boot |
+| `sats` | Satellites in that fix |
+| `lastfix` | `sent`: the ±10 km last-fix hint went at the start. `none`: no saved fix |
+| `wifi=sent@T` | The Wi-Fi hint went T after the start. `acc` is its 3-D accuracy as sent. `hacc` is horizontal. `aps` is used/known/heard. `from_lastfix` is how far it was from the last saved fix: kilometres means the car moved without a fix, or the table is wrong |
+| `wifi=<reason> scans=N` | No Wi-Fi hint, after N position scans. The reasons: `no-scan` (none before the fix), `no-table` (no anchors on the card yet), `none-known`, `one-weak`, `disagree` (the acceptance rules above), `no-receiver`, `off` |
+| `time=<source>@T tacc` | The time hint went T after the start, from `phone` or `network`, at ±`tacc` |
+| `time=<reason>` | `none` (no phone or network time before the fix), `too-loose` (past 15 min), `off` |
+| `anchors` | Access points in the table this boot |
+
+To judge the hints, compare `ttff` for starts with `wifi=sent` against starts without, in the same car and similar places. A garage start and an open-sky start are not comparable. Other lines from the same module:
+
+- `Wi-Fi anchors on the card: N access points, learned up to <date>` at boot.
+- `[wifi] Wi-Fi anchors downloaded` or `unchanged (304)` after an upload session.
+- `Wi-Fi hint sent: ...` and `Wi-Fi hint: not from this scan (...)`, the second at most once per start.
+- `time hint sent: ...`.
+
+None of them carries a position or a BSSID: the card log is not sealed.
+
 ### Power and parked silence
 
 On a BMW F3x the OBD connector carries only D-CAN, gated by the body domain controller, so any request while parked wakes the gateway and the car's energy management can count it. The firmware therefore enforces a named invariant, tested on the host: **no diagnostic request is transmitted unless a drive is confirmed**, and drive confirmation uses only bus-silent evidence: the rail at engine-on for 15 s, or the accelerometer at 120 mg or more for 10 s, or both together for 2 s. A periodic health wake never opens the bus.
@@ -690,6 +743,7 @@ flowchart LR
 | `digest`, `usage` | The digest reducer and byte budget, the rule that a digest acknowledgement is not a receipt (against the real prune gate), data accounting, caps, power-cut persistence and the retry breaker. Provisional: synthetic data, no contract vectors |
 | `gnss` | `lib/cairn_gnss`, 37 checks: the plausibility gate (the 37 phantom fixes of 2026-10-14 replayed and all refused, the real fixes before them all accepted, each of `SETTLING`, `OBD`, `STILL`, `ACCEL`, and pulling away from a light, which must be accepted) and the 5 Hz NMEA parser (GGA/RMC pairing, checksums, repeats across polls, stale buffers, truncation, an unpaired GGA, the midnight wrap) |
 | `trip` | `lib/cairn_trip`, 22 checks: the drive lost on 2026-10-23 (half the rail readings garbage, OBD silent, a 90–120 mg road) replayed as one 20-minute trip started within 30 s; idling for 10 minutes, door slams and bench power never start a trip; traffic lights with auto start-stop and tunnels do not split one; parking ends it |
+| `wifiloc`, `agnss` | `lib/cairn_wifiloc`, 68 checks. The anchor table: the server's record byte for byte, every refusal, a 4096-record table searched end to end, a longer record from a newer server. The acceptance rules: one strong, one weak, three agreeing, a loud stray 5 km off dropped, two places refused, not-a-majority refused, an RMS-limited accuracy, the antimeridian. Also the hint's altitude, when to fetch, and the sealed card copy (wrong root, flipped bit, truncation). `lib/cairn_agnss`, 18 checks: `MGA-INI-TIME_UTC` and `POS_LLH` against an independent encoding, the time accuracy's growth, and a frame cut into `ATGDS` lines and rejoined |
 | `interop-writer` | Seals bundles with the C store and format code and leaves them for the server's Go verifier to judge |
 | `mutate` | Applies deliberate breakages of the digest and usage safety rules to a copy of the sources and requires the suite to fail on each (`make -C test/host mutate`) |
 | `asan` | All of the above under AddressSanitizer and UBSan, since undefined behaviour in the scan path would be a parser reading past a torn segment |
@@ -713,6 +767,7 @@ flowchart LR
 | `lib/cairn_power/` | Standby decisions and the parked-silence rule |
 | `lib/cairn_trip/` | Trip start and stop, the debounced supply rail and drive confirmation (since `6e62b44`) |
 | `lib/cairn_gnss/` | GNSS plausibility gate and the 5 Hz NMEA (`ATGRR`) parser |
+| `lib/cairn_wifiscan/`, `lib/cairn_wifiloc/`, `lib/cairn_agnss/` | Wi-Fi position scans; the Wi-Fi position from learned anchors and the sealed card copy; the receiver's UBX aiding messages and `ATGDS` lines |
 | `lib/cairn_fs/`, `lib/cairn_log/` | SD, NVS and POSIX shims; logging to UART and the card |
 | `lib/cairn_engine/` | Engine-profile runtime: selection, formula evaluator, batch request and parse, vehicle gate; `gen/` holds the committed all-engines tables |
 | `lib/cairn_devinfo/`, `lib/cairn_boottime/` | `DEVICE_INFO` and `UPLINK_EVENT` encoding; the boot-timing record (both wired in) |
@@ -743,7 +798,8 @@ You need PlatformIO for the device build, a C compiler and make for the host tes
 scripts/fetch-contracts.sh
 
 # 2. Host tests: every suite (conformance, faults, ble-vectors, mtprobe, prov, offload, engine,
-#    boottime, uplink, config, devinfo, checkin, interop-writer, digest, usage, gnss, trip, garage, wifiscan, ...)
+#    boottime, uplink, config, devinfo, checkin, interop-writer, digest, usage, gnss, trip, garage, wifiscan,
+#    wifiloc, agnss, ...)
 make -C test/host                 # or: make host-test
 make -C test/host asan            # the same under AddressSanitizer and UBSan
 make -C test/host conformance     # or any one suite by name, e.g. faults, offload, engine, uplink

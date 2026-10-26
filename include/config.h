@@ -538,4 +538,25 @@
 #define CAIRN_WIFISCAN_MIN_FREE_HEAP 60000u
 #endif
 
+/* ── the receiver's position and time hints ───────────────────────────────── */
+/*
+ * src/gnss_hint.cpp: at each receiver start, before its first fix, the Wi-Fi position
+ * (lib/cairn_wifiloc, from the learned anchors the server sends) and the phone's or the
+ * network's time go to the receiver as UBX-MGA-INI messages. 0 sends neither (the
+ * last-fix hint at start is unchanged, and the first-fix log line is still written), so
+ * this is the switch if a hint is ever suspected of slowing a start.
+ */
+#ifndef CAIRN_GNSS_HINTS
+#define CAIRN_GNSS_HINTS 1
+#endif
+
+/*
+ * The anchor download, after a session's bundles: bounded so it cannot hold a session
+ * open past usefulness. 64 KiB at the ~3 KB/s measured over LTE is ~22 s; Wi-Fi is far
+ * quicker. The slot's own abort (trip start, slot limit) still applies throughout.
+ */
+#ifndef CAIRN_WIFI_ANCHORS_TIMEOUT_MS
+#define CAIRN_WIFI_ANCHORS_TIMEOUT_MS 30000u
+#endif
+
 #endif /* CAIRN_CONFIG_H */

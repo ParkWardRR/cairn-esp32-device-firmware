@@ -18,6 +18,7 @@
 #include "cairn_prune.h"
 #include "config.h"
 #include "garage_store.h"
+#include "gnss_hint.h"
 #include "policy.h"
 #include "cairn_trip.h"
 #include "preroll.h"
@@ -436,6 +437,10 @@ bool lifecycle_begin(Lifecycle *lc)
         CAIRN_LOGI(TAG, "trip %u resumed across reboot", (unsigned)lc->trip_seq);
     }
 
+    /* The receiver's hints (src/gnss_hint.cpp): the anchor table off the card, under a
+     * key from the storage root, before the first scan can want it. */
+    gnss_hint_begin(&lc->storage);
+
     /*
      * Sensing starts only after the capture is open. A fact arriving before
      * there is somewhere to put it would have to be dropped, and dropping the
@@ -658,6 +663,9 @@ static void on_gnss_sample(Lifecycle *lc, const fact_t *f)
         lc->last_gnss_internal        = f->data.gnss;
         lc->have_recent_gnss_internal = true;
         lc->internal_gnss_last_ms     = f->monotonic_ms;
+        /* The first of each receiver start ends its hints and writes the TTFF line. */
+        if (f->data.gnss.fix_type >= 2)
+            gnss_hint_on_fix(f->monotonic_ms, f->data.gnss.sats_used);
         if (f->data.gnss.fix_type >= 2 &&
             (!lc->have_accepted_fix ||
              (int32_t)(f->monotonic_ms - lc->accepted_fix_ms) > 0)) {
@@ -733,6 +741,11 @@ static void on_time_observation(Lifecycle *lc, const fact_t *f)
                    (unsigned long long)f->data.utc.utc_ms);
         return;
     }
+
+    /* The phone's and the network's clocks also become the receiver's time hint
+     * (src/gnss_hint.cpp); every source dates the anchor table's age. */
+    gnss_hint_note_time(f->data.utc.utc_ms, f->data.utc.acc_ms, f->data.utc.source, f->monotonic_ms,
+                        lc->total_standby_ms);
 
     const bool adopt = !lc->have_utc_basis;
 
@@ -1632,6 +1645,9 @@ void lifecycle_tick(Lifecycle *lc)
      * last minute's, and before maybe_standby, so a slot that is about to run
      * is not raced by the device deciding to sleep.
      */
+    /* A receiver start notices here, and is sent a time hint it is still owed. */
+    gnss_hint_tick(lc->total_standby_ms);
+
     uplink_runner_tick(lc);
 
     /*
