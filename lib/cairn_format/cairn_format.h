@@ -106,6 +106,7 @@ typedef enum {
     CAIRN_REC_POLICY_SNAPSHOT  = 0x09,
     CAIRN_REC_OBD_EXTENDED     = 0x0A,
     CAIRN_REC_TIME_OBSERVATION = 0x0B,
+    CAIRN_REC_WIFI_SCAN        = 0x0C,
 } cairn_record_type_t;
 
 bool cairn_record_type_known(uint8_t t);
@@ -1070,6 +1071,59 @@ typedef struct {
 } cairn_time_observation_t;
 
 void cairn_encode_time_observation(const cairn_time_observation_t *s, uint8_t out[16]);
+
+/*
+ * WIFI_SCAN (section 4.13) -- the access points one Wi-Fi scan heard, variable
+ * length, 4 + 8 x count bytes.
+ *
+ * Evidence of where the car was when GNSS could not say: a cold receiver, a
+ * garage, a tunnel. Written while the device has no accepted fix and, as a
+ * *learning* scan, now and then while it has a fresh one, so the server can learn
+ * where each access point is from the fixes it was heard beside.
+ *
+ * Deliberately carries no SSID, and the struct below has nowhere to put one: a
+ * network's name says more about its owner than about where it is, and position
+ * needs only the BSSID. The exclusions (locally administered BSSIDs, "_nomap" and
+ * "_optout" networks) are applied before a scan ever reaches this struct, in
+ * lib/cairn_wifiscan.
+ *
+ * The frame's monotonic_ms is when the scan completed. A scan that heard nothing
+ * is still written, with count 0: absence is evidence too.
+ */
+#define CAIRN_WIFI_SCAN_MAX_APS      16
+#define CAIRN_WIFI_SCAN_HEADER_SIZE  4
+#define CAIRN_WIFI_SCAN_ENTRY_SIZE   8
+#define CAIRN_WIFI_SCAN_MAX_PAYLOAD  (CAIRN_WIFI_SCAN_HEADER_SIZE + \
+                                      CAIRN_WIFI_SCAN_MAX_APS * CAIRN_WIFI_SCAN_ENTRY_SIZE) /* 132 */
+
+/* flags: bit 0, an accepted GNSS fix was no older than 2 s at the scan (a
+ * learning scan); bit 1, an active scan (probe requests were sent). */
+#define CAIRN_WIFI_SCAN_LEARNING 0x01u
+#define CAIRN_WIFI_SCAN_ACTIVE   0x02u
+
+typedef struct {
+    uint8_t bssid[6];   /* transmission order */
+    int8_t  rssi_dbm;
+    uint8_t channel;
+} cairn_wifi_ap_t;
+
+typedef struct {
+    uint8_t         count;     /* 0..CAIRN_WIFI_SCAN_MAX_APS */
+    uint8_t         flags;
+    uint16_t        scan_ms;
+    cairn_wifi_ap_t ap[CAIRN_WIFI_SCAN_MAX_APS];  /* strongest first */
+} cairn_wifi_scan_t;
+
+/* 4 + 8 x count bytes; CAIRN_ERR_MALFORMED for a count over 16. */
+cairn_err_t cairn_encode_wifi_scan(const cairn_wifi_scan_t *s, uint8_t *out,
+                                   size_t out_cap, size_t *written);
+
+/*
+ * The reverse, for the host tests and the conformance runner. The length must be
+ * exactly 4 + 8 x count. Flag bits this build does not know are kept rather than
+ * refused, so a scan from newer firmware still decodes.
+ */
+cairn_err_t cairn_decode_wifi_scan(const uint8_t *p, size_t len, cairn_wifi_scan_t *out);
 
 typedef struct {
     uint16_t battery_mv;

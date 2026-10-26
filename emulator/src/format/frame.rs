@@ -55,6 +55,10 @@ impl RecordType {
     /// comparable and drift visible. The manifest's basis stays first-wins;
     /// these records are the evidence trail behind it.
     pub const TIME_OBSERVATION: Self = Self(0x0B);
+    /// The access points one Wi-Fi scan heard (§4.13): position evidence when
+    /// GNSS has none, and, flagged as learning, beside a fresh fix. Carries
+    /// BSSIDs, signals and channels -- never an SSID.
+    pub const WIFI_SCAN: Self = Self(0x0C);
 
     /// Whether this implementation understands the type.
     ///
@@ -63,7 +67,7 @@ impl RecordType {
     /// older decoder. The frame CRC and — in a keyed scan — the tag still apply,
     /// so a skipped record remains integrity-checked.
     pub fn known(self) -> bool {
-        (Self::GNSS_SAMPLE.0..=Self::TIME_OBSERVATION.0).contains(&self.0)
+        (Self::GNSS_SAMPLE.0..=Self::WIFI_SCAN.0).contains(&self.0)
     }
 
     /// The spec's name for this type, used in conformance expectations.
@@ -80,6 +84,7 @@ impl RecordType {
             Self::POLICY_SNAPSHOT => "POLICY_SNAPSHOT".into(),
             Self::OBD_EXTENDED => "OBD_EXTENDED".into(),
             Self::TIME_OBSERVATION => "TIME_OBSERVATION".into(),
+            Self::WIFI_SCAN => "WIFI_SCAN".into(),
             Self(other) => format!("UNKNOWN(0x{other:02x})"),
         }
     }

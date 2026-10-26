@@ -80,7 +80,7 @@ static uint64_t get_u64(const uint8_t *p)
 
 bool cairn_record_type_known(uint8_t t)
 {
-    return t >= CAIRN_REC_GNSS_SAMPLE && t <= CAIRN_REC_TIME_OBSERVATION;
+    return t >= CAIRN_REC_GNSS_SAMPLE && t <= CAIRN_REC_WIFI_SCAN;
 }
 
 const char *cairn_record_type_name(uint8_t t)
@@ -97,6 +97,7 @@ const char *cairn_record_type_name(uint8_t t)
     case CAIRN_REC_POLICY_SNAPSHOT:  return "POLICY_SNAPSHOT";
     case CAIRN_REC_OBD_EXTENDED:     return "OBD_EXTENDED";
     case CAIRN_REC_TIME_OBSERVATION: return "TIME_OBSERVATION";
+    case CAIRN_REC_WIFI_SCAN:        return "WIFI_SCAN";
     default:                         return "UNKNOWN";
     }
 }
@@ -699,6 +700,54 @@ void cairn_encode_time_observation(const cairn_time_observation_t *s, uint8_t ou
     put_u32(out + 8, s->acc_ms);
     out[12] = s->source;
     out[13] = s->flags;
+}
+
+cairn_err_t cairn_encode_wifi_scan(const cairn_wifi_scan_t *s, uint8_t *out,
+                                   size_t out_cap, size_t *written)
+{
+    if (s->count > CAIRN_WIFI_SCAN_MAX_APS) return CAIRN_ERR_MALFORMED;
+
+    size_t total = CAIRN_WIFI_SCAN_HEADER_SIZE +
+                   (size_t)s->count * CAIRN_WIFI_SCAN_ENTRY_SIZE;
+    if (out_cap < total) return CAIRN_ERR_BUFFER_TOO_SMALL;
+
+    out[0] = s->count;
+    out[1] = s->flags;
+    put_u16(out + 2, s->scan_ms);
+    for (uint8_t i = 0; i < s->count; i++) {
+        uint8_t *e = out + CAIRN_WIFI_SCAN_HEADER_SIZE + (size_t)i * CAIRN_WIFI_SCAN_ENTRY_SIZE;
+        memcpy(e, s->ap[i].bssid, 6);
+        e[6] = (uint8_t)s->ap[i].rssi_dbm;
+        e[7] = s->ap[i].channel;
+    }
+
+    *written = total;
+    return CAIRN_OK;
+}
+
+cairn_err_t cairn_decode_wifi_scan(const uint8_t *p, size_t len, cairn_wifi_scan_t *out)
+{
+    if (len < CAIRN_WIFI_SCAN_HEADER_SIZE) return CAIRN_ERR_TRUNCATED;
+
+    uint8_t count = p[0];
+    if (count > CAIRN_WIFI_SCAN_MAX_APS) return CAIRN_ERR_MALFORMED;
+    /* Exact, not at-least: trailing bytes would mean a reader and a writer that
+     * disagree about the layout, and guessing which one is right is how a
+     * plausible wrong position gets made. */
+    if (len != CAIRN_WIFI_SCAN_HEADER_SIZE + (size_t)count * CAIRN_WIFI_SCAN_ENTRY_SIZE)
+        return CAIRN_ERR_MALFORMED;
+
+    memset(out, 0, sizeof(*out));
+    out->count   = count;
+    out->flags   = p[1];
+    out->scan_ms = get_u16(p + 2);
+    for (uint8_t i = 0; i < count; i++) {
+        const uint8_t *e = p + CAIRN_WIFI_SCAN_HEADER_SIZE + (size_t)i * CAIRN_WIFI_SCAN_ENTRY_SIZE;
+        memcpy(out->ap[i].bssid, e, 6);
+        out->ap[i].rssi_dbm = (int8_t)e[6];
+        out->ap[i].channel  = e[7];
+    }
+    return CAIRN_OK;
 }
 
 void cairn_encode_device_health(const cairn_device_health_t *s, uint8_t out[16])

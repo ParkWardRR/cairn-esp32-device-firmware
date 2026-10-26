@@ -316,3 +316,195 @@ pub fn parse_time_observation(p: &[u8]) -> Result<TimeObservation> {
         adopted: p[13] & TIME_OBSERVATION_ADOPTED != 0,
     })
 }
+
+// ── WIFI_SCAN (§4.13) ───────────────────────────────────────────────────────
+
+/// Flag bit 0: an accepted GNSS fix was no older than 2 s at the scan, so the
+/// access points can be learned from it.
+pub const WIFI_SCAN_LEARNING: u8 = 1 << 0;
+/// Flag bit 1: an active scan (probe requests were sent).
+pub const WIFI_SCAN_ACTIVE: u8 = 1 << 1;
+/// The device keeps the 16 strongest.
+pub const WIFI_SCAN_MAX_APS: usize = 16;
+
+/// One access point a scan heard. No SSID: the record has nowhere to carry one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WifiAp {
+    /// In transmission order.
+    pub bssid: [u8; 6],
+    pub rssi_dbm: i8,
+    pub channel: u8,
+}
+
+impl WifiAp {
+    /// `aa:bb:cc:dd:ee:ff`, the form the conformance vectors use.
+    pub fn bssid_string(&self) -> String {
+        self.bssid
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<Vec<_>>()
+            .join(":")
+    }
+}
+
+/// One Wi-Fi scan (§4.13). The frame's `monotonic_ms` is when it completed; a
+/// scan that heard nothing is a valid record with no entries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WifiScan {
+    /// The raw flag byte. Bits this build does not know are kept, not refused,
+    /// so a scan from newer firmware still decodes.
+    pub flags: u8,
+    pub scan_ms: u16,
+    /// Strongest first, as the device writes them.
+    pub aps: Vec<WifiAp>,
+}
+
+impl WifiScan {
+    pub fn learning(&self) -> bool {
+        self.flags & WIFI_SCAN_LEARNING != 0
+    }
+
+    pub fn active(&self) -> bool {
+        self.flags & WIFI_SCAN_ACTIVE != 0
+    }
+}
+
+pub fn encode_wifi_scan(s: &WifiScan) -> Result<Vec<u8>> {
+    if s.aps.len() > WIFI_SCAN_MAX_APS {
+        return Err(FormatError::Malformed(format!(
+            "WIFI_SCAN carries at most {WIFI_SCAN_MAX_APS} entries, not {}",
+            s.aps.len()
+        )));
+    }
+    let mut out = Vec::with_capacity(4 + 8 * s.aps.len());
+    out.push(s.aps.len() as u8);
+    out.push(s.flags);
+    out.extend_from_slice(&s.scan_ms.to_le_bytes());
+    for ap in &s.aps {
+        out.extend_from_slice(&ap.bssid);
+        out.push(ap.rssi_dbm as u8);
+        out.push(ap.channel);
+    }
+    Ok(out)
+}
+
+pub fn parse_wifi_scan(p: &[u8]) -> Result<WifiScan> {
+    if p.len() < 4 {
+        return Err(FormatError::Malformed(format!(
+            "WIFI_SCAN payload is {} bytes, want at least 4",
+            p.len()
+        )));
+    }
+    let count = p[0] as usize;
+    if count > WIFI_SCAN_MAX_APS {
+        return Err(FormatError::Malformed(format!(
+            "WIFI_SCAN count {count} exceeds {WIFI_SCAN_MAX_APS}"
+        )));
+    }
+    // Exact, not at-least: a length that disagrees with the count means writer
+    // and reader disagree about the layout, and guessing which is right is how a
+    // plausible wrong position gets made.
+    if p.len() != 4 + 8 * count {
+        return Err(FormatError::Malformed(format!(
+            "WIFI_SCAN payload is {} bytes, want {} for {count} entries",
+            p.len(),
+            4 + 8 * count
+        )));
+    }
+    let aps = p[4..]
+        .chunks_exact(8)
+        .map(|e| WifiAp {
+            bssid: e[0..6].try_into().unwrap(),
+            rssi_dbm: e[6] as i8,
+            channel: e[7],
+        })
+        .collect();
+    Ok(WifiScan {
+        flags: p[1],
+        scan_ms: u16::from_le_bytes([p[2], p[3]]),
+        aps,
+    })
+}
+
+#[cfg(test)]
+mod wifi_scan_tests {
+    use super::*;
+
+    fn scan(n: usize, flags: u8, scan_ms: u16) -> WifiScan {
+        WifiScan {
+            flags,
+            scan_ms,
+            aps: (0..n)
+                .map(|i| WifiAp {
+                    bssid: [0x88, 0xdc, 0x97, 0x07, 0x10 + i as u8, 0xdb],
+                    rssi_dbm: -40 - 3 * i as i8,
+                    channel: 1 + (i % 13) as u8,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn wifi_scan_is_a_known_type() {
+        use crate::format::RecordType;
+        assert!(RecordType::WIFI_SCAN.known());
+        assert_eq!(RecordType::WIFI_SCAN.0, 0x0C);
+        assert_eq!(RecordType::WIFI_SCAN.name(), "WIFI_SCAN");
+        assert!(!RecordType(0x0D).known());
+    }
+
+    #[test]
+    fn count_zero_is_a_four_byte_record() {
+        let s = scan(0, WIFI_SCAN_ACTIVE, 2140);
+        let b = encode_wifi_scan(&s).unwrap();
+        assert_eq!(b, vec![0, 0x02, 0x5c, 0x08]);
+        let d = parse_wifi_scan(&b).unwrap();
+        assert_eq!(d, s);
+        assert!(d.active() && !d.learning());
+    }
+
+    #[test]
+    fn three_and_sixteen_round_trip() {
+        for n in [3usize, 16] {
+            let s = scan(n, WIFI_SCAN_LEARNING | WIFI_SCAN_ACTIVE, 2310);
+            let b = encode_wifi_scan(&s).unwrap();
+            assert_eq!(b.len(), 4 + 8 * n);
+            assert_eq!(parse_wifi_scan(&b).unwrap(), s);
+        }
+        let b = encode_wifi_scan(&scan(16, 0, 1)).unwrap();
+        assert_eq!(b.len(), 132);
+        // Entry layout: bssid in transmission order, then i8 dBm, then channel.
+        assert_eq!(&b[4..10], &[0x88, 0xdc, 0x97, 0x07, 0x10, 0xdb]);
+        assert_eq!(b[10] as i8, -40);
+        assert_eq!(b[4 + 15 * 8 + 6] as i8, -85);
+    }
+
+    #[test]
+    fn bssid_renders_as_the_vectors_write_it() {
+        let s = scan(1, 0, 0);
+        assert_eq!(s.aps[0].bssid_string(), "88:dc:97:07:10:db");
+    }
+
+    #[test]
+    fn malformed_lengths_and_counts_are_refused() {
+        let b = encode_wifi_scan(&scan(3, 0, 1870)).unwrap();
+        assert!(parse_wifi_scan(&b[..27]).is_err());
+        let mut long = b.clone();
+        long.push(0);
+        assert!(parse_wifi_scan(&long).is_err());
+        assert!(parse_wifi_scan(&b[..3]).is_err());
+        let mut over = vec![17u8, 0, 0, 0];
+        over.extend(std::iter::repeat_n(0u8, 17 * 8));
+        assert!(parse_wifi_scan(&over).is_err());
+        assert!(encode_wifi_scan(&scan(17, 0, 0)).is_err());
+    }
+
+    #[test]
+    fn unknown_flag_bits_are_kept() {
+        let mut b = encode_wifi_scan(&scan(3, 0, 1870)).unwrap();
+        b[1] = 0xFD;
+        let d = parse_wifi_scan(&b).unwrap();
+        assert_eq!(d.flags, 0xFD);
+        assert!(d.learning() && !d.active());
+    }
+}

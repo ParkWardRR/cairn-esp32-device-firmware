@@ -1626,6 +1626,161 @@ static bool check_obd_ext(const char *dir, const char *vector,
     return true;
 }
 
+/* ── WIFI_SCAN (section 4.13) ────────────────────────────────────────────── */
+
+/*
+ * Each record decoded through the firmware's own decoder and held to the vector field by
+ * field -- the frame's monotonic_ms (when the scan completed), the two flags, the
+ * duration, and every entry in order -- then re-encoded, which must give back the sealed
+ * bytes exactly. The vector arrived after contracts-v0.8.0; under a pin without it there
+ * is no wifi-scan directory, so this never runs and nothing is skipped.
+ */
+#define MAX_WIFI_SCAN_RECORDS 8
+static size_t            g_wifi_count;
+static uint32_t          g_wifi_mono[MAX_WIFI_SCAN_RECORDS];
+static cairn_err_t       g_wifi_err[MAX_WIFI_SCAN_RECORDS];
+static cairn_wifi_scan_t g_wifi[MAX_WIFI_SCAN_RECORDS];
+static bool              g_wifi_reencodes[MAX_WIFI_SCAN_RECORDS];
+
+static bool wifi_scan_collect_cb(const cairn_frame_t *f, void *user)
+{
+    (void)user;
+
+    if (f->record_type == CAIRN_REC_WIFI_SCAN && g_wifi_count < MAX_WIFI_SCAN_RECORDS) {
+        size_t i = g_wifi_count++;
+        g_wifi_mono[i] = f->monotonic_ms;
+        g_wifi_err[i]  = cairn_decode_wifi_scan(f->payload, f->payload_len, &g_wifi[i]);
+
+        uint8_t again[CAIRN_WIFI_SCAN_MAX_PAYLOAD];
+        size_t  len = 0;
+        g_wifi_reencodes[i] =
+            g_wifi_err[i] == CAIRN_OK &&
+            cairn_encode_wifi_scan(&g_wifi[i], again, sizeof(again), &len) == CAIRN_OK &&
+            len == f->payload_len && memcmp(again, f->payload, len) == 0;
+    }
+    return true;
+}
+
+static bool parse_bssid(const char *s, uint8_t out[6])
+{
+    unsigned b[6];
+    if (sscanf(s, "%2x:%2x:%2x:%2x:%2x:%2x", &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) != 6)
+        return false;
+    for (int i = 0; i < 6; i++) out[i] = (uint8_t)b[i];
+    return true;
+}
+
+static bool check_wifi_scan(const char *dir, const char *vector,
+                            const mj_doc_t *doc, const mj_node_t *exp)
+{
+    char path[512];
+    snprintf(path, sizeof(path), "%s/segment.bin", dir);
+
+    size_t len;
+    uint8_t *bytes = read_file(path, &len);
+    if (bytes == NULL) {
+        record_failure(vector, "cannot read segment.bin");
+        return false;
+    }
+
+    g_wifi_count = 0;
+
+    cairn_scan_result_t res;
+    cairn_scan_state_t state = { 0, 0 };
+    /* Payloads are sealed, so reading them takes the key. */
+    cairn_scan_opts_t opts = { cairn_root_key_provider, &g_root, wifi_scan_collect_cb, NULL };
+    cairn_err_t err = cairn_scan_segment(bytes, len, state, &opts, &res);
+    free(bytes);
+
+    if (err != CAIRN_OK) {
+        record_failure(vector, "scan failed: %s", cairn_strerror(err));
+        return false;
+    }
+
+    const mj_node_t *list = mj_get(doc, exp, "records");
+    size_t want_count = mj_len(doc, list);
+
+    if (g_wifi_count != want_count) {
+        record_failure(vector, "found %zu WIFI_SCAN records, want %zu", g_wifi_count, want_count);
+        return false;
+    }
+
+    for (size_t i = 0; i < want_count; i++) {
+        const mj_node_t *r = mj_at(doc, list, i);
+        const cairn_wifi_scan_t *got = &g_wifi[i];
+
+        if (g_wifi_err[i] != CAIRN_OK) {
+            record_failure(vector, "record %zu does not decode: %s", i, cairn_strerror(g_wifi_err[i]));
+            return false;
+        }
+
+        uint32_t want_mono = (uint32_t)mj_num_or(mj_get(doc, r, "monotonic_ms"), -1);
+        if (g_wifi_mono[i] != want_mono) {
+            record_failure(vector, "record %zu frame monotonic_ms = %u, want %u", i,
+                           (unsigned)g_wifi_mono[i], (unsigned)want_mono);
+            return false;
+        }
+
+        bool want_learning = mj_bool_or(mj_get(doc, r, "learning"), false);
+        bool want_active   = mj_bool_or(mj_get(doc, r, "active"), false);
+        if (((got->flags & CAIRN_WIFI_SCAN_LEARNING) != 0) != want_learning ||
+            ((got->flags & CAIRN_WIFI_SCAN_ACTIVE) != 0) != want_active) {
+            record_failure(vector, "record %zu flags = 0x%02x, want learning %d active %d", i,
+                           (unsigned)got->flags, want_learning, want_active);
+            return false;
+        }
+
+        uint16_t want_ms = (uint16_t)mj_num_or(mj_get(doc, r, "scan_ms"), -1);
+        if (got->scan_ms != want_ms) {
+            record_failure(vector, "record %zu scan_ms = %u, want %u", i,
+                           (unsigned)got->scan_ms, (unsigned)want_ms);
+            return false;
+        }
+
+        const mj_node_t *aps = mj_get(doc, r, "aps");
+        size_t want_aps = mj_len(doc, aps);
+        if (got->count != want_aps) {
+            record_failure(vector, "record %zu count = %u, want %zu", i, (unsigned)got->count, want_aps);
+            return false;
+        }
+
+        for (size_t j = 0; j < want_aps; j++) {
+            const mj_node_t *a = mj_at(doc, aps, j);
+            uint8_t want_bssid[6];
+            if (!parse_bssid(mj_str_or(mj_get(doc, a, "bssid"), ""), want_bssid)) {
+                record_failure(vector, "record %zu entry %zu: unparseable bssid", i, j);
+                return false;
+            }
+            int8_t  want_rssi = (int8_t)(int)mj_num_or(mj_get(doc, a, "rssi_dbm"), -999);
+            uint8_t want_ch   = (uint8_t)mj_num_or(mj_get(doc, a, "channel"), -1);
+            if (memcmp(got->ap[j].bssid, want_bssid, 6) != 0 ||
+                got->ap[j].rssi_dbm != want_rssi || got->ap[j].channel != want_ch) {
+                record_failure(vector, "record %zu entry %zu = %02x:%02x:%02x:%02x:%02x:%02x "
+                                       "%d dBm ch %u, want %s %d dBm ch %u", i, j,
+                               got->ap[j].bssid[0], got->ap[j].bssid[1], got->ap[j].bssid[2],
+                               got->ap[j].bssid[3], got->ap[j].bssid[4], got->ap[j].bssid[5],
+                               (int)got->ap[j].rssi_dbm, (unsigned)got->ap[j].channel,
+                               mj_str_or(mj_get(doc, a, "bssid"), ""), (int)want_rssi,
+                               (unsigned)want_ch);
+                return false;
+            }
+            /* The device writes strongest first; a vector that is not is a vector the
+             * device could not have produced. */
+            if (j > 0 && got->ap[j].rssi_dbm > got->ap[j - 1].rssi_dbm) {
+                record_failure(vector, "record %zu entry %zu is stronger than the one before", i, j);
+                return false;
+            }
+        }
+
+        if (!g_wifi_reencodes[i]) {
+            record_failure(vector, "record %zu does not re-encode to the sealed bytes", i);
+            return false;
+        }
+    }
+
+    return true;
+}
+
 /* ── OTA update descriptor ────────────────────────────────────────────────── */
 
 static bool check_update(const char *dir, const char *vector,
@@ -1941,6 +2096,7 @@ static void run_vector(const char *root, const char *name)
     const mj_node_t *health   = mj_get(&doc, exp, "health");
     const mj_node_t *update   = mj_get(&doc, exp, "update");
     const mj_node_t *obd_ext  = mj_get(&doc, exp, "obd_ext");
+    const mj_node_t *wifi     = mj_get(&doc, exp, "wifi_scan");
 
     /*
      * Every segment vector states a keyed verdict as well as a structural one.
@@ -1969,6 +2125,9 @@ static void run_vector(const char *root, const char *name)
     } else if (obd_ext != NULL) {
         ok = check_scan(dir, name, &doc, scan, keyed) &&
              check_obd_ext(dir, name, &doc, obd_ext);
+    } else if (wifi != NULL) {
+        ok = check_scan(dir, name, &doc, scan, keyed) &&
+             check_wifi_scan(dir, name, &doc, wifi);
     } else if (scan != NULL) {
         ok = check_scan(dir, name, &doc, scan, keyed);
     } else if (header != NULL) {

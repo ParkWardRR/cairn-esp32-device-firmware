@@ -62,6 +62,7 @@ struct Expectation {
     health: Option<HealthExpectation>,
     obd_ext: Option<ObdExtExpectation>,
     time_obs: Option<TimeObsExpectation>,
+    wifi_scan: Option<WifiScanExpectation>,
 }
 
 /// `keyed` is an object for single-segment vectors and an array for the
@@ -193,6 +194,28 @@ struct TimeObsRecordExpectation {
     source: String,
     adopted: bool,
     implied_basis_ms: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct WifiScanExpectation {
+    records: Vec<WifiScanRecordExpectation>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WifiScanRecordExpectation {
+    /// The frame's monotonic reading: when the scan completed.
+    monotonic_ms: u32,
+    learning: bool,
+    active: bool,
+    scan_ms: u16,
+    aps: Vec<WifiApExpectation>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WifiApExpectation {
+    bssid: String,
+    rssi_dbm: i8,
+    channel: u8,
 }
 
 #[derive(Debug, Deserialize)]
@@ -382,6 +405,12 @@ fn check_vector(dir: &Path, exp: &Expectation, keys: &RootKeyProvider, t: &mut T
     if let Some(o) = &exp.obd_ext {
         recognised = true;
         check_obd_ext(dir, o, keys, t)?;
+    }
+    // The wifi-scan vector arrived after contracts-v0.8.0. Under a pin without it
+    // there is no directory to iterate, so nothing is skipped and nothing fails.
+    if let Some(w) = &exp.wifi_scan {
+        recognised = true;
+        check_wifi_scan(dir, w, keys, t)?;
     }
 
     if !recognised {
@@ -1157,6 +1186,96 @@ fn check_time_obs(
     }
 
     t.what.push("time observations");
+    Ok(())
+}
+
+/// WIFI_SCAN decoding, held to the vector record by record, and re-encoded to
+/// the sealed bytes exactly.
+fn check_wifi_scan(
+    dir: &Path,
+    w: &WifiScanExpectation,
+    keys: &RootKeyProvider,
+    t: &mut Tally,
+) -> Check {
+    let bytes = read(dir, "segment.bin")?;
+    let res = scan_segment(&bytes, ScanState::default(), Some(keys as &dyn KeyProvider))
+        .map_err(|e| format!("keyed scan: {e}"))?;
+    if res.stop != StopReason::Eof {
+        return Err(format!("keyed scan stopped with {}", res.stop));
+    }
+    let frames: Vec<_> = res
+        .frames
+        .into_iter()
+        .filter(|f| f.record_type == format::RecordType::WIFI_SCAN)
+        .collect();
+    if frames.len() != w.records.len() {
+        return Err(format!(
+            "found {} WIFI_SCAN records, want {}",
+            frames.len(),
+            w.records.len()
+        ));
+    }
+
+    for (i, (f, want)) in frames.iter().zip(&w.records).enumerate() {
+        if f.monotonic_ms != want.monotonic_ms {
+            return Err(format!(
+                "record {i} frame monotonic_ms = {}, want {}",
+                f.monotonic_ms, want.monotonic_ms
+            ));
+        }
+        let p = f
+            .payload
+            .as_ref()
+            .ok_or_else(|| format!("record {i} has no decrypted payload"))?;
+        let r = payload::parse_wifi_scan(p).map_err(|e| format!("record {i}: {e}"))?;
+
+        if r.learning() != want.learning || r.active() != want.active {
+            return Err(format!(
+                "record {i} flags = 0x{:02x}, want learning {} active {}",
+                r.flags, want.learning, want.active
+            ));
+        }
+        if r.scan_ms != want.scan_ms {
+            return Err(format!(
+                "record {i} scan_ms = {}, want {}",
+                r.scan_ms, want.scan_ms
+            ));
+        }
+        if r.aps.len() != want.aps.len() {
+            return Err(format!(
+                "record {i} count = {}, want {}",
+                r.aps.len(),
+                want.aps.len()
+            ));
+        }
+        for (j, (got, exp_ap)) in r.aps.iter().zip(&want.aps).enumerate() {
+            if got.bssid_string() != exp_ap.bssid.to_ascii_lowercase()
+                || got.rssi_dbm != exp_ap.rssi_dbm
+                || got.channel != exp_ap.channel
+            {
+                return Err(format!(
+                    "record {i} entry {j} = {} {} dBm ch {}, want {} {} dBm ch {}",
+                    got.bssid_string(),
+                    got.rssi_dbm,
+                    got.channel,
+                    exp_ap.bssid,
+                    exp_ap.rssi_dbm,
+                    exp_ap.channel
+                ));
+            }
+        }
+        // The device writes strongest first; a record that is not could not
+        // have come from it.
+        if r.aps.windows(2).any(|pair| pair[1].rssi_dbm > pair[0].rssi_dbm) {
+            return Err(format!("record {i} is not ordered strongest first"));
+        }
+        let again = payload::encode_wifi_scan(&r).map_err(|e| format!("record {i}: {e}"))?;
+        if &again != p {
+            return Err(format!("record {i} re-encodes to different bytes"));
+        }
+    }
+
+    t.what.push("wifi scans");
     Ok(())
 }
 
