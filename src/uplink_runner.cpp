@@ -14,6 +14,7 @@
 #include "lifecycle.h"
 #include "sensor_task.h"
 #include "sensors.h"
+#include "wifiscan_runner.h"
 
 #if CAIRN_WIFI_UPLINK
 #include <WiFi.h>
@@ -361,6 +362,26 @@ void uplink_runner_begin(void)
 
 bool uplink_runner_busy(void) { return s_busy; }
 
+bool uplink_runner_owns_wifi(void)
+{
+    return s_busy || cairn_uplink_wifi_may_run(&s_u);
+}
+
+/*
+ * The other half of the radio-ownership guard. A position scan runs asynchronously
+ * across lifecycle ticks, so one may be in flight when the schedule decides to use
+ * Wi-Fi: it is stopped and the radio put back to WIFI_OFF before the uplink touches it.
+ * The scan is the one that yields because it has no deadline and loses only one
+ * reading; a slot that waited would be holding a parked car's bundles for it.
+ *
+ * LTE does not use Wi-Fi, but an LTE send blocks this task for up to its limit, and a
+ * scan left running underneath would complete unattended and be read minutes late.
+ */
+static void take_radio_from_scanner(const char *why)
+{
+    if (wifiscan_runner_busy()) wifiscan_runner_cancel(why);
+}
+
 void uplink_runner_tick(Lifecycle *lc)
 {
     cairn_uplink_evidence_t ev;
@@ -387,6 +408,7 @@ void uplink_runner_tick(Lifecycle *lc)
         break;
 
     case CAIRN_UL_ACT_START_WIFI_SLOT:
+        take_radio_from_scanner("an uplink Wi-Fi slot is starting");
 #if CAIRN_WIFI_UPLINK
         cairn_uplink_slot_started(&s_u, millis());
         run_wifi_slot(lc, a.slot_no, a.max_ms ? a.max_ms : CAIRN_UPLINK_SLOT_MAX_MS);
@@ -413,6 +435,7 @@ void uplink_runner_tick(Lifecycle *lc)
          * meant to be up.
          */
         CAIRN_LOGW(TAG, "radio forced off by the schedule");
+        take_radio_from_scanner("the uplink forced the radio off");
 #if CAIRN_WIFI_UPLINK
         wifi_link_disconnect();
 #endif
@@ -432,6 +455,7 @@ void uplink_runner_tick(Lifecycle *lc)
         break;
 
     case CAIRN_UL_ACT_SCAN_HOME:
+        take_radio_from_scanner("the uplink's home scan is starting");
         cairn_uplink_scan_started(&s_u, millis());
         {
             bool found = run_home_scan(a.max_ms ? a.max_ms : 5000);
@@ -440,6 +464,7 @@ void uplink_runner_tick(Lifecycle *lc)
         break;
 
     case CAIRN_UL_ACT_LTE_SEND:
+        take_radio_from_scanner("an LTE send will block the controller");
 #if CAIRN_LTE_UPLINK
         cairn_uplink_lte_started(&s_u);
         run_lte_send(lc);

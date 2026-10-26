@@ -53,11 +53,19 @@ void uplink_runner_tick(struct Lifecycle *lc);
 /* True while a slot or an LTE send is in progress, so standby is held off. */
 bool uplink_runner_busy(void);
 
+/*
+ * True while the uplink owns the Wi-Fi radio or the controller is blocked on it: a slot,
+ * the home scan, an LTE send, or a schedule state that has Wi-Fi up. The position scanner
+ * (wifiscan_runner) starts nothing while this is true.
+ */
+bool uplink_runner_owns_wifi(void);
+
 #else
 
 static inline void uplink_runner_begin(void) {}
 static inline void uplink_runner_tick(struct Lifecycle *lc) { (void)lc; }
 static inline bool uplink_runner_busy(void) { return false; }
+static inline bool uplink_runner_owns_wifi(void) { return false; }
 
 #endif /* CAIRN_UPLINK_RUNNER */
 

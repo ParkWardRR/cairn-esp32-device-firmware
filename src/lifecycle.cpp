@@ -24,6 +24,7 @@
 #include "sensor_task.h"
 #include "sensors.h"
 #include "uplink_runner.h"
+#include "wifiscan_runner.h"
 
 static const char *TAG = "LIFE";
 
@@ -468,6 +469,7 @@ bool lifecycle_begin(Lifecycle *lc)
                (int)lc->sensors.obd, (int)lc->sensors.imu, (int)lc->sensors.gnss);
 
     uplink_runner_begin();
+    wifiscan_runner_begin();
 
     return true;
 }
@@ -656,6 +658,14 @@ static void on_gnss_sample(Lifecycle *lc, const fact_t *f)
         lc->last_gnss_internal        = f->data.gnss;
         lc->have_recent_gnss_internal = true;
         lc->internal_gnss_last_ms     = f->monotonic_ms;
+        if (f->data.gnss.fix_type >= 2 &&
+            (!lc->have_accepted_fix ||
+             (int32_t)(f->monotonic_ms - lc->accepted_fix_ms) > 0)) {
+            /* NMEA fixes are stamped when the receiver took them, so a buffer can
+             * deliver one older than the summary already seen: keep the newest. */
+            lc->have_accepted_fix = true;
+            lc->accepted_fix_ms   = f->monotonic_ms;
+        }
 
         bool phone_fresh = lc->phone_gnss_active &&
                            (millis() - lc->phone_gnss_last_ms <
@@ -1253,6 +1263,20 @@ static void maybe_standby(Lifecycle *lc)
         return;
     }
 
+    /*
+     * A position scan in flight holds standby. Bounded by the scan's own timeout, a few
+     * seconds; standing by under it would light-sleep with the driver mid-scan and its
+     * result read on waking as if it were fresh.
+     */
+    if (wifiscan_runner_busy()) {
+        static const char *const k_scanning = "a Wi-Fi position scan is in progress";
+        if (lc->last_standby_blocker != k_scanning) {
+            CAIRN_LOGI(TAG, "not standing by: %s", k_scanning);
+            lc->last_standby_blocker = k_scanning;
+        }
+        return;
+    }
+
     lc->last_standby_blocker = nullptr;
 
     ble_companion_radio_off();
@@ -1609,6 +1633,19 @@ void lifecycle_tick(Lifecycle *lc)
      * is not raced by the device deciding to sleep.
      */
     uplink_runner_tick(lc);
+
+    /*
+     * Wi-Fi position scans, after the uplink so a slot it starts this pass has already
+     * had the radio and given it back, and so the schedule sees the uplink's state as it
+     * now is. Never blocks: a scan is started here and collected on a later pass.
+     */
+    {
+        uint8_t  payload[CAIRN_WIFI_SCAN_MAX_PAYLOAD];
+        size_t   len = 0;
+        uint32_t done_ms = 0;
+        if (wifiscan_runner_tick(lc, payload, sizeof(payload), &len, &done_ms))
+            emit_capture_record(lc, CAIRN_REC_WIFI_SCAN, 1, payload, len, done_ms);
+    }
 
     /*
      * Last, so a sync has already had its chance this pass. Standing by before

@@ -246,6 +246,16 @@ The `include/config.h` thresholds are written into every bundle as a policy snap
 
 Sampling is event-adaptive: the nominal periods (GNSS 200 ms, IMU window 100 ms, OBD batch 200 ms, full OBD sweep 1.2 s, health every 30 s) are upper bounds, so adaptation only ever adds detail.
 
+### Wi-Fi position scans
+
+GNSS is missing exactly where a trip starts: a cold receiver takes a minute or two (the 2026-10-07 drive had its first fix 130 s in) and a garage gives none. The access points around the car are heard in both, so the dongle records what a Wi-Fi scan hears as a `WIFI_SCAN` record (format v3 §4.13, type `0x0C`) in the capture chain, and the server turns it into a position *estimate*, never a GNSS fix. The schedule is `lib/cairn_wifiscan` (host-tested in `wifiscan_test.c`); the radio side is `src/wifiscan_runner.cpp`.
+
+- **Position scans** when there has been no accepted fix (one that passed the GNSS gate) for 5 s, or none since boot: every 10 s while a trip is suspected, under way or trailing, every 5 min parked.
+- **Learning scans** when an accepted fix is no older than 2 s: every 60 s while driving, and once at trip start (confirmation) and trip end (entering the trailing dwell, while the record still lands in the trip's own bundle). They carry flag bit 0, so the server can learn where each access point is from the fixes beside it. The phone's fixes never count: in a garage they are themselves Wi-Fi positions.
+- **Never while the uplink owns the radio.** No scan starts during a Wi-Fi slot, the home scan or an LTE send, and the uplink cancels a scan in flight before it takes the radio. Standby waits for a scan to finish. Wi-Fi is back at `WIFI_OFF` after every scan.
+- **BLE stays up.** A scan is asynchronous (polled each tick, so capture is never blocked), passive by default (it sends no probe requests carrying the ESP32's fixed MAC), 200 ms per channel, about 2.6 s in all, with the coexistence arbiter on its balanced split. A slot tears BLE down because WPA2's handshake has a deadline; a scan has none. **Not yet verified on the car's unit:** that the phone link survives a scan, how many access points a passive scan hears under coexistence, and the heap left with both stacks up (`CAIRN_WIFI_SCAN=0` turns it off).
+- **Privacy.** No SSID is ever recorded or logged; the per-scan log line gives counts only. An access point is left out when its BSSID is locally administered (bit 1 of the first octet: phone hotspots, randomised addresses) or its SSID ends in `_nomap` or `_optout` (matched case-insensitively). The 16 strongest are kept, strongest first; a scan that heard nothing is still written, with count 0. Scans taken before a trip is confirmed wait in two pre-roll slots of their own, since a 132-byte record does not fit the ring's 32-byte entries.
+
 ### Power and parked silence
 
 On a BMW F3x the OBD connector carries only D-CAN, gated by the body domain controller, so any request while parked wakes the gateway and the car's energy management can count it. The firmware therefore enforces a named invariant, tested on the host: **no diagnostic request is transmitted unless a drive is confirmed**, and drive confirmation uses only bus-silent evidence: the rail at engine-on for 15 s, or the accelerometer at 120 mg or more for 10 s, or both together for 2 s. A periodic health wake never opens the bus.
@@ -733,7 +743,7 @@ You need PlatformIO for the device build, a C compiler and make for the host tes
 scripts/fetch-contracts.sh
 
 # 2. Host tests: every suite (conformance, faults, ble-vectors, mtprobe, prov, offload, engine,
-#    boottime, uplink, config, devinfo, checkin, interop-writer, digest, usage, gnss, trip, ...)
+#    boottime, uplink, config, devinfo, checkin, interop-writer, digest, usage, gnss, trip, garage, wifiscan, ...)
 make -C test/host                 # or: make host-test
 make -C test/host asan            # the same under AddressSanitizer and UBSan
 make -C test/host conformance     # or any one suite by name, e.g. faults, offload, engine, uplink

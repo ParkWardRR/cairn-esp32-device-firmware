@@ -492,4 +492,50 @@
  */
 #define CAIRN_UPLINK_ABORT_RMS_MG 60u
 
+/* ── Wi-Fi position scans ─────────────────────────────────────────────────── */
+/*
+ * The schedule is lib/cairn_wifiscan's (when, and which access points); these are how
+ * the radio is driven for one scan, in src/wifiscan_runner.cpp. None of the numbers
+ * below has been measured on the car's unit yet: they are the first bench settings.
+ */
+
+/*
+ * Passive, by default: listen for beacons, send nothing.
+ *
+ * An active scan transmits probe requests from the ESP32's station MAC, which is fixed
+ * and globally unique, every ten seconds of a drive with no fix. Anyone logging probe
+ * requests could follow the car by it. Passive costs completeness (an access point
+ * between beacons on its channel when the dwell ends is missed) and nothing else.
+ * Setting this to 1 also sets the record's "active" flag.
+ */
+#ifndef CAIRN_WIFISCAN_ACTIVE_SCAN
+#define CAIRN_WIFISCAN_ACTIVE_SCAN 0
+#endif
+
+/*
+ * Dwell per channel. Beacons are sent every 102.4 ms by default, so 200 ms hears each
+ * access point about twice even with coexistence handing some slots to BLE; over the
+ * 13 channels of the world-safe country setting that is 2.6 s, the "two to three
+ * seconds" the phone link has to survive.
+ */
+#ifndef CAIRN_WIFISCAN_DWELL_MS
+#define CAIRN_WIFISCAN_DWELL_MS 200u
+#endif
+
+/* A scan that has not completed by this is stopped and nothing is recorded: the radio
+ * is shared with the phone link and must not be held by a driver that went quiet. */
+#ifndef CAIRN_WIFISCAN_TIMEOUT_MS
+#define CAIRN_WIFISCAN_TIMEOUT_MS 6000u
+#endif
+
+/*
+ * Free internal heap below which a scan is not started. Bringing Wi-Fi up beside a live
+ * NimBLE stack allocates the driver's buffers from internal RAM; refusing a scan is
+ * harmless, an allocation failure inside the driver with BLE up is not. A guess pending
+ * a bench reading (the per-scan log line reports the figure).
+ */
+#ifndef CAIRN_WIFISCAN_MIN_FREE_HEAP
+#define CAIRN_WIFISCAN_MIN_FREE_HEAP 60000u
+#endif
+
 #endif /* CAIRN_CONFIG_H */
