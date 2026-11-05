@@ -403,7 +403,20 @@ static bool build_gatt_and_advertise(void)
     clear_bonds_if_pairing_changed(authreq, io_cap, (uint32_t)CAIRN_BLE_PASSKEY);
 
     s_server = NimBLEDevice::createServer();
-    s_server->setCallbacks(&s_server_cbs);
+    /*
+     * `false` = NimBLE does not own these callbacks, so do not delete them.
+     *
+     * s_server_cbs is a static, not a heap allocation. The default is `true`, and
+     * ~NimBLEServer() honours it, so deinit(true) ran `delete` on a pointer into .bss and the
+     * heap assert fired: "free() target pointer is outside heap areas", then a panic loop.
+     * That is the whole of why deinit(true) "crashed" before and why radio_on() was left
+     * re-initing the host without rebuilding the GATT server (#71).
+     *
+     * Only the server does this. ~NimBLECharacteristic() deletes its descriptors but never its
+     * callbacks, and ~NimBLEService() deletes its characteristics, so the five static
+     * characteristic callback objects are not at risk.
+     */
+    s_server->setCallbacks(&s_server_cbs, false);
 
     NimBLEService *svc = s_server->createService(
         "A8E30000-4F5B-11EF-A017-325096B39F47");
