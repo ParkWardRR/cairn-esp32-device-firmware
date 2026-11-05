@@ -169,21 +169,37 @@ static OffloadCallbacks s_cbs;
 
 void ble_offload_set_trip_source(bool (*trip_active)(void)) { s_trip_active = trip_active; }
 
+void ble_offload_forget_characteristics(void)
+{
+    /* These two are about to be freed by NimBLEDevice::deinit(true). Every use of them is
+     * guarded on non-null, so nulling them here is what makes the teardown safe. */
+    s_chr_control = nullptr;
+    s_chr_data    = nullptr;
+}
+
 bool ble_offload_register(NimBLEService *svc)
 {
-    s_have_pinned = unhex32(CAIRN_SERVER_RECEIPT_KEY_HEX, s_pinned);
-    if (!s_have_pinned) {
-        CAIRN_LOGW(TAG, "the pinned receipt key is not valid hex; no bundle will be pruned");
-    }
+    /* Called again after every Wi-Fi slot, because the GATT server is now rebuilt from scratch
+     * each time. The queue and the task must be created once and only once — a 12 KB task per
+     * slot would exhaust the heap within minutes — but the characteristics belong to the new
+     * service object and have to be recreated every time. */
+    static bool once = false;
 
-    cairn_offload_io_t io = { nullptr, io_indicate, io_notify, io_now, io_trip,
-                              s_have_pinned ? s_pinned : nullptr };
-    cairn_offload_init(&s_offload, &io);
+    if (!once) {
+        s_have_pinned = unhex32(CAIRN_SERVER_RECEIPT_KEY_HEX, s_pinned);
+        if (!s_have_pinned) {
+            CAIRN_LOGW(TAG, "the pinned receipt key is not valid hex; no bundle will be pruned");
+        }
 
-    s_queue = xQueueCreate(16, sizeof(Event));
-    if (s_queue == nullptr) {
-        CAIRN_LOGE(TAG, "cannot create the offload queue");
-        return false;
+        cairn_offload_io_t io = { nullptr, io_indicate, io_notify, io_now, io_trip,
+                                  s_have_pinned ? s_pinned : nullptr };
+        cairn_offload_init(&s_offload, &io);
+
+        s_queue = xQueueCreate(16, sizeof(Event));
+        if (s_queue == nullptr) {
+            CAIRN_LOGE(TAG, "cannot create the offload queue");
+            return false;
+        }
     }
 
     s_chr_control = svc->createCharacteristic(
@@ -198,6 +214,8 @@ bool ble_offload_register(NimBLEService *svc)
         NIMBLE_PROPERTY::READ_ENC);
     s_chr_data->setCallbacks(&s_cbs);
 
+    if (once) return true;   /* the task is already running; only the GATT half was rebuilt */
+
     /* 12 KB: receipt verification (Ed25519) and manifest decoding are not small. */
     BaseType_t ok = xTaskCreatePinnedToCore(offload_task, "cairn-offload", 12288, nullptr, 1,
                                             nullptr, 1);
@@ -205,6 +223,7 @@ bool ble_offload_register(NimBLEService *svc)
         CAIRN_LOGE(TAG, "cannot start the offload task");
         return false;
     }
+    once = true;
     CAIRN_LOGI(TAG, "bundle offload ready (%s)",
                s_have_pinned ? "receipt key pinned" : "NO receipt key pinned: nothing will be pruned");
     return true;

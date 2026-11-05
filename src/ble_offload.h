@@ -17,9 +17,15 @@ class NimBLEService;
 extern "C++" {
 
 /* Create the two characteristics on the companion service and start the offload
- * task. Call once, before the server starts. Returns false if the task could not
- * be created, in which case the capability bit must not be advertised. */
+ * task. Call before the server starts, and again after every rebuild of the GATT
+ * server: the characteristics belong to the new service object, while the queue
+ * and the task are created only on the first call. Returns false if the task
+ * could not be created, in which case the capability bit must not be advertised. */
 bool ble_offload_register(NimBLEService *svc);
+
+/* Drop the characteristic pointers before NimBLEDevice::deinit(true) frees them.
+ * Every use of them is null-guarded, so this is what makes the teardown safe. */
+void ble_offload_forget_characteristics(void);
 
 /* Whether a drive is in progress (offload is refused while it is). Until a source
  * is set the answer is "yes", so a transfer is never served on a guess. */

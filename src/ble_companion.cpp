@@ -471,13 +471,23 @@ static bool build_gatt_and_advertise(void)
 
     chr_version->setValue(ver, sizeof(ver));
 
-    s_server->start();
+    if (!s_server->start()) {
+        CAIRN_LOGE(TAG, "the GATT server would not start: no service to offer");
+        return false;
+    }
 
     NimBLEAdvertising *adv = NimBLEDevice::getAdvertising();
     adv->addServiceUUID("A8E30000-4F5B-11EF-A017-325096B39F47");
     adv->setName(CAIRN_BLE_NAME);
     adv->enableScanResponse(true);
-    adv->start();
+
+    /* Checked, because the phone scans *filtered by the service UUID* — it has to, to scan in
+     * the background — so an advertisement that fails to carry the UUID is not a degraded link,
+     * it is an undiscoverable dongle. #71 was exactly this going unnoticed. */
+    if (!adv->start()) {
+        CAIRN_LOGE(TAG, "advertising would not start: no phone can discover this dongle");
+        return false;
+    }
 
     CAIRN_LOGI(TAG, "BLE companion started, advertising as '%s'",
                CAIRN_BLE_NAME);
@@ -536,26 +546,41 @@ bool ble_companion_begin(void)
 /*
  * Give Wi-Fi the quiet it needs for a slot.
  *
- * deinit(false) shuts the NimBLE host and controller down completely — freeing
- * the radio for an uncontested WPA2 handshake — but keeps every GATT object
- * (server, services, characteristics, callbacks) allocated so radio_on() can
- * bring the stack back without rebuilding.
+ * deinit(true), and the whole GATT server with it. That looks heavier than it needs to be, and
+ * the lighter version was wrong in a way that cost a day of bench time (#71):
  *
- * deinit(true) was tried first and crashed: after the objects were freed the
- * next BLE scan hit InstrFetchProhibited at PC 0. deinit(false) avoids that
- * entirely because the pointers stay valid.
+ * deinit(false) keeps every GATT object allocated, so radio_on() only had to re-init the host
+ * and start advertising again. But nimble_port_deinit() clears the *host's* attribute table,
+ * and the retained NimBLEServer still has `m_gattsStarted == true` — deinit(false) does not
+ * reset it. NimBLEServer::start() returns early on that flag, so there was no way to get the
+ * services registered with the new host at all. The dongle came back advertising an empty
+ * payload with no service UUID and no GATT database behind it: a central scanning for the
+ * service could never match it, and one connecting by a remembered address found nothing. It
+ * stayed that way until the next reboot, and a slot opens within ten seconds of every boot.
+ *
+ * So the objects have to go and be rebuilt. deinit(true) was tried before this and crashed —
+ * "the next BLE scan hit InstrFetchProhibited at PC 0" — because the five static pointers to
+ * freed GATT objects were still live. They are all nulled below, and every use of each of them
+ * is already guarded on non-null, which is what makes this safe now and did not before.
  */
 void ble_companion_radio_off(void)
 {
     if (s_radio_off) return;
     s_radio_off = true;
 
-    if (s_connected && s_conn_handle != 0xFFFF) {
+    if (s_connected && s_conn_handle != 0xFFFF && s_server != nullptr) {
         s_server->disconnect(s_conn_handle);
         delay(80);
     }
 
-    NimBLEDevice::deinit(false);
+    NimBLEDevice::deinit(true);
+
+    /* Nothing below here may be dereferenced until build_gatt_and_advertise() runs again. */
+    s_server      = nullptr;
+    s_chr_quality = nullptr;
+    s_chr_status  = nullptr;
+    ble_offload_forget_characteristics();
+
     CAIRN_LOGI(TAG, "BLE stack deinited for a Wi-Fi slot");
 }
 
@@ -564,14 +589,17 @@ void ble_companion_radio_on(void)
     if (!s_radio_off) return;
     s_radio_off = false;
 
-    NimBLEDevice::init(CAIRN_BLE_NAME);
-    NimBLEDevice::setMTU(185);
-    NimBLEDevice::setSecurityAuth(BLE_SM_PAIR_AUTHREQ_BOND | BLE_SM_PAIR_AUTHREQ_SC);
-    NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
-    NimBLEDevice::setSecurityPasskey(CAIRN_BLE_PASSKEY);
-
-    NimBLEDevice::getAdvertising()->start();
-    CAIRN_LOGI(TAG, "BLE stack reinited, advertising resumed");
+    /* The same path the boot takes. Its own comment has always said it is "separate from
+     * ble_companion_begin so a Wi-Fi slot can tear the whole BLE stack down and this can put it
+     * back"; until #71 it was never actually called here. */
+    if (build_gatt_and_advertise()) {
+        CAIRN_LOGI(TAG, "BLE stack rebuilt, advertising as '%s'", CAIRN_BLE_NAME);
+    } else {
+        /* Logged loudly rather than swallowed: the old code announced "advertising resumed"
+         * unconditionally, which is the line anyone debugging this would have trusted. */
+        CAIRN_LOGE(TAG, "BLE stack could not be rebuilt after a Wi-Fi slot; the dongle is "
+                        "not advertising and only a reboot will fix it");
+    }
 }
 
 #endif /* CAIRN_BLE_COMPANION */
