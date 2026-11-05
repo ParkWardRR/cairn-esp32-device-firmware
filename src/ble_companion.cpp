@@ -12,11 +12,13 @@
 #include "cairn_engine.h"
 #include "cairn_format.h"
 #include "cairn_log.h"
+#include "cairn_phonehint.h"
 #include "config.h"
 #include "ble_offload.h"
 #include "cairn_devinfo.h"
 #include "device_info.h"
 #include "facts.h"
+#include "gnss_hint.h"
 #include "sensor_task.h"
 
 #ifndef CAIRN_BLE_PASSKEY
@@ -40,7 +42,6 @@ static uint16_t s_queue_drop_count  = 0;
 static uint16_t s_last_seq          = 0;
 static bool     s_have_seq          = false;
 
-#define CAIRN_COMPANION_FLAG_CHARGING 0x01
 static volatile uint8_t s_companion_flags = 0;
 
 static inline int32_t rd_i32(const uint8_t *p) {
@@ -64,6 +65,32 @@ class GnssFixCallbacks : public NimBLECharacteristicCallbacks {
         uint16_t sample_age_ms = rd_u16(d + 22);
         uint8_t  validity      = d[21];
         uint16_t seq           = rd_u16(d + 24);
+        uint8_t  flags         = d[26];
+
+        /* Byte 26 is the phone's own state, which this device cannot see: whether it is on
+         * power, and whether this frame is a hint (contracts ble/v1, companion_flags).
+         * Taken from every frame, including one that goes no further. */
+        s_companion_flags = flags;
+
+        /*
+         * A HINT frame is a cached position, sent once at link-ready so a cold receiver
+         * has somewhere to start. It is the single deliberate exception to the staleness
+         * rule and it is bounded tightly: it goes to the hint path, it is never recorded
+         * as a position sample, and it never becomes last_gnss, clears DEGRADED_GNSS or
+         * touches trip scoring. Everything else in this protocol exists to stop an old fix
+         * being read as a current one, and nothing here weakens that.
+         */
+        if (!cairn_phonehint_is_recordable(flags)) {
+            /* Taken, not acted on: the decision needs the controller task (gnss_hint.h).
+             * "Accepted" here means the frame was well formed and is on its way to the
+             * receiver, which is what the phone's counter is for -- whether the receiver
+             * could use it is in the TTFF line, where the comparison that matters lives. */
+            bool taken = gnss_hint_note_phone_fix(rd_i32(d + 0), rd_i32(d + 4), rd_i32(d + 8),
+                                                  rd_u16(d + 16), validity, flags);
+            if (taken) s_accepted_count++;
+            else       s_rejected_count++;
+            return;
+        }
 
         if (sample_age_ms > CAIRN_PHONE_GNSS_STALE_MS) {
             s_rejected_count++;
@@ -98,8 +125,6 @@ class GnssFixCallbacks : public NimBLECharacteristicCallbacks {
         g->source_flags = CAIRN_SOURCE_PHONE;
         g->utc_offset_ms = 0;
         g->utc_acc_ms    = CAIRN_U16_UNKNOWN;
-
-        s_companion_flags = d[26];
 
         if (sensor_task_post_fact(&f)) {
             s_last_seq          = seq;

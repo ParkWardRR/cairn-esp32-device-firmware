@@ -13,6 +13,7 @@
 #include "cairn_fs.h"
 #include "cairn_kv.h"
 #include "cairn_log.h"
+#include "cairn_phonehint.h"
 #include "cairn_platform.h"
 #include "cairn_wifiloc.h"
 #include "config.h"
@@ -103,6 +104,16 @@ typedef struct {
     uint32_t time_at_ms;
     uint32_t time_acc_ms;
     uint8_t  time_source;
+
+    /* The phone's hint, and the accuracy of the best position hint sent this start, in
+     * centimetres (0 when none has gone). Every position hint is compared against it, so
+     * the receiver ends a start holding the best one rather than the last one to arrive. */
+    bool     phone_sent;
+    const char *phone_why;
+    uint32_t phone_at_ms;
+    uint32_t phone_acc_m;
+    uint32_t phone_hacc_m;
+    uint32_t best_acc_cm;
 } hint_t;
 
 static hint_t *S;
@@ -258,6 +269,11 @@ static bool refresh(void)
         S->wifi_why         = "no-scan";
         S->time_sent        = false;
         S->time_why         = "none";
+        S->phone_sent       = false;
+        S->phone_why        = "none";
+        /* The last saved fix goes out at +/- 10 km before anything else can (sensors.cpp),
+         * so a start that had one begins with that as the bar to beat. */
+        S->best_acc_cm      = lastfix ? 1000000u : 0u;
     }
     return S->gen != 0;
 }
@@ -290,8 +306,12 @@ static void try_time(uint32_t standby_total_ms)
                source_name(S->aid_source), (unsigned)acc, (unsigned)(now - S->started_ms), (unsigned)S->gen);
 }
 
+/* Defined below, beside the mailbox it drains. */
+static void try_phone(void);
+
 void gnss_hint_tick(uint32_t standby_total_ms)
 {
+    try_phone();
     try_time(standby_total_ms);
 }
 
@@ -355,11 +375,16 @@ void gnss_hint_on_scan(const cairn_wifi_scan_t *scan, bool learning)
     uint32_t acc_cm = 0;
     cairn_wifiloc_hint(&e, have_last, lat, lon, alt_saved, &alt, &acc_cm);
 
+    /* Ordered by stated accuracy, not by arrival: a phone that connected first may already
+     * have placed the car better than these anchors can. */
+    if (S->best_acc_cm != 0u && acc_cm >= S->best_acc_cm) { S->wifi_why = "not-better"; return; }
+
     uint8_t frame[28];
     if (cairn_agnss_pos_llh_frame(e.lat_e7, e.lon_e7, alt, acc_cm, frame) != sizeof(frame)) return;
     if (!sensors_gnss_send_ubx(frame, sizeof(frame))) { S->wifi_why = "no-receiver"; return; }
 
     S->wifi_sent   = true;
+    S->best_acc_cm = acc_cm;
     S->wifi_at_ms  = millis();
     S->wifi_acc_m  = acc_cm / 100u;
     S->wifi_hacc_m = e.acc_m;
@@ -379,6 +404,107 @@ void gnss_hint_on_scan(const cairn_wifi_scan_t *scan, bool learning)
                     "%u heard), %s, %u ms after receiver start %u (MGA-INI-POS_LLH; unacknowledged)",
                (unsigned)S->wifi_acc_m, (unsigned)e.acc_m, (unsigned)e.used, (unsigned)e.known,
                (unsigned)e.heard, from, (unsigned)(S->wifi_at_ms - S->started_ms), (unsigned)S->gen);
+}
+
+/* ── the phone's fix ───────────────────────────────────────────────────────── */
+
+/*
+ * The one entry point that is not on the controller task: the BLE server's write
+ * callback runs on NimBLE's. Everything in `hint_t` is controller-task-only by design
+ * and takes no lock, and `sensors_gnss_send_ubx` wants the link lock, so a write cannot
+ * be acted on where it lands. It goes into this one-slot mailbox instead and the next
+ * controller pass drains it.
+ *
+ * One slot, newest wins: the phone sends exactly one hint per link, and if it ever sent
+ * two the later one is the better one.
+ */
+static portMUX_TYPE s_mail_lock = portMUX_INITIALIZER_UNLOCKED;
+static volatile bool s_mail_full;
+static struct {
+    int32_t  lat_e7, lon_e7, alt_cm;
+    uint16_t h_acc_cm;
+    uint8_t  validity_flags;
+    uint8_t  companion_flags;
+} s_mail;
+
+bool gnss_hint_note_phone_fix(int32_t lat_e7, int32_t lon_e7, int32_t alt_cm,
+                              uint16_t h_acc_cm, uint8_t validity_flags,
+                              uint8_t companion_flags)
+{
+    /* Cheap checks here, where they cost the BLE task nothing and where saying no at
+     * once is more useful to the phone than saying nothing. The decision that depends on
+     * what the receiver has already been told is made on the controller task. */
+    if (!cairn_phonehint_is_hint(companion_flags)) return false;
+    if ((validity_flags & CAIRN_GNSS_VALID_POSITION) == 0u) return false;
+
+    portENTER_CRITICAL(&s_mail_lock);
+    s_mail.lat_e7          = lat_e7;
+    s_mail.lon_e7          = lon_e7;
+    s_mail.alt_cm          = alt_cm;
+    s_mail.h_acc_cm        = h_acc_cm;
+    s_mail.validity_flags  = validity_flags;
+    s_mail.companion_flags = companion_flags;
+    s_mail_full            = true;
+    portEXIT_CRITICAL(&s_mail_lock);
+    return true;
+}
+
+/* Drain the mailbox. Controller task, like everything else that touches S. */
+static void try_phone(void)
+{
+    if (!s_mail_full) return;
+
+    portENTER_CRITICAL(&s_mail_lock);
+    int32_t  lat = s_mail.lat_e7, lon = s_mail.lon_e7, alt = s_mail.alt_cm;
+    uint16_t hacc = s_mail.h_acc_cm;
+    uint8_t  validity = s_mail.validity_flags, flags = s_mail.companion_flags;
+    s_mail_full = false;
+    portEXIT_CRITICAL(&s_mail_lock);
+
+    if (!refresh()) return;
+    if (!CAIRN_GNSS_HINTS) { S->phone_why = "off"; return; }
+
+    cairn_phonehint_state_t st;
+    st.receiver_fixed      = S->fixed;
+    st.best_acc_cm         = S->best_acc_cm;
+    st.receiver_assistable = sensors_gnss_assistable();
+
+    cairn_phonehint_frame_t fr;
+    fr.companion_flags = flags;
+    fr.validity_flags  = validity;
+    fr.h_acc_cm        = hacc;
+
+    uint32_t acc_cm = 0;
+    cairn_phonehint_verdict_t v = cairn_phonehint_decide(&st, &fr, &acc_cm);
+    if (v != CAIRN_PHONEHINT_SEND) {
+        S->phone_why = cairn_phonehint_verdict_name(v);
+        return;
+    }
+
+    uint8_t frame[28];
+    if (cairn_agnss_pos_llh_frame(lat, lon, alt, acc_cm, frame) != sizeof(frame)) {
+        S->phone_why = "encode-failed";
+        return;
+    }
+    if (!sensors_gnss_send_ubx(frame, sizeof(frame))) {
+        S->phone_why = "no-receiver";
+        return;
+    }
+
+    S->phone_sent   = true;
+    S->phone_at_ms  = millis();
+    S->phone_acc_m  = acc_cm / 100u;
+    S->phone_hacc_m = (hacc == CAIRN_PHONEHINT_ACC_UNKNOWN) ? 0u : (uint32_t)hacc / 100u;
+    S->best_acc_cm  = acc_cm;
+
+    /* No position in the log: the card log is not sealed. What is worth recording is how
+     * good the phone said its fix was, what the receiver was told instead, and when --
+     * because the hint cannot be acknowledged and the next TTFF line is the only answer. */
+    CAIRN_LOGI(TAG, "phone hint sent: +/- %u m (the phone said %u m; floored at %u m), "
+                    "%u ms after receiver start %u (MGA-INI-POS_LLH; unacknowledged)",
+               (unsigned)S->phone_acc_m, (unsigned)S->phone_hacc_m,
+               (unsigned)(CAIRN_PHONEHINT_FLOOR_CM / 100u),
+               (unsigned)(S->phone_at_ms - S->started_ms), (unsigned)S->gen);
 }
 
 /* ── the first fix ─────────────────────────────────────────────────────────── */
@@ -414,9 +540,10 @@ void gnss_hint_on_fix(uint32_t mono_ms, uint8_t sats)
      * TTFF line"):
      *   TTFF start=<n> ttff=<s since this start> boot=<s since boot> sats=<n>
      *        lastfix=<sent|none> wifi=<sent@s|reason> [acc= used= from_lastfix=]
+     *        phone=<sent@s|reason> [pacc= phacc=]
      *        time=<source@s|reason> [tacc=]
      */
-    char line[320];
+    char line[384];
     size_t w = 0;
     char a[16], b[16];
     secs(a, mono_ms - S->started_ms);
@@ -430,6 +557,13 @@ void gnss_hint_on_fix(uint32_t mono_ms, uint8_t sats)
         if (S->wifi_from_lastfix_m >= 0) ap(&w, line, sizeof(line), " from_lastfix=%dm", (int)S->wifi_from_lastfix_m);
     } else {
         ap(&w, line, sizeof(line), " wifi=%s scans=%u", S->wifi_why ? S->wifi_why : "no-scan", (unsigned)S->scans);
+    }
+    if (S->phone_sent) {
+        secs(a, S->phone_at_ms - S->started_ms);
+        ap(&w, line, sizeof(line), " phone=sent@%s pacc=%um phacc=%um", a,
+           (unsigned)S->phone_acc_m, (unsigned)S->phone_hacc_m);
+    } else {
+        ap(&w, line, sizeof(line), " phone=%s", S->phone_why ? S->phone_why : "none");
     }
     if (S->time_sent) {
         secs(a, S->time_at_ms - S->started_ms);

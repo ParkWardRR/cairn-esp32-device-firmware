@@ -14,6 +14,7 @@
 #include <string.h>
 
 #include "cairn_format.h"
+#include "cairn_phonehint.h"
 #include "minijson.h"
 
 static int g_pass, g_fail;
@@ -88,11 +89,26 @@ static void test_vector(const mj_doc_t *doc, const mj_node_t *vec)
     uint8_t  validity     = buf[21];
     uint16_t sample_age   = rd_u16(buf + 22);
     uint16_t wire_seq     = rd_u16(buf + 24);
+    uint8_t  flags        = buf[26];
+    uint8_t  reserved     = buf[27];
+
+    /* Byte 26 is companion_flags since the contracts change that added the HINT bit; byte
+     * 27 is what is left of the old two-byte reserved field. A vector written before that
+     * has no companion_flags in its input and zero on the wire, so both pins replay. */
+    int want_flags = (int)mj_num_or(mj_get(doc, input, "companion_flags"), 0);
+    ASSERT(flags == (uint8_t)want_flags,
+           "%s: companion_flags %u, want %u", name, flags, (unsigned)want_flags);
+    ASSERT(reserved == 0, "%s: byte 27 is %u, want 0", name, reserved);
+
+    const bool is_hint = cairn_phonehint_is_hint(flags);
 
     ASSERT(wire_seq == (uint16_t)seq,
            "%s: seq %u, want %u", name, wire_seq, (uint16_t)seq);
 
-    uint16_t expected_age = (uint16_t)(age * 1000.0);
+    /* sample_age_ms saturates: a hint is minutes old by construction and u16 tops out at
+     * 65.535 s, which on a hint frame means "that old or older" and nothing more. */
+    double   age_ms_f     = age * 1000.0;
+    uint16_t expected_age = age_ms_f >= 65535.0 ? 65535u : (uint16_t)age_ms_f;
     ASSERT(sample_age == expected_age,
            "%s: sample_age_ms %u, want %u", name, sample_age, expected_age);
 
@@ -177,14 +193,35 @@ static void test_vector(const mj_doc_t *doc, const mj_node_t *vec)
            "%s: validation mismatch: reject=%d, want=%d",
            name, would_reject, should_reject);
 
-    /* Staleness: all vectors have age ≤ 2.0, firmware threshold is 3.0 s */
-    if (!should_reject) {
+    /*
+     * Staleness. Every ordinary vector is inside the 3 s the firmware accepts. A HINT
+     * frame is deliberately not, and that is the whole of the exception: it is used for
+     * hinting and never stored, so the staleness rule does not apply to it.
+     */
+    if (!should_reject && !is_hint) {
         ASSERT(sample_age <= 3000,
                "%s: age %u ms > 3000, would be rejected", name, sample_age);
     }
+    if (is_hint) {
+        ASSERT(sample_age > 3000,
+               "%s: a hint vector with a fresh age tests nothing", name);
+        ASSERT(!cairn_phonehint_is_recordable(flags),
+               "%s: a hint must never be stored as a position sample", name);
+        ASSERT((validity & 0x01) != 0, "%s: a hint with no position is nothing", name);
+        cairn_phonehint_state_t st;
+        st.receiver_fixed = false; st.best_acc_cm = 0; st.receiver_assistable = true;
+        cairn_phonehint_frame_t fr;
+        fr.companion_flags = flags; fr.validity_flags = validity; fr.h_acc_cm = h_acc_cm;
+        uint32_t hint_acc = 0;
+        ASSERT(cairn_phonehint_decide(&st, &fr, &hint_acc) == CAIRN_PHONEHINT_SEND,
+               "%s: the hint rules would not send it", name);
+        ASSERT(hint_acc >= CAIRN_PHONEHINT_FLOOR_CM,
+               "%s: hint accuracy %u cm is under the 300 m floor", name, (unsigned)hint_acc);
+    }
 
-    /* Stored sample mapping: source_flags, sats sentinels */
-    if (!should_reject) {
+    /* Stored sample mapping: source_flags, sats sentinels. A hint is never stored, so
+     * there is no mapping to check for one. */
+    if (!should_reject && !is_hint) {
         cairn_gnss_sample_t s;
         memset(&s, 0, sizeof(s));
         s.lat_e7       = lat_e7;
