@@ -150,7 +150,7 @@ static void test_applies(void)
     CHECK("its fields are in force", c.settings.lte_enabled == 1 && c.settings.lte_monthly_cap_kb == 500000 &&
                                       c.settings.lte_daily_cap_kb == 50000 && c.settings.billing_day == 15 &&
                                       c.settings.alert_pct == 90);
-    CHECK("fields it did not mention are unchanged", c.settings.lte_mode == 0 && c.settings.wifi_slots_per_session == 2);
+    CHECK("fields it did not mention are unchanged", c.settings.lte_mode == 0 && c.settings.lte_trip_cap_kb == 0);
     CHECK("the counter advanced", c.counter == 1);
 
     cairn_config_t after;
@@ -213,15 +213,27 @@ static void test_fields(void)
     const kv_t near[] = { {13, 1} };
     CHECK("a key just past the allow-list is refused", send_uints(&c, 1, near, 1) == CAIRN_CFG_UNKNOWN_FIELD);
 
+    /* The retired Wi-Fi keys. The transport is deleted; a Wi-Fi-era sender must be
+     * refused whole, not half-applied, and the key numbers must stay retired. */
+    struct { const char *name; uint64_t key; } retired[] = {
+        { "wifi slot length (key 10)",  10 },
+        { "wifi slots (key 11)",        11 },
+        { "home scan (key 12)",         12 },
+        { "wifi networks (key 34)",     34 },
+    };
+    for (unsigned i = 0; i < sizeof retired / sizeof retired[0]; i++) {
+        char name[96];
+        snprintf(name, sizeof name, "the retired %s is refused as unknown", retired[i].name);
+        const kv_t f[] = { {retired[i].key, 1} };
+        CHECK(name, send_uints(&c, 1, f, 1) == CAIRN_CFG_UNKNOWN_FIELD &&
+                    same_settings(&c.settings, &before) && c.counter == 0);
+    }
+
     struct { const char *name; kv_t f; } bad[] = {
         { "billing day 0",           {CAIRN_CFG_KEY_BILLING_DAY, 0} },
         { "billing day 29",          {CAIRN_CFG_KEY_BILLING_DAY, 29} },
         { "alert 0 percent",         {CAIRN_CFG_KEY_ALERT_PCT, 0} },
         { "alert 101 percent",       {CAIRN_CFG_KEY_ALERT_PCT, 101} },
-        { "slot length 4 s",         {CAIRN_CFG_KEY_SLOT_MAX_S, 4} },
-        { "slot length 301 s",       {CAIRN_CFG_KEY_SLOT_MAX_S, 301} },
-        { "zero slots",              {CAIRN_CFG_KEY_SLOTS, 0} },
-        { "five slots",              {CAIRN_CFG_KEY_SLOTS, 5} },
         { "an LTE mode of 2",        {CAIRN_CFG_KEY_LTE_MODE, 2} },
         { "a boolean of 2",          {CAIRN_CFG_KEY_ROAMING, 2} },
         { "an absurd monthly cap",   {CAIRN_CFG_KEY_MONTHLY_KB, (uint64_t)CAIRN_CFG_CAP_KB_MAX + 1} },
@@ -355,16 +367,13 @@ static void test_credentials(void)
     fresh(&c);
     uint8_t msg[CAIRN_CFG_MAX_MSG], pl[400];
 
-    /* settings + a wifi network list */
+    /* settings + a credential (an APN with a canary value) */
     cairn_cbor_enc_t e;
     cairn_cbor_init(&e, pl, sizeof pl);
     cairn_cbor_map(&e, 2);
     cairn_cbor_key(&e, CAIRN_CFG_KEY_LTE_ENABLED); cairn_cbor_uint(&e, 1);
-    cairn_cbor_key(&e, CAIRN_CFG_KEY_WIFI_NETWORKS);
-    cairn_cbor_array(&e, 1);
-    cairn_cbor_array(&e, 2);
-    cairn_cbor_text(&e, "HomeNetwork-SSID");
-    cairn_cbor_text(&e, "correct horse battery");
+    cairn_cbor_key(&e, CAIRN_CFG_KEY_APN);
+    cairn_cbor_text(&e, "canary-apn.secret");
     size_t pn = e.len;
     size_t mn = build(msg, sizeof msg, 1, pl, pn, g_srv_seed, g_srv_pub);
     cairn_config_ops_t o = ops();
@@ -400,10 +409,10 @@ static void test_credentials(void)
     CHECK("with both, the message applies",
           cairn_config_receive(&c, &o, msg, mn, 60000, g_scratch, sizeof g_scratch) == CAIRN_CFG_OK &&
           c.settings.lte_enabled == 1);
-    CHECK("the network list went to the credential store, once",
-          g_stored_n == 1 && g_stored_kind[0] == CAIRN_CRED_WIFI_NETWORKS);
+    CHECK("the credential went to the credential store, once",
+          g_stored_n == 1 && g_stored_kind[0] == CAIRN_CRED_APN);
 
-    /* The configuration's own slots must hold no secret and no network name. */
+    /* The configuration's own slots must hold no secret. */
     uint8_t raw[512];
     bool leaked = false;
     const char *keys[] = { "cfg_a", "cfg_b" };
@@ -411,11 +420,11 @@ static void test_credentials(void)
         size_t n = 0;
         if (cairn_kv_get_blob_var(keys[k], raw, sizeof raw, &n) && n <= sizeof raw) {
             for (size_t i = 0; i + 8 < n; i++) {
-                if (memcmp(raw + i, "HomeNetw", 8) == 0 || memcmp(raw + i, "correct ", 8) == 0) leaked = true;
+                if (memcmp(raw + i, "canary-a", 8) == 0) leaked = true;
             }
         }
     }
-    CHECK("the persisted slots contain neither the SSID nor the passphrase", !leaked);
+    CHECK("the persisted slots do not contain the credential", !leaked);
 
     /* APN and SIM PIN go the same way and are bounded. */
     cairn_cbor_init(&e, pl, sizeof pl);
@@ -435,21 +444,17 @@ static void test_credentials(void)
     CHECK("a SIM PIN longer than 8 is refused",
           cairn_config_receive(&c, &o, msg, mn, 100000, g_scratch, sizeof g_scratch) == CAIRN_CFG_OUT_OF_RANGE);
 
+    /* The retired Wi-Fi network list (key 34) is unknown even with the credential
+     * store wide open: the transport is deleted, so no message may plant one. */
     cairn_cbor_init(&e, pl, sizeof pl);
     cairn_cbor_map(&e, 1);
-    cairn_cbor_key(&e, CAIRN_CFG_KEY_WIFI_NETWORKS);
-    cairn_cbor_array(&e, 1); cairn_cbor_array(&e, 2); cairn_cbor_text(&e, ""); cairn_cbor_text(&e, "longenoughpass");
+    cairn_cbor_key(&e, 34);
+    cairn_cbor_array(&e, 1); cairn_cbor_array(&e, 2); cairn_cbor_text(&e, "net"); cairn_cbor_text(&e, "longenoughpass");
     mn = build(msg, sizeof msg, 3, pl, e.len, g_srv_seed, g_srv_pub);
-    CHECK("a zero-length SSID is refused",
-          cairn_config_receive(&c, &o, msg, mn, 120000, g_scratch, sizeof g_scratch) == CAIRN_CFG_OUT_OF_RANGE);
-
-    cairn_cbor_init(&e, pl, sizeof pl);
-    cairn_cbor_map(&e, 1);
-    cairn_cbor_key(&e, CAIRN_CFG_KEY_WIFI_NETWORKS);
-    cairn_cbor_array(&e, 1); cairn_cbor_array(&e, 2); cairn_cbor_text(&e, "net"); cairn_cbor_text(&e, "short");
-    mn = build(msg, sizeof msg, 3, pl, e.len, g_srv_seed, g_srv_pub);
-    CHECK("a passphrase between 1 and 7 characters is refused",
-          cairn_config_receive(&c, &o, msg, mn, 140000, g_scratch, sizeof g_scratch) == CAIRN_CFG_OUT_OF_RANGE);
+    g_stored_n = 0;
+    CHECK("a wifi network list is refused as unknown, store or no store",
+          cairn_config_receive(&c, &o, msg, mn, 120000, g_scratch, sizeof g_scratch) == CAIRN_CFG_UNKNOWN_FIELD &&
+          g_stored_n == 0);
 }
 
 static void test_power_cut_and_rollback(void)

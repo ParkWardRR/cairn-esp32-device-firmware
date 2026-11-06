@@ -34,21 +34,13 @@ extern "C" {
  * the firmware emits, which keeps the ring a flat array — no allocation in the
  * capture path, where a failed allocation would mean losing the data it was
  * meant to protect.
+ *
+ * (The ring used to carry a few wider slots beside it for the variable-length
+ * WIFI_SCAN record, format v3 section 4.13. The Wi-Fi stack is deleted and no
+ * producer of that record remains, so the special case went with it; every
+ * record the firmware buffers now fits the flat slot.)
  */
 #define CAIRN_PREROLL_MAX_PAYLOAD 32
-
-/*
- * The one variable-length record the firmware buffers is WIFI_SCAN (format v3 section
- * 4.13), up to 132 bytes. Widening every slot to fit it would quadruple the ring for a
- * record written every ten seconds at most, so it gets a few slots of its own beside
- * the ring instead, and the flush merges them back into capture order.
- *
- * It has to be buffered at all because the scans that matter most happen exactly here:
- * pulling out of a garage with a cold receiver is a pretrip, and before 2026-10-25 a
- * scan of more than three access points would have been refused by the 32-byte limit.
- */
-#define CAIRN_PREROLL_LARGE_MAX_PAYLOAD 132
-#define CAIRN_PREROLL_LARGE_SLOTS       2
 
 typedef struct {
     uint8_t  record_type;
@@ -60,27 +52,11 @@ typedef struct {
 } cairn_preroll_entry_t;
 
 typedef struct {
-    uint8_t  record_type;
-    uint8_t  schema_version;
-    uint16_t flags;
-    uint32_t monotonic_ms;
-    /* How many ring records had been pushed before this one: its place in capture
-     * order, which survives the ring wrapping underneath it. */
-    uint32_t after_pushes;
-    uint8_t  payload[CAIRN_PREROLL_LARGE_MAX_PAYLOAD];
-    uint8_t  payload_len;
-} cairn_preroll_large_t;
-
-typedef struct {
     cairn_preroll_entry_t entries[CAIRN_PREROLL_RING_SAMPLES];
     uint16_t head;      /* next slot to write */
     uint16_t count;     /* entries currently held, <= capacity */
     uint32_t overwritten; /* dropped because the ring wrapped */
     uint32_t pushes;    /* ring records ever pushed since the last reset */
-
-    cairn_preroll_large_t large[CAIRN_PREROLL_LARGE_SLOTS];
-    uint8_t  large_head;
-    uint8_t  large_count;
 } cairn_preroll_t;
 
 void cairn_preroll_reset(cairn_preroll_t *r);
@@ -88,9 +64,7 @@ void cairn_preroll_reset(cairn_preroll_t *r);
 /*
  * Hold a record. Oldest-first eviction once full: if the ring wraps, the most
  * recent window is the one worth keeping, since it is adjacent to the trip that
- * is about to be confirmed. A payload over CAIRN_PREROLL_MAX_PAYLOAD and up to
- * CAIRN_PREROLL_LARGE_MAX_PAYLOAD goes to the large slots, newest kept; anything
- * larger is refused.
+ * is about to be confirmed. A payload over CAIRN_PREROLL_MAX_PAYLOAD is refused.
  */
 bool cairn_preroll_push(cairn_preroll_t *r, uint8_t record_type,
                         uint8_t schema_version, uint16_t flags,

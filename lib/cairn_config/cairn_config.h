@@ -1,10 +1,12 @@
 /*
  * Configuration receiver: apply a sealed configuration message to the dongle.
  *
- * Wi-Fi networks, LTE limits and the upload schedule are set in the web UI and the iOS
- * app and reach the dongle later and indirectly: through the phone at a BLE check-in, or
- * in any authenticated uplink session (issue #22; upstream contracts/config/v1, #27).
- * This module is what the dongle does with such a message. Portable C, no I/O of its
+ * LTE limits and settings are set in the web UI and the iOS app and reach the
+ * dongle later and indirectly: through the phone at a BLE check-in, or in any
+ * authenticated uplink session (issue #22; upstream contracts/config/v1, #27).
+ * This module is what the dongle does with such a message. (It used to carry
+ * Wi-Fi networks and the Wi-Fi slot schedule too; Wi-Fi is deleted, and the
+ * retired keys below are refused as unknown fields.) Portable C, no I/O of its
  * own: the key-value store, the clock and the credential store are passed in, so the
  * whole thing runs on the host.
  *
@@ -64,15 +66,19 @@ typedef struct {
     uint32_t lte_monthly_cap_kb;
     uint32_t lte_daily_cap_kb;
     uint32_t lte_trip_cap_kb;
-    uint16_t wifi_slot_max_s;       /* the upload schedule knobs (issue #17) */
-    uint8_t  wifi_slots_per_session;
-    uint8_t  home_scan_enabled;     /* 0/1: the no-phone scan for a home network */
 } cairn_config_settings_t;
 
 /* The safe starting point: LTE off, digests only, roaming off, schedule defaults. */
 void cairn_config_settings_defaults(cairn_config_settings_t *s);
 
-/* Payload keys (deterministic CBOR map, ascending). Anything else is refused. */
+/*
+ * Payload keys (deterministic CBOR map, ascending). Anything else is refused.
+ *
+ * Retired keys, never to be reused: 10 (wifi slot_max_s), 11 (wifi slots per
+ * session), 12 (home scan) and 34 (wifi networks, credential class) belonged to
+ * the deleted Wi-Fi transport. A message that carries one is refused with
+ * CAIRN_CFG_UNKNOWN_FIELD, which is what a Wi-Fi-era sender should see.
+ */
 enum {
     CAIRN_CFG_KEY_LTE_ENABLED   = 1,
     CAIRN_CFG_KEY_LTE_MODE      = 2,
@@ -83,30 +89,22 @@ enum {
     CAIRN_CFG_KEY_ROAMING       = 7,
     CAIRN_CFG_KEY_PAUSED        = 8,
     CAIRN_CFG_KEY_ALERT_PCT     = 9,
-    CAIRN_CFG_KEY_SLOT_MAX_S    = 10,
-    CAIRN_CFG_KEY_SLOTS         = 11,
-    CAIRN_CFG_KEY_HOME_SCAN     = 12,
 
-    /* Credential class: secret, or revealing where the owner lives. */
+    /* Credential class: secret. */
     CAIRN_CFG_KEY_APN           = 32,   /* text */
-    CAIRN_CFG_KEY_SIM_PIN       = 33,   /* text */
-    CAIRN_CFG_KEY_WIFI_NETWORKS = 34    /* array of [ssid text, psk text] */
+    CAIRN_CFG_KEY_SIM_PIN       = 33    /* text */
 };
 
-#define CAIRN_CFG_MAX_NETWORKS   8
-#define CAIRN_CFG_SSID_MAX       32
-#define CAIRN_CFG_PSK_MAX        63
+/* The longest credential text accepted (the APN; a SIM PIN is bounded tighter). */
+#define CAIRN_CFG_TEXT_MAX       63
 
 /* The sanity limits a message must satisfy to apply at all. */
 #define CAIRN_CFG_CAP_KB_MAX         (64u * 1024u * 1024u)   /* 64 GiB: nobody means more */
-#define CAIRN_CFG_SLOT_MAX_S_MIN     5u
-#define CAIRN_CFG_SLOT_MAX_S_MAX     300u
-#define CAIRN_CFG_SLOTS_MAX          4u
 
+/* Kind 3 was CAIRN_CRED_WIFI_NETWORKS: retired with the Wi-Fi stack. */
 typedef enum {
     CAIRN_CRED_APN = 1,
-    CAIRN_CRED_SIM_PIN,
-    CAIRN_CRED_WIFI_NETWORKS
+    CAIRN_CRED_SIM_PIN = 2
 } cairn_cred_kind_t;
 
 /* ── results ──────────────────────────────────────────────────────────────── */

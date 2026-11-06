@@ -62,14 +62,14 @@ void cairn_config_settings_defaults(cairn_config_settings_t *s)
     s->lte_paused = 0;
     s->billing_day = 1;
     s->alert_pct = 80;
-    s->wifi_slot_max_s = 90;
-    s->wifi_slots_per_session = 2;
-    s->home_scan_enabled = 1;      /* the owner accepted the no-phone scan */
 }
 
 /* ── persistence: two slots, the newer valid one wins ─────────────────────── */
 
-#define SLOT_MAGIC 0x43464731u   /* "CFG1" */
+/* "CFG2": bumped when the Wi-Fi fields left cairn_config_settings_t, so a slot
+ * persisted by Wi-Fi-era firmware is refused (its layout differs) and the
+ * defaults apply, rather than misreading old bytes as the new struct. */
+#define SLOT_MAGIC 0x43464732u
 
 typedef struct {
     uint32_t magic;
@@ -234,7 +234,7 @@ typedef struct {
     size_t off, len;            /* the field's CBOR bytes inside the decrypted payload */
 } cred_span_t;
 
-#define MAX_CREDS 3
+#define MAX_CREDS 2
 
 typedef struct {
     cairn_config_settings_t next;
@@ -296,20 +296,10 @@ static cairn_cfg_result_t parse_payload(const uint8_t *p, size_t len, const cair
         case CAIRN_CFG_KEY_ALERT_PCT:
             if (!read_u(&d, 100, &v) || v < 1) return CAIRN_CFG_OUT_OF_RANGE;
             out->next.alert_pct = (uint8_t)v; break;
-        case CAIRN_CFG_KEY_SLOT_MAX_S:
-            if (!read_u(&d, CAIRN_CFG_SLOT_MAX_S_MAX, &v) || v < CAIRN_CFG_SLOT_MAX_S_MIN)
-                return CAIRN_CFG_OUT_OF_RANGE;
-            out->next.wifi_slot_max_s = (uint16_t)v; break;
-        case CAIRN_CFG_KEY_SLOTS:
-            if (!read_u(&d, CAIRN_CFG_SLOTS_MAX, &v) || v < 1) return CAIRN_CFG_OUT_OF_RANGE;
-            out->next.wifi_slots_per_session = (uint8_t)v; break;
-        case CAIRN_CFG_KEY_HOME_SCAN:
-            if (!read_u(&d, 1, &v)) return CAIRN_CFG_OUT_OF_RANGE;
-            out->next.home_scan_enabled = (uint8_t)v; break;
 
         case CAIRN_CFG_KEY_APN:
         case CAIRN_CFG_KEY_SIM_PIN: {
-            char text[CAIRN_CFG_PSK_MAX + 1];
+            char text[CAIRN_CFG_TEXT_MAX + 1];
             size_t start = d.pos;
             if (cairn_cbor_text_read(&d, text, sizeof text) != CAIRN_OK) return CAIRN_CFG_MALFORMED;
             size_t tl = strlen(text);
@@ -324,33 +314,9 @@ static cairn_cfg_result_t parse_payload(const uint8_t *p, size_t len, const cair
             break;
         }
 
-        case CAIRN_CFG_KEY_WIFI_NETWORKS: {
-            size_t start = d.pos, nn;
-            if (cairn_cbor_array_header(&d, &nn) != CAIRN_OK) return CAIRN_CFG_MALFORMED;
-            if (nn > CAIRN_CFG_MAX_NETWORKS) return CAIRN_CFG_OUT_OF_RANGE;
-            for (size_t k = 0; k < nn; k++) {
-                size_t pair;
-                char ssid[CAIRN_CFG_SSID_MAX + 1], psk[CAIRN_CFG_PSK_MAX + 1];
-                if (cairn_cbor_array_header(&d, &pair) != CAIRN_OK || pair != 2) return CAIRN_CFG_MALFORMED;
-                cairn_err_t e1 = cairn_cbor_text_read(&d, ssid, sizeof ssid);
-                cairn_err_t e2 = (e1 == CAIRN_OK) ? cairn_cbor_text_read(&d, psk, sizeof psk) : e1;
-                size_t sl = strlen(ssid), pl = strlen(psk);
-                scrub(psk, sizeof psk);
-                scrub(ssid, sizeof ssid);
-                if (e2 != CAIRN_OK) return CAIRN_CFG_OUT_OF_RANGE;
-                /* No zero-length SSID; a passphrase is empty (open) or 8..63. */
-                if (sl == 0) return CAIRN_CFG_OUT_OF_RANGE;
-                if (pl != 0 && pl < 8) return CAIRN_CFG_OUT_OF_RANGE;
-            }
-            if (out->ncreds >= MAX_CREDS) return CAIRN_CFG_MALFORMED;
-            out->creds[out->ncreds].kind = CAIRN_CRED_WIFI_NETWORKS;
-            out->creds[out->ncreds].off = start;
-            out->creds[out->ncreds].len = d.pos - start;
-            out->ncreds++;
-            break;
-        }
-
         default:
+            /* Includes the retired Wi-Fi keys (10, 11, 12, 34): a Wi-Fi-era
+             * sender is refused, not half-applied. */
             return CAIRN_CFG_UNKNOWN_FIELD;
         }
     }
@@ -499,7 +465,7 @@ static size_t encode_settings(const cairn_config_settings_t *s, uint8_t *buf, si
 {
     cairn_cbor_enc_t e;
     cairn_cbor_init(&e, buf, cap);
-    cairn_cbor_map(&e, 12);
+    cairn_cbor_map(&e, 9);
     cairn_cbor_key(&e, CAIRN_CFG_KEY_LTE_ENABLED); cairn_cbor_uint(&e, s->lte_enabled);
     cairn_cbor_key(&e, CAIRN_CFG_KEY_LTE_MODE);    cairn_cbor_uint(&e, s->lte_mode);
     cairn_cbor_key(&e, CAIRN_CFG_KEY_MONTHLY_KB);  cairn_cbor_uint(&e, s->lte_monthly_cap_kb);
@@ -509,9 +475,6 @@ static size_t encode_settings(const cairn_config_settings_t *s, uint8_t *buf, si
     cairn_cbor_key(&e, CAIRN_CFG_KEY_ROAMING);     cairn_cbor_uint(&e, s->lte_roaming);
     cairn_cbor_key(&e, CAIRN_CFG_KEY_PAUSED);      cairn_cbor_uint(&e, s->lte_paused);
     cairn_cbor_key(&e, CAIRN_CFG_KEY_ALERT_PCT);   cairn_cbor_uint(&e, s->alert_pct);
-    cairn_cbor_key(&e, CAIRN_CFG_KEY_SLOT_MAX_S);  cairn_cbor_uint(&e, s->wifi_slot_max_s);
-    cairn_cbor_key(&e, CAIRN_CFG_KEY_SLOTS);       cairn_cbor_uint(&e, s->wifi_slots_per_session);
-    cairn_cbor_key(&e, CAIRN_CFG_KEY_HOME_SCAN);   cairn_cbor_uint(&e, s->home_scan_enabled);
     return e.overflow ? 0 : e.len;
 }
 
