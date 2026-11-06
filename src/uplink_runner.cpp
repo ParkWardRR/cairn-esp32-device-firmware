@@ -466,10 +466,18 @@ void uplink_runner_tick(Lifecycle *lc)
     case CAIRN_UL_ACT_SCAN_HOME:
         take_radio_from_scanner("the uplink's home scan is starting");
         cairn_uplink_scan_started(&s_u, millis());
+#if CAIRN_WIFI_UPLINK
         {
             bool found = run_home_scan(a.max_ms ? a.max_ms : 5000);
             cairn_uplink_scan_done(&s_u, found, millis());
         }
+#else
+        /* No Wi-Fi in this build, so there is no network to look for and nothing may touch the
+         * radio. Reported as "not found" rather than left pending: the schedule has to advance,
+         * and with home unknown it stops asking for slots, which is the point. The same shape as
+         * the START_WIFI_SLOT arm above. */
+        cairn_uplink_scan_done(&s_u, false, millis());
+#endif
         break;
 
     case CAIRN_UL_ACT_LTE_SEND:
