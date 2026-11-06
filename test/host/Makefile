@@ -48,6 +48,7 @@ GNSS_DIR    := ../../lib/cairn_gnss
 TRIP_DIR    := ../../lib/cairn_trip
 GARAGE_DIR  := ../../lib/cairn_garage
 AGNSS_DIR    := ../../lib/cairn_agnss
+RETENTION_DIR := ../../lib/cairn_retention
 
 FORMAT_SRC := $(wildcard $(FORMAT_DIR)/*.c)
 STORE_SRC  := $(wildcard $(STORE_DIR)/*.c)
@@ -117,7 +118,7 @@ BUILD := build
 # Engine profiles (lib/cairn_engine): see engine.mk.
 include engine.mk
 
-.PHONY: all run asan clean conformance faults ble-vectors mtprobe prov offload offload-sim boottime blesec phonehint uplink config devinfo nvswipe intake bundle modem gnss trip garage agnss
+.PHONY: all run asan clean conformance faults ble-vectors mtprobe prov offload offload-sim boottime blesec phonehint uplink config devinfo nvswipe intake bundle modem gnss trip garage agnss retention
 
 all: run
 
@@ -207,6 +208,16 @@ $(BUILD)/agnss: $(AGNSS_SRC) $(HEADERS) | $(BUILD)
 
 agnss: $(BUILD)/agnss
 	$(BUILD)/agnss
+
+# Retention: the card deletes nothing until it must, then receipted bundles
+# oldest-first, then (owner policy) unreceipted oldest-first, logged first.
+RETENTION_SRC := $(RETENTION_DIR)/cairn_retention.c retention_test.c
+
+$(BUILD)/retention: $(RETENTION_SRC) $(HEADERS) | $(BUILD)
+	$(CC) $(CFLAGS) -I$(RETENTION_DIR) $(RETENTION_SRC) -o $@
+
+retention: $(BUILD)/retention
+	$(BUILD)/retention
 
 $(BUILD)/blesec: $(BLESEC_DIR)/cairn_blesec.h blesec_test.c | $(BUILD)
 	$(CC) $(CFLAGS) -I$(BLESEC_DIR) blesec_test.c -o $@
@@ -300,7 +311,7 @@ else
 $(info device-info vectors not in this contracts pin (needs contracts-v0.2.0): devinfo row skipped)
 endif
 
-run: conformance faults ble-vectors mtprobe prov offload boottime blesec phonehint uplink config nvswipe intake bundle modem gnss trip garage agnss
+run: conformance faults ble-vectors mtprobe prov offload boottime blesec phonehint uplink config nvswipe intake bundle modem gnss trip garage agnss retention
 
 # Undefined behaviour in the scan path would be a parser reading past a torn
 # segment — exactly the case the format exists to handle safely.
