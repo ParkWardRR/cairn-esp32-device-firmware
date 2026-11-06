@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h> /* mkdtemp lives here on macOS; stdlib.h covers glibc */
 
 #include "board_config.h"
 #include "cairn_format.h"
