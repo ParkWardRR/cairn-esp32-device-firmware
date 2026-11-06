@@ -3,7 +3,6 @@
 #include "netprobe.h"
 
 #include <Arduino.h>
-#include <WiFi.h>
 #include <string.h>
 
 #include <FreematicsPlus.h>
@@ -13,136 +12,9 @@
 
 static const char *TAG = "PROBE";
 
-/* ── Wi-Fi ────────────────────────────────────────────────────────────────── */
-
-static const char *auth_name(wifi_auth_mode_t m)
-{
-    switch (m) {
-    case WIFI_AUTH_OPEN:            return "open";
-    case WIFI_AUTH_WEP:             return "WEP";
-    case WIFI_AUTH_WPA_PSK:         return "WPA-PSK";
-    case WIFI_AUTH_WPA2_PSK:        return "WPA2-PSK";
-    case WIFI_AUTH_WPA_WPA2_PSK:    return "WPA/WPA2-PSK";
-    case WIFI_AUTH_WPA2_ENTERPRISE: return "WPA2-ENT";
-    case WIFI_AUTH_WPA3_PSK:        return "WPA3-PSK";
-    case WIFI_AUTH_WPA2_WPA3_PSK:   return "WPA2/WPA3-PSK";
-    case WIFI_AUTH_WAPI_PSK:        return "WAPI-PSK";
-    default:                        return "?";
-    }
-}
-
-/*
- * The scan is the authority on the SSID. An access point's name as written down
- * by a person is a guess until the radio has seen it: a trailing space, a
- * non-breaking hyphen or a band suffix all produce a name that looks right and
- * never associates. Printing the exact bytes, with the length, settles it.
- */
-static void probe_wifi(void)
-{
-    CAIRN_LOGI(TAG, "--- Wi-Fi scan ---");
-
-    WiFi.mode(WIFI_STA);
-    WiFi.disconnect(false, true);
-    delay(100);
-
-    int n = WiFi.scanNetworks(/*async=*/false, /*show_hidden=*/true);
-    if (n <= 0) {
-        CAIRN_LOGW(TAG, "scan found no networks (result %d)", n);
-        WiFi.mode(WIFI_OFF);
-        return;
-    }
-
-    CAIRN_LOGI(TAG, "%d networks:", n);
-    for (int i = 0; i < n; i++) {
-        String ssid = WiFi.SSID(i);
-        CAIRN_LOGI(TAG, "  %2d. %-32s len %2u  %4d dBm  ch %2d  %s",
-                   i + 1, ssid.length() ? ssid.c_str() : "<hidden>",
-                   (unsigned)ssid.length(), WiFi.RSSI(i), WiFi.channel(i),
-                   auth_name(WiFi.encryptionType(i)));
-    }
-
-    WiFi.scanDelete();
-    WiFi.mode(WIFI_OFF);
-}
-
-/*
- * Associate, then open a TCP connection to the ingest listener.
- *
- * Association is the only proof a pre-shared key is the right one; a key is
- * otherwise indistinguishable from a wrong one until the moment it matters. The
- * TCP connect then separates "the credential is wrong" from "the server is
- * unreachable from this network", which are the two failures that look
- * identical in an upload that simply never completes.
- *
- * The TLS handshake is deliberately not attempted here. It needs the client
- * certificate from the card, and a handshake failure at this stage would say
- * nothing about the credential this function exists to check.
- */
-static void probe_wifi_join(void)
-{
-#if defined(CAIRN_WIFI_SSID)
-    CAIRN_LOGI(TAG, "--- Wi-Fi association ---");
-    CAIRN_LOGI(TAG, "joining \"%s\" (%u characters)", CAIRN_WIFI_SSID,
-               (unsigned)strlen(CAIRN_WIFI_SSID));
-
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(CAIRN_WIFI_SSID, CAIRN_WIFI_PSK);
-
-    uint32_t t0 = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - t0 < 25000) {
-        delay(250);
-    }
-
-    if (WiFi.status() != WL_CONNECTED) {
-        /*
-         * status() distinguishes the two cases that matter: the network was not
-         * found at all, versus found and the key refused.
-         */
-        CAIRN_LOGE(TAG, "association FAILED after %u ms, status %d (%s)",
-                   (unsigned)(millis() - t0), (int)WiFi.status(),
-                   WiFi.status() == WL_NO_SSID_AVAIL
-                       ? "SSID not found — the name is wrong"
-                       : "found, but not associated — the key is likely wrong");
-        WiFi.disconnect(true, true);
-        WiFi.mode(WIFI_OFF);
-        return;
-    }
-
-    CAIRN_LOGI(TAG, "associated in %u ms: ip %s, gw %s, rssi %d dBm, ch %d",
-               (unsigned)(millis() - t0), WiFi.localIP().toString().c_str(),
-               WiFi.gatewayIP().toString().c_str(), WiFi.RSSI(), WiFi.channel());
-    CAIRN_LOGI(TAG, "dns %s", WiFi.dnsIP().toString().c_str());
-
-#if defined(CAIRN_SERVER_HOST)
-    IPAddress addr;
-    if (!WiFi.hostByName(CAIRN_SERVER_HOST, addr)) {
-        CAIRN_LOGE(TAG, "DNS lookup of %s failed", CAIRN_SERVER_HOST);
-    } else {
-        CAIRN_LOGI(TAG, "%s resolves to %s", CAIRN_SERVER_HOST,
-                   addr.toString().c_str());
-
-        WiFiClient c;
-        t0 = millis();
-        if (c.connect(addr, CAIRN_SERVER_PORT, 8000)) {
-            CAIRN_LOGI(TAG, "TCP connect to %s:%d succeeded in %u ms — the "
-                            "ingest listener is reachable from this network",
-                       CAIRN_SERVER_HOST, (int)CAIRN_SERVER_PORT,
-                       (unsigned)(millis() - t0));
-            c.stop();
-        } else {
-            CAIRN_LOGE(TAG, "TCP connect to %s:%d failed after %u ms",
-                       CAIRN_SERVER_HOST, (int)CAIRN_SERVER_PORT,
-                       (unsigned)(millis() - t0));
-        }
-    }
-#endif
-
-    WiFi.disconnect(true, true);
-    WiFi.mode(WIFI_OFF);
-#else
-    CAIRN_LOGW(TAG, "no CAIRN_WIFI_SSID compiled in; skipping association");
-#endif
-}
+/* The probe used to open with a Wi-Fi scan and an association attempt; the
+ * Wi-Fi stack is deleted (BLE and LTE are the only transports), so this is
+ * the modem half alone. */
 
 /* ── modem ────────────────────────────────────────────────────────────────── */
 
@@ -243,7 +115,7 @@ static void probe_modem(void)
     if (!alive) {
         CAIRN_LOGE(TAG, "VERDICT: no cellular modem responding in the BEE socket.");
         CAIRN_LOGE(TAG, "The SIM cannot be tested on this unit, and the LTE path "
-                        "has no hardware. Wi-Fi is unaffected.");
+                        "has no hardware. BLE is unaffected.");
         s_sys.xbEnd();
         return;
     }
@@ -661,8 +533,6 @@ void netprobe_run(void)
     CAIRN_LOGI(TAG, "=== network probe ===");
     CAIRN_LOGI(TAG, "This build captures nothing and writes nothing to NVS.");
 
-    probe_wifi();
-    probe_wifi_join();
     probe_modem();
 
     CAIRN_LOGI(TAG, "=== network probe complete ===");

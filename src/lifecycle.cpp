@@ -25,7 +25,6 @@
 #include "sensor_task.h"
 #include "sensors.h"
 #include "uplink_runner.h"
-#include "wifiscan_runner.h"
 
 static const char *TAG = "LIFE";
 
@@ -437,9 +436,8 @@ bool lifecycle_begin(Lifecycle *lc)
         CAIRN_LOGI(TAG, "trip %u resumed across reboot", (unsigned)lc->trip_seq);
     }
 
-    /* The receiver's hints (src/gnss_hint.cpp): the anchor table off the card, under a
-     * key from the storage root, before the first scan can want it. */
-    gnss_hint_begin(&lc->storage);
+    /* The receiver's hints (src/gnss_hint.cpp): the phone's fix and the time sources. */
+    gnss_hint_begin();
 
     /*
      * Sensing starts only after the capture is open. A fact arriving before
@@ -474,7 +472,6 @@ bool lifecycle_begin(Lifecycle *lc)
                (int)lc->sensors.obd, (int)lc->sensors.imu, (int)lc->sensors.gnss);
 
     uplink_runner_begin();
-    wifiscan_runner_begin();
 
     return true;
 }
@@ -743,7 +740,7 @@ static void on_time_observation(Lifecycle *lc, const fact_t *f)
     }
 
     /* The phone's and the network's clocks also become the receiver's time hint
-     * (src/gnss_hint.cpp); every source dates the anchor table's age. */
+     * (src/gnss_hint.cpp). */
     gnss_hint_note_time(f->data.utc.utc_ms, f->data.utc.acc_ms, f->data.utc.source, f->monotonic_ms,
                         lc->total_standby_ms);
 
@@ -1276,20 +1273,6 @@ static void maybe_standby(Lifecycle *lc)
         return;
     }
 
-    /*
-     * A position scan in flight holds standby. Bounded by the scan's own timeout, a few
-     * seconds; standing by under it would light-sleep with the driver mid-scan and its
-     * result read on waking as if it were fresh.
-     */
-    if (wifiscan_runner_busy()) {
-        static const char *const k_scanning = "a Wi-Fi position scan is in progress";
-        if (lc->last_standby_blocker != k_scanning) {
-            CAIRN_LOGI(TAG, "not standing by: %s", k_scanning);
-            lc->last_standby_blocker = k_scanning;
-        }
-        return;
-    }
-
     lc->last_standby_blocker = nullptr;
 
     ble_companion_radio_off();
@@ -1642,26 +1625,13 @@ void lifecycle_tick(Lifecycle *lc)
 
     /*
      * After refresh_pending, so the schedule sees the current count rather than
-     * last minute's, and before maybe_standby, so a slot that is about to run
+     * last minute's, and before maybe_standby, so a send that is about to run
      * is not raced by the device deciding to sleep.
      */
     /* A receiver start notices here, and is sent a time hint it is still owed. */
     gnss_hint_tick(lc->total_standby_ms);
 
     uplink_runner_tick(lc);
-
-    /*
-     * Wi-Fi position scans, after the uplink so a slot it starts this pass has already
-     * had the radio and given it back, and so the schedule sees the uplink's state as it
-     * now is. Never blocks: a scan is started here and collected on a later pass.
-     */
-    {
-        uint8_t  payload[CAIRN_WIFI_SCAN_MAX_PAYLOAD];
-        size_t   len = 0;
-        uint32_t done_ms = 0;
-        if (wifiscan_runner_tick(lc, payload, sizeof(payload), &len, &done_ms))
-            emit_capture_record(lc, CAIRN_REC_WIFI_SCAN, 1, payload, len, done_ms);
-    }
 
     /*
      * Last, so a sync has already had its chance this pass. Standing by before

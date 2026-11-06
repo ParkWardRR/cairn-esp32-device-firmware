@@ -16,10 +16,11 @@
 /*
  * The phone over BLE is the everyday path, and the only one that needs nothing
  * from this file (contracts/ble/v1/offload.md). Since the uplink schedule entered
- * the production build, Wi-Fi mTLS and LTE are compiled in too, so the device
- * does hold transport credentials: an SSID and PSK, a server address, a CA, a
- * client certificate and its key. Every one of them has a fail-closed default
- * below, because this header's promise is that the project builds without a
+ * the production build, LTE is compiled in too, so the device does hold
+ * transport credentials: a server address, a CA, a client certificate and its
+ * key. (Wi-Fi, and the SSID and PSK it needed, are deleted: BLE and LTE are
+ * the only transports.) Every credential has a fail-closed default below,
+ * because this header's promise is that the project builds without a
  * secrets.h at all — a fresh clone and CI both rely on it.
  *
  * Pinned server enrolment public key (X25519, 32 bytes, hex). The device seals
@@ -45,10 +46,9 @@
 /*
  * ── transport credentials ─────────────────────────────────────────────────────
  *
- * CAIRN_WIFI_UPLINK and CAIRN_LTE_UPLINK are both on in the production build, so
- * wifi_link.cpp and lte_link.cpp need these to compile. Real values belong in
- * secrets.h, which is gitignored; the repository is public, so nothing real may
- * appear here.
+ * CAIRN_LTE_UPLINK is on in the production build, so lte_link.cpp needs these
+ * to compile. Real values belong in secrets.h, which is gitignored; the
+ * repository is public, so nothing real may appear here.
  *
  * Every default fails closed, in the same direction as the receipt key above: an
  * unconfigured device cannot reach a server and cannot verify one, so a bundle
@@ -59,17 +59,12 @@
  *   - An empty client certificate and key cannot satisfy an mTLS handshake.
  *   - `.invalid` is reserved by RFC 2606 and never resolves.
  *   - Port 0 is not a connectable port.
- *   - No network is named `cairn-unconfigured`.
  *
  * So the defaults are not merely placeholders that compile: each one makes the
- * path it belongs to refuse rather than reach somewhere unintended.
+ * path it belongs to refuse rather than reach somewhere unintended. (The
+ * Wi-Fi SSID and PSK that used to sit first in this list went with the Wi-Fi
+ * stack.)
  */
-#ifndef CAIRN_WIFI_SSID
-#define CAIRN_WIFI_SSID "cairn-unconfigured"
-#endif
-#ifndef CAIRN_WIFI_PSK
-#define CAIRN_WIFI_PSK ""
-#endif
 #ifndef CAIRN_SERVER_HOST
 #define CAIRN_SERVER_HOST "cairn.invalid"
 #endif
@@ -344,7 +339,7 @@
 #define CAIRN_HEARTBEAT_SETTLE_MS 20000
 
 /* Clock to drop to while standing by. 80 MHz is the lowest frequency that
- * keeps the Wi-Fi and I2C peripherals usable without re-initialisation. */
+ * keeps the radio and I2C peripherals usable without re-initialisation. */
 #define CAIRN_STANDBY_CPU_MHZ 80
 
 /* ── task stacks ──────────────────────────────────────────────────────────── */
@@ -396,18 +391,6 @@
 /* ── uplink schedule ──────────────────────────────────────────────────────── */
 
 /*
- * How long a Wi-Fi slot may last.
- *
- * Measured rather than guessed, which the uplink module's own notes asked for
- * (issue #19). Cellular moves about 3 KB/s on this hardware and Wi-Fi rather
- * more, so a typical ~230 KB bundle needs on the order of 80 seconds over the
- * slower path. A slot shorter than that would abort every bundle it started
- * and make progress only through resume, which is wasteful when the device is
- * parked anyway. Four minutes leaves room for a handful.
- */
-#define CAIRN_UPLINK_SLOT_MAX_MS 240000u
-
-/*
  * How often a source that has the time repeats its observation.
  *
  * Two minutes: often enough that a trip carries a series rather than a single
@@ -439,13 +422,9 @@
  */
 #define CAIRN_TIME_PLAUSIBLE_FLOOR_MS 1577836800000ULL
 
-/* Associating is bounded separately: a network that is not there should cost
- * seconds, not the whole slot. */
-#define CAIRN_UPLINK_ASSOCIATE_MS 25000u
-
 /*
- * An LTE send is given longer than a Wi-Fi slot because the link is slower and
- * the attach alone can take 20 s from cold.
+ * How long an LTE send may run: the link is slow and the attach alone can
+ * take 20 s from cold.
  *
  * Sized on measurement, not estimate. The 2026-10-07 test drive sealed a
  * 1,295,714-byte bundle and it took 386 s to deliver over cellular — 3.35 KB/s,
@@ -492,71 +471,18 @@
  */
 #define CAIRN_UPLINK_ABORT_RMS_MG 60u
 
-/* ── Wi-Fi position scans ─────────────────────────────────────────────────── */
-/*
- * The schedule is lib/cairn_wifiscan's (when, and which access points); these are how
- * the radio is driven for one scan, in src/wifiscan_runner.cpp. None of the numbers
- * below has been measured on the car's unit yet: they are the first bench settings.
- */
-
-/*
- * Passive, by default: listen for beacons, send nothing.
- *
- * An active scan transmits probe requests from the ESP32's station MAC, which is fixed
- * and globally unique, every ten seconds of a drive with no fix. Anyone logging probe
- * requests could follow the car by it. Passive costs completeness (an access point
- * between beacons on its channel when the dwell ends is missed) and nothing else.
- * Setting this to 1 also sets the record's "active" flag.
- */
-#ifndef CAIRN_WIFISCAN_ACTIVE_SCAN
-#define CAIRN_WIFISCAN_ACTIVE_SCAN 0
-#endif
-
-/*
- * Dwell per channel. Beacons are sent every 102.4 ms by default, so 200 ms hears each
- * access point about twice even with coexistence handing some slots to BLE; over the
- * 13 channels of the world-safe country setting that is 2.6 s, the "two to three
- * seconds" the phone link has to survive.
- */
-#ifndef CAIRN_WIFISCAN_DWELL_MS
-#define CAIRN_WIFISCAN_DWELL_MS 200u
-#endif
-
-/* A scan that has not completed by this is stopped and nothing is recorded: the radio
- * is shared with the phone link and must not be held by a driver that went quiet. */
-#ifndef CAIRN_WIFISCAN_TIMEOUT_MS
-#define CAIRN_WIFISCAN_TIMEOUT_MS 6000u
-#endif
-
-/*
- * Free internal heap below which a scan is not started. Bringing Wi-Fi up beside a live
- * NimBLE stack allocates the driver's buffers from internal RAM; refusing a scan is
- * harmless, an allocation failure inside the driver with BLE up is not. A guess pending
- * a bench reading (the per-scan log line reports the figure).
- */
-#ifndef CAIRN_WIFISCAN_MIN_FREE_HEAP
-#define CAIRN_WIFISCAN_MIN_FREE_HEAP 60000u
-#endif
-
 /* ── the receiver's position and time hints ───────────────────────────────── */
 /*
- * src/gnss_hint.cpp: at each receiver start, before its first fix, the Wi-Fi position
- * (lib/cairn_wifiloc, from the learned anchors the server sends) and the phone's or the
- * network's time go to the receiver as UBX-MGA-INI messages. 0 sends neither (the
- * last-fix hint at start is unchanged, and the first-fix log line is still written), so
- * this is the switch if a hint is ever suspected of slowing a start.
+ * src/gnss_hint.cpp: at each receiver start, before its first fix, the phone's last
+ * known position and the phone's or the network's time go to the receiver as
+ * UBX-MGA-INI messages. 0 sends neither (the last-fix hint at start is unchanged, and
+ * the first-fix log line is still written), so this is the switch if a hint is ever
+ * suspected of slowing a start. (A third hint — a Wi-Fi position from server-learned
+ * anchors — was deleted with the Wi-Fi stack, along with its CAIRN_WIFISCAN_* and
+ * CAIRN_WIFI_ANCHORS_* knobs.)
  */
 #ifndef CAIRN_GNSS_HINTS
 #define CAIRN_GNSS_HINTS 1
-#endif
-
-/*
- * The anchor download, after a session's bundles: bounded so it cannot hold a session
- * open past usefulness. 64 KiB at the ~3 KB/s measured over LTE is ~22 s; Wi-Fi is far
- * quicker. The slot's own abort (trip start, slot limit) still applies throughout.
- */
-#ifndef CAIRN_WIFI_ANCHORS_TIMEOUT_MS
-#define CAIRN_WIFI_ANCHORS_TIMEOUT_MS 30000u
 #endif
 
 #endif /* CAIRN_CONFIG_H */

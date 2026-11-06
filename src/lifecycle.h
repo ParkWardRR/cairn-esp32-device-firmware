@@ -172,10 +172,9 @@ struct Lifecycle {
     /*
      * The last fix the receiver produced that passed the plausibility gate
      * (lib/cairn_gnss) with a 2D or better solution: every internal FACT_GNSS_SAMPLE
-     * has passed it. The Wi-Fi position scans key off this alone -- no fix for 5 s
-     * means scan for position, a fix no older than 2 s makes a learning scan -- and
-     * never off the phone's fixes, which in a garage are themselves Wi-Fi positions.
-     * Kept across standby on purpose: its age is what says it is stale.
+     * has passed it. Kept across standby on purpose: its age is what says it is
+     * stale. (The Wi-Fi position scans used to key off this; the Wi-Fi stack is
+     * deleted.)
      */
     bool     have_accepted_fix = false;
     uint32_t accepted_fix_ms = 0;

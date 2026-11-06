@@ -1,10 +1,10 @@
 /*
- * Bench network probe (env:cairn-netprobe). Answers two hardware questions this
- * repository has only ever recorded as unconfirmed:
- *
- *   1. Which Wi-Fi networks this unit can actually see, with signal and channel.
- *   2. Whether a cellular modem is fitted in the BEE socket at all, and if so
- *      which module, whether the SIM is readable, and whether it registers.
+ * Bench network probe (env:cairn-netprobe). Answers the hardware question this
+ * repository once only recorded as unconfirmed: whether a cellular modem is
+ * fitted in the BEE socket at all, and if so which module, whether the SIM is
+ * readable, and whether it registers. (It also used to scan Wi-Fi and print
+ * each SSID with its exact length; the Wi-Fi stack is deleted, so that half
+ * went with it.)
  *
  * docs/flashing-and-testing.md records GPIO 27 (BEE_PWR) LOW and "modem not
  * initializing", and README says whether this unit carries one is unconfirmed.
