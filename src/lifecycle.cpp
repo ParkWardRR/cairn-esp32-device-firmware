@@ -357,6 +357,33 @@ static void garage_check(Lifecycle *lc)
 
 /* ── init ─────────────────────────────────────────────────────────────────── */
 
+/*
+ * One retention round (cairn_prune.h: the third sanctioned deletion path).
+ * Quiet when the card is healthy; loud about every byte it frees, and louder
+ * still when the policy is exhausted and the card is simply full.
+ */
+static void lifecycle_run_retention(const char *when)
+{
+    cairn_retention_stats_t st;
+    if (!cairn_prune_retention(&st)) {
+        CAIRN_LOGW(TAG, "retention (%s): the card could not be measured or "
+                        "listed; nothing was deleted", when);
+        return;
+    }
+    if (st.receipted_dropped || st.unreceipted_dropped || st.delete_errors) {
+        CAIRN_LOGW(TAG, "retention (%s): freed %llu bytes — %u receipted, "
+                        "%u UNRECEIPTED, %u delete errors",
+                   when, (unsigned long long)st.bytes_freed,
+                   (unsigned)st.receipted_dropped,
+                   (unsigned)st.unreceipted_dropped,
+                   (unsigned)st.delete_errors);
+    }
+    if (st.still_under_low) {
+        CAIRN_LOGE(TAG, "retention (%s): the card is FULL and the policy is "
+                        "exhausted; capture will stop when writes fail", when);
+    }
+}
+
 bool lifecycle_begin(Lifecycle *lc)
 {
     if (!cairn_identity_load(lc->device_id, lc->key_seed, lc->key_public,
@@ -393,6 +420,7 @@ bool lifecycle_begin(Lifecycle *lc)
      */
     cairn_store_resume_interrupted_seals();
     cairn_prune_resume_interrupted();
+    lifecycle_run_retention("boot");
     boot_timing_mark(CAIRN_BOOT_STORE_READY);
 
     if (!cairn_capture_open_or_resume(&lc->cap, lc->device_id, lc->boot_id,
@@ -1133,6 +1161,10 @@ static void seal_and_reopen(Lifecycle *lc, uint8_t reason)
     const bool     carry_basis = lc->have_utc_basis && lc->cap.utc_basis_ms != 0;
     const uint64_t carried_ms  = lc->cap.utc_basis_ms;
     const uint32_t carried_acc = lc->cap.utc_basis_acc_ms;
+
+    /* The seal just added a bundle to the card; make room for the next trip
+     * now (owner's retention policy, cairn_prune.h) rather than mid-drive. */
+    lifecycle_run_retention("post-seal");
 
     /* A fresh capture, with its own bundle id and its own chains. */
     if (!cairn_capture_open_or_resume(&lc->cap, lc->device_id, lc->boot_id,

@@ -20,6 +20,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "cairn_retention.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -104,6 +106,32 @@ bool cairn_prune_legacy_bundles(uint32_t *dropped, uint64_t *bytes_freed);
  * Idempotent; run at boot before any capture begins.
  */
 int cairn_prune_resume_interrupted(void);
+
+/*
+ * The third sanctioned deletion path: storage-pressure retention, the owner's
+ * policy of 2026-11-05 (lib/cairn_retention/cairn_retention.h states it in
+ * full). It deletes nothing while free space is healthy; under pressure,
+ * receipted bundles go oldest-first, and unreceipted sealed bundles go only
+ * as a last resort, each logged to the card and the console before the
+ * delete. "Oldest" is the device counter read from the bundle's own first
+ * segment header; a bundle whose header cannot be read sorts NEWEST, so the
+ * torn write cairn_prune_legacy_bundles refuses to touch is equally safe
+ * here.
+ *
+ * Lives beside the receipt gate for the same reason the other two paths do:
+ * this file is where deletions are audited.
+ *
+ * Call before opening a capture and after each seal. Cheap when space is
+ * healthy (one statvfs, no directory walk). Not reentrant — lifecycle task
+ * only. Returns false only when the card could not be measured or listed.
+ */
+bool cairn_prune_retention(cairn_retention_stats_t *stats);
+
+/* The same round under a caller-chosen policy. Exists so a host test can put
+ * the card glue under pressure without faking statvfs; the device uses the
+ * default-policy wrapper above. */
+bool cairn_prune_retention_with_policy(const cairn_retention_policy_t *policy,
+                                       cairn_retention_stats_t *stats);
 
 #ifdef __cplusplus
 }

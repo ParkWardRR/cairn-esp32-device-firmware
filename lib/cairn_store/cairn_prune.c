@@ -386,3 +386,145 @@ int cairn_prune_resume_interrupted(void)
     if (finished > 0) CAIRN_LOGI(TAG, "completed %d interrupted prune(s)", finished);
     return finished;
 }
+
+/* ── storage-pressure retention (the third sanctioned path) ───────────────── */
+
+/*
+ * The decision logic is lib/cairn_retention, host-tested in isolation; this is
+ * only its eyes and hands on the real card. See cairn_prune.h for the policy
+ * and why it lives in this file.
+ */
+
+#define RETENTION_LOG_PATH "/cairn/retention.log"
+#define RETENTION_SCAN_CAP 96
+
+static uint64_t retention_free_bytes(void *ctx)
+{
+    (void)ctx;
+    uint64_t total = 0, used = 0;
+    /* An unmeasurable card reads as "plenty free": the failure mode is a full
+     * card that keeps capturing until writes fail, which is recoverable, not a
+     * healthy card that starts deleting, which is not. */
+    if (!cairn_fs_space(&total, &used) || used > total) return UINT64_MAX;
+    return total - used;
+}
+
+/* The bundle's age: the device counter from its own first segment header.
+ * Unreadable sorts NEWEST (UINT64_MAX), so a torn header is deleted last. */
+static uint64_t retention_counter_of(const char *id_text)
+{
+    char path[PATH_MAX_LEN];
+    snprintf(path, sizeof(path), "%s/%s/seg-00000000.seg", CAIRN_DIR_BUNDLES,
+             id_text);
+
+    cairn_file_t *f = cairn_fs_open(path, CAIRN_FS_READ);
+    if (f == NULL) return UINT64_MAX;
+
+    uint8_t buf[CAIRN_SEGMENT_HEADER_SIZE];
+    size_t  n = cairn_fs_read(f, buf, sizeof(buf));
+    cairn_fs_close(f);
+    if (n != sizeof(buf)) return UINT64_MAX;
+
+    cairn_segment_header_t h;
+    size_t header_len = 0;
+    if (cairn_parse_segment_header(buf, sizeof(buf), &h, &header_len) !=
+        CAIRN_OK)
+        return UINT64_MAX;
+    return h.device_counter;
+}
+
+static uint64_t retention_dir_bytes(const char *id_text)
+{
+    char dir[PATH_MAX_LEN];
+    snprintf(dir, sizeof(dir), "%s/%s", CAIRN_DIR_BUNDLES, id_text);
+    cairn_dir_t *d = cairn_fs_opendir(dir);
+    if (d == NULL) return 0;
+    uint64_t sum = 0, size = 0;
+    char name[64];
+    bool is_dir = false;
+    while (cairn_fs_readdir(d, name, sizeof(name), &is_dir, &size))
+        if (!is_dir) sum += size;
+    cairn_fs_closedir(d);
+    return sum;
+}
+
+static int retention_list_sealed(void *ctx, cairn_retention_entry_t *out,
+                                 int max)
+{
+    (void)ctx;
+    cairn_dir_t *d = cairn_fs_opendir(CAIRN_DIR_BUNDLES);
+    if (d == NULL) return -1;
+
+    int  n = 0;
+    char name[64];
+    bool is_dir = false;
+    while (n < max && cairn_fs_readdir(d, name, sizeof(name), &is_dir, NULL)) {
+        if (!is_dir) continue;
+        cairn_retention_entry_t *e = &out[n++];
+        snprintf(e->id, sizeof(e->id), "%s", name);
+        e->counter   = retention_counter_of(e->id);
+        e->bytes     = retention_dir_bytes(e->id);
+        e->receipted = cairn_receipt_exists(e->id);
+    }
+    cairn_fs_closedir(d);
+    return n;
+}
+
+static bool retention_delete(void *ctx, const cairn_retention_entry_t *e)
+{
+    (void)ctx;
+    return delete_bundle_dir(e->id);
+}
+
+static void retention_log_drop(void *ctx, const cairn_retention_entry_t *e)
+{
+    (void)ctx;
+    /* The console line and the card line together are the audit trail. An
+     * unreceipted drop is the owner's explicit trade, but it is still the only
+     * copy of a trip being destroyed, and it is never silent. */
+    CAIRN_LOGW(TAG, "retention: dropping %s bundle %s (counter %llu, %llu bytes)",
+               e->receipted ? "receipted" : "UNRECEIPTED", e->id,
+               (unsigned long long)e->counter, (unsigned long long)e->bytes);
+
+    cairn_file_t *f = cairn_fs_open(RETENTION_LOG_PATH, CAIRN_FS_APPEND);
+    if (f == NULL) return;
+    char line[128];
+    int  len = snprintf(line, sizeof(line),
+                        "%s counter=%llu bytes=%llu %s\n", e->id,
+                        (unsigned long long)e->counter,
+                        (unsigned long long)e->bytes,
+                        e->receipted ? "receipted" : "UNRECEIPTED");
+    if (len > 0) cairn_fs_write(f, line, (size_t)len);
+    cairn_fs_flush(f);
+    cairn_fs_close(f);
+}
+
+bool cairn_prune_retention_with_policy(const cairn_retention_policy_t *policy,
+                                       cairn_retention_stats_t *stats)
+{
+    /* Static, not stack: ~4 KB of entries has no place on the lifecycle task's
+     * stack. Guarded by the single-caller rule in the header. */
+    static cairn_retention_entry_t scratch[RETENTION_SCAN_CAP];
+
+    const cairn_retention_io_t io = {
+        retention_free_bytes,
+        retention_list_sealed,
+        retention_delete,
+        retention_log_drop,
+        NULL,
+    };
+    return cairn_retention_run(&io, policy, scratch, RETENTION_SCAN_CAP, stats);
+}
+
+bool cairn_prune_retention(cairn_retention_stats_t *stats)
+{
+    uint64_t total = 0, used = 0;
+    if (!cairn_fs_space(&total, &used)) {
+        memset(stats, 0, sizeof(*stats));
+        return false;
+    }
+
+    cairn_retention_policy_t policy;
+    cairn_retention_default_policy(total, &policy);
+    return cairn_prune_retention_with_policy(&policy, stats);
+}

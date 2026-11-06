@@ -51,7 +51,7 @@ AGNSS_DIR    := ../../lib/cairn_agnss
 RETENTION_DIR := ../../lib/cairn_retention
 
 FORMAT_SRC := $(wildcard $(FORMAT_DIR)/*.c)
-STORE_SRC  := $(wildcard $(STORE_DIR)/*.c)
+STORE_SRC  := $(wildcard $(STORE_DIR)/*.c) $(RETENTION_DIR)/cairn_retention.c
 FS_SRC     := $(wildcard $(FS_DIR)/*.c)
 
 # The OTA preconditions and version ordering are portable C; the install path
@@ -102,7 +102,7 @@ CFLAGS  ?= -std=c11 -O1 -g -D_DEFAULT_SOURCE \
            -Wall -Wextra -Werror -Wno-format-truncation \
            -Wshadow -Wpointer-arith -Wcast-qual -Wstrict-prototypes \
            -Wmissing-prototypes -Wno-unused-parameter \
-           -I$(FORMAT_DIR) -I$(STORE_DIR) -I$(FS_DIR) -I$(LOG_DIR) -I$(PROV_DIR) -I$(INCLUDE_DIR) -I$(SRC_DIR) -I$(OTA_DIR) -I$(POWER_DIR) -I$(OFFLOAD_DIR) -I$(BOOTTIME_DIR) -I$(UPLINK_DIR) -I$(CONFIG_DIR) -I$(DEVINFO_DIR) -I$(CHECKIN_DIR) -I$(INTAKE_DIR) -I$(BUNDLE_DIR) -I$(MODEM_DIR) -I$(GNSS_DIR) -I$(TRIP_DIR) -I$(GARAGE_DIR) -I$(AGNSS_DIR) -I$(PHONEHINT_DIR) -I.
+           -I$(FORMAT_DIR) -I$(STORE_DIR) -I$(FS_DIR) -I$(LOG_DIR) -I$(PROV_DIR) -I$(INCLUDE_DIR) -I$(SRC_DIR) -I$(OTA_DIR) -I$(POWER_DIR) -I$(OFFLOAD_DIR) -I$(BOOTTIME_DIR) -I$(UPLINK_DIR) -I$(CONFIG_DIR) -I$(DEVINFO_DIR) -I$(CHECKIN_DIR) -I$(INTAKE_DIR) -I$(BUNDLE_DIR) -I$(MODEM_DIR) -I$(GNSS_DIR) -I$(TRIP_DIR) -I$(GARAGE_DIR) -I$(AGNSS_DIR) -I$(PHONEHINT_DIR) -I$(RETENTION_DIR) -I.
 
 # Every header the sources can include. Without this a change to a shared header
 # (config.h, cairn_platform.h, policy.h) leaves a stale binary in build/ and a
@@ -118,7 +118,7 @@ BUILD := build
 # Engine profiles (lib/cairn_engine): see engine.mk.
 include engine.mk
 
-.PHONY: all run asan clean conformance faults ble-vectors mtprobe prov offload offload-sim boottime blesec phonehint uplink config devinfo nvswipe intake bundle modem gnss trip garage agnss retention
+.PHONY: all run asan clean conformance faults ble-vectors mtprobe prov offload offload-sim boottime blesec phonehint uplink config devinfo nvswipe intake bundle modem gnss trip garage agnss retention retention-card
 
 all: run
 
@@ -219,6 +219,17 @@ $(BUILD)/retention: $(RETENTION_SRC) $(HEADERS) | $(BUILD)
 retention: $(BUILD)/retention
 	$(BUILD)/retention
 
+# The retention CARD glue, through the real POSIX fs backend: real directories,
+# real segment headers for the age, real receipt files, a real log.
+RETENTION_CARD_SRC := $(FORMAT_SRC) $(STORE_SRC) $(FS_SRC) \
+                      log_host.c platform_host.c retention_card_test.c
+
+$(BUILD)/retention-card: $(RETENTION_CARD_SRC) $(HEADERS) | $(BUILD)
+	$(CC) $(CFLAGS) $(RETENTION_CARD_SRC) -o $@
+
+retention-card: $(BUILD)/retention-card
+	$(BUILD)/retention-card
+
 $(BUILD)/blesec: $(BLESEC_DIR)/cairn_blesec.h blesec_test.c | $(BUILD)
 	$(CC) $(CFLAGS) -I$(BLESEC_DIR) blesec_test.c -o $@
 
@@ -311,7 +322,7 @@ else
 $(info device-info vectors not in this contracts pin (needs contracts-v0.2.0): devinfo row skipped)
 endif
 
-run: conformance faults ble-vectors mtprobe prov offload boottime blesec phonehint uplink config nvswipe intake bundle modem gnss trip garage agnss retention
+run: conformance faults ble-vectors mtprobe prov offload boottime blesec phonehint uplink config nvswipe intake bundle modem gnss trip garage agnss retention retention-card
 
 # Undefined behaviour in the scan path would be a parser reading past a torn
 # segment — exactly the case the format exists to handle safely.
