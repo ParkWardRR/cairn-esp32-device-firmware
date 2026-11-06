@@ -443,6 +443,8 @@ static void test_uplink_event_rules(void)
     cairn_uplink_event_t e, back;
     uint8_t out[32];
     memset(&e, 0, sizeof e);
+    /* CAIRN_UE_PATH_WIFI is a contract value the codec must round-trip even though
+     * this firmware (Wi-Fi deleted) never emits it. */
     e.kind = CAIRN_UE_RETURNED; e.path = CAIRN_UE_PATH_WIFI; e.reason = CAIRN_UE_REASON_HOME_PHONE;
     e.outcome = CAIRN_UE_OUTCOME_PARTIAL; e.slot = 70000; e.committed = 2; e.failed = 1;
     e.bytes_sent = 1u << 31; e.duration_ms = 61234;

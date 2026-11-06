@@ -46,7 +46,7 @@ enum {
     CAIRN_CAP_UPLINK_EVENT = 1u << 4,
     CAIRN_CAP_INSTRUCTIONS = 1u << 5,
     CAIRN_CAP_HOME_TRIGGER = 1u << 6,
-    CAIRN_CAP_WIFI         = 1u << 7,
+    CAIRN_CAP_WIFI         = 1u << 7,   /* contract value; never emitted by this firmware (Wi-Fi deleted) */
     CAIRN_CAP_LTE          = 1u << 8,
     CAIRN_CAP_DIGEST       = 1u << 9,
     CAIRN_CAP_CONFIG       = 1u << 10,
@@ -161,6 +161,7 @@ cairn_di_err_t cairn_devinfo_decode(cairn_devinfo_t *info, const uint8_t *in, si
 #define CAIRN_UE_LEN 24
 
 enum { CAIRN_UE_LEAVING = 1, CAIRN_UE_RETURNED = 2, CAIRN_UE_ABORTED = 3 };
+/* CAIRN_UE_PATH_WIFI is a contract value; never emitted by this firmware (Wi-Fi deleted). */
 enum { CAIRN_UE_PATH_WIFI = 2, CAIRN_UE_PATH_LTE = 3 };
 enum { CAIRN_UE_REASON_SCHEDULED = 1, CAIRN_UE_REASON_HOME_PHONE = 2, CAIRN_UE_REASON_RETRY = 3,
        CAIRN_UE_REASON_UPLOAD_NOW = 4, CAIRN_UE_REASON_TRIP = 5 };

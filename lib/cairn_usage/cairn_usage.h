@@ -73,10 +73,16 @@ extern "C" {
 
 #define CAIRN_USAGE_TRIPS_TRACKED 8
 
+/*
+ * These indices are SERIALIZED: the persisted snapshot stores day_bytes and
+ * period_bytes positionally, per path. CAIRN_PATH_WIFI is retained so the image
+ * layout and the surviving values do not shift, but the firmware has no Wi-Fi
+ * (BLE and LTE are the only transports) and nothing records to that slot.
+ */
 typedef enum {
-    CAIRN_PATH_LTE = 0,
-    CAIRN_PATH_WIFI,
-    CAIRN_PATH_BLE,
+    CAIRN_PATH_LTE  = 0,
+    CAIRN_PATH_WIFI = 1,   /* retired: layout slot only, never recorded */
+    CAIRN_PATH_BLE  = 2,
     CAIRN_PATH_COUNT
 } cairn_usage_path_t;
 

@@ -1,42 +1,30 @@
 /*
- * Uplink manager: which path moves a bundle, and when the radio may leave BLE.
+ * Uplink manager: which path moves a bundle, and when LTE may spend the owner's data.
  *
- * With three transports the dongle needs a policy, not three code paths. This module is
- * that policy, as portable C with the clock and every outside fact passed in, so the
- * whole schedule runs on the host against simulated links. It does no I/O itself: it
- * returns what to do, and the caller (the lifecycle) does it and reports back.
+ * Two transports (front door commit 2003c62): BLE to the phone, which is the home
+ * state and the everyday path, and LTE for a car parked away from its phone. This
+ * module is the policy, as portable C with the clock and every outside fact passed
+ * in, so the whole schedule runs on the host against simulated links. It does no
+ * I/O itself: it returns what to do, and the caller (the lifecycle) does it and
+ * reports back.
  *
- * The schedule is the owner's (issue #17, decided):
+ * There was a third transport. Wi-Fi slots -- the dongle leaving BLE for a bounded
+ * visit to a home network -- were deleted with the rest of the Wi-Fi stack: the
+ * ESP32 has one 2.4 GHz radio, so every slot tore the BLE stack down and the phone
+ * watched the dongle vanish every ~30 s. The slot/scan/check-in state machine,
+ * the home scan and the session backoff went with it. LTE has its own modem and
+ * never contends with BLE, so what remains needs no radio arbitration at all:
+ * BLE may always advertise.
  *
- *   BLE is the home state. The dongle leaves it only for a bounded Wi-Fi slot, and
- *   always comes back to tell the phone what happened.
+ * What this module does not decide: what a path's bytes look like, or when a
+ * bundle may be pruned. Pruning happens only when the injected prune callback
+ * accepts a receipt, and that callback is cairn_prune_if_receipted in the
+ * product: this module cannot delete anything on its own authority.
  *
- *     BLE -> [at a known home network, bundles waiting, parked, battery ok]
- *         -> Wi-Fi slot 1 -> BLE check-in
- *         -> Wi-Fi slot 2 (only if slot 1 left bundles uncommitted) -> BLE check-in
- *
- *   - One 2.4 GHz radio, time-sliced: BLE and Wi-Fi are NEVER used at once. LTE has its
- *     own modem and is not part of the slicing.
- *   - Capture and BLE-ready are never delayed. Wi-Fi is not on the boot path; a trip
- *     start (or low battery, or the slot limit) aborts a slot, and the radio is forced
- *     off if the caller has not returned within a bounded time.
- *   - The dongle announces a slot to the phone BEFORE leaving, so the phone does not
- *     treat the disconnect as a failure and start a reconnect storm.
- *   - Home is decided by the phone ("you may use Wi-Fi now", the dongle stores no
- *     location) or, with no phone present, by a very short scan for a provisioned
- *     network. A GNSS geofence on the chip is deliberately not an option.
- *
- * What this module does not decide: whether a credential may be stored (nothing secret
- * is written to flash until flash and NVS encryption exist, issue #18), what a path's
- * bytes look like (the uplink contract is not released), or when a bundle may be
- * pruned. Pruning happens only when the injected prune callback accepts a receipt, and
- * that callback is cairn_prune_if_receipted in the product: this module cannot delete
- * anything on its own authority.
- *
- * LTE is subject to the caps in lib/cairn_usage and sends digests by default; here it is
- * only a path with a gate (`allowed`) and a trigger (away from home, no phone, a while
- * after the trip). The proposed default trigger is the owner's, but "partly open" in the
- * issue: it is a config flag, not a constant.
+ * LTE is subject to the caps in lib/cairn_usage and sends digests by default; here
+ * it is only a path with a gate (`allowed`) and a trigger (away from home, no
+ * phone, a while after the trip). The proposed default trigger is the owner's
+ * (issue #17), but "partly open": it is a config flag, not a constant.
  */
 
 #ifndef CAIRN_UPLINK_H
@@ -50,9 +38,13 @@
 extern "C" {
 #endif
 
+/*
+ * In-memory path indices; never serialized. (The wire constants for uplink
+ * events are CAIRN_UE_PATH_* in lib/cairn_devinfo, where Wi-Fi keeps its
+ * contract value.) Wi-Fi used to sit between these two.
+ */
 typedef enum {
     CAIRN_PATH_BLE = 0,
-    CAIRN_PATH_WIFI,
     CAIRN_PATH_LTE,
     CAIRN_PATH_COUNT
 } cairn_path_t;
@@ -62,17 +54,6 @@ const char *cairn_path_name(cairn_path_t p);
 /* ── configuration ────────────────────────────────────────────────────────── */
 
 typedef struct {
-    uint32_t slot_max_ms;            /* a Wi-Fi slot never outlasts this */
-    uint8_t  slots_per_session;      /* slots in one parked session (the owner's: 2) */
-    uint32_t min_slot_gap_ms;        /* between slots of one session, after the check-in */
-    uint32_t checkin_wait_ms;        /* how long to wait for a phone to take the report */
-    uint32_t abort_return_ms;        /* abort ordered -> back on BLE, or the radio is forced off */
-    uint32_t backoff_initial_ms;     /* after a session that left bundles uncommitted */
-    uint32_t backoff_max_ms;
-    uint32_t scan_min_interval_ms;   /* the no-phone home scan is rate limited */
-    uint32_t scan_max_ms;            /* and bounded: a few seconds of radio, not minutes */
-    uint32_t scan_hit_ttl_ms;        /* how long a scan hit stays a valid home trigger */
-    uint32_t home_wifi_recent_ms;    /* after a slot that delivered: rescan freely, hold LTE back */
     bool     lte_auto;               /* LTE fires by itself after a trip, when away */
     uint32_t lte_after_trip_ms;      /* ...this long after the trip ended */
     uint32_t lte_retry_ms;           /* minimum spacing of LTE attempts */
@@ -83,14 +64,19 @@ void cairn_uplink_config_defaults(cairn_uplink_config_t *c);
 
 /* ── evidence ─────────────────────────────────────────────────────────────── */
 
+/*
+ * "The phone says the car is home" (the HOME_TRIGGER message, ble/v1/checkin.md
+ * §3). It used to open Wi-Fi slots; now it only holds LTE back -- at home the
+ * phone fetches bundles for free, so cellular would spend data for nothing.
+ * Value 2 was CAIRN_HOME_SCAN_HIT, the dongle's own Wi-Fi scan: removed.
+ */
 typedef enum {
     CAIRN_HOME_NONE = 0,
-    CAIRN_HOME_PHONE_ASSERTED,   /* the phone says "you may use Wi-Fi now" */
-    CAIRN_HOME_SCAN_HIT          /* the dongle's own short scan found a provisioned network */
+    CAIRN_HOME_PHONE_ASSERTED = 1
 } cairn_home_trigger_t;
 
 typedef struct {
-    bool     configured;       /* the path has what it needs (network list, APN) */
+    bool     configured;       /* the path has what it needs (APN, pinned keys) */
     bool     available;        /* usable now: phone connected / modem may attach */
     bool     allowed;          /* policy gate: user setting, caps, pause, roaming */
 } cairn_path_info_t;
@@ -106,81 +92,19 @@ typedef struct {
     cairn_path_info_t path[CAIRN_PATH_COUNT];
 } cairn_uplink_evidence_t;
 
-/* ── slot state machine ───────────────────────────────────────────────────── */
+/* ── the schedule ─────────────────────────────────────────────────────────── */
 
 typedef enum {
-    CAIRN_UL_BLE_HOME = 0,     /* advertising; the phone may pull bundles */
-    CAIRN_UL_WIFI_SLOT,        /* the radio is on Wi-Fi; BLE is down */
-    CAIRN_UL_WIFI_SCAN,        /* the radio is on a bounded scan for a provisioned network */
-    CAIRN_UL_BLE_CHECKIN       /* back on BLE, reporting to the phone */
-} cairn_uplink_state_t;
-
-typedef enum {
-    CAIRN_UL_ACT_NONE = 0,
-    CAIRN_UL_ACT_ANNOUNCE_SLOT,   /* tell the phone: leaving for Wi-Fi for at most N s */
-    CAIRN_UL_ACT_START_WIFI_SLOT, /* drop BLE and start the slot */
-    CAIRN_UL_ACT_ABORT_SLOT,      /* stop the slot or scan and return to BLE now */
-    CAIRN_UL_ACT_FORCE_RADIO_OFF, /* the abort was not honoured in time: cut Wi-Fi */
-    CAIRN_UL_ACT_CHECKIN,         /* report to the phone and take its instructions */
-    CAIRN_UL_ACT_SCAN_HOME,       /* a bounded Wi-Fi scan for a provisioned network */
-    CAIRN_UL_ACT_LTE_SEND         /* start an LTE send (digest by default) */
+    CAIRN_UL_ACT_NONE     = 0,
+    CAIRN_UL_ACT_LTE_SEND = 7   /* explicit: the value it had beside the Wi-Fi slot actions */
 } cairn_uplink_action_kind_t;
-
-typedef enum {
-    CAIRN_UL_REASON_NONE = 0,
-    CAIRN_UL_REASON_HOME_PHONE,   /* a slot: the phone asserted home */
-    CAIRN_UL_REASON_HOME_SCAN,    /* a slot: a scan found the network */
-    CAIRN_UL_REASON_TRIP,         /* an abort: a trip started or the car woke */
-    CAIRN_UL_REASON_BATTERY,
-    CAIRN_UL_REASON_SLOT_LIMIT
-} cairn_uplink_reason_t;
 
 typedef struct {
     cairn_uplink_action_kind_t kind;
-    cairn_uplink_reason_t      reason;
-    uint8_t                    slot_no;      /* 1-based, for slot actions */
-    uint32_t                   max_ms;       /* the bound announced to the phone / the scan */
 } cairn_uplink_action_t;
 
 typedef struct {
-    uint32_t committed;        /* bundles that ended with a verified receipt this slot */
-    uint32_t failed;
-    uint32_t bytes;
-    uint32_t ms;
-    cairn_uplink_reason_t aborted_by;   /* NONE when the slot ended on its own */
-} cairn_slot_result_t;
-
-typedef struct {
     cairn_uplink_config_t cfg;
-    cairn_uplink_state_t  state;
-
-    /* session */
-    bool     session_open;
-    uint8_t  slots_used;
-    bool     announced;
-    bool     checkin_due;
-    uint32_t checkin_since_ms;
-    uint32_t slot_started_ms;
-    bool     abort_ordered;
-    bool     checkin_in_flight;
-    uint32_t abort_ordered_ms;
-    cairn_slot_result_t last_result;
-    uint32_t next_slot_ok_ms;      /* min_slot_gap within a session */
-    uint32_t next_session_ok_ms;   /* backoff between sessions */
-    uint32_t backoff_ms;
-    bool     progress_this_session;
-
-    /* home scan */
-    bool     scanned_ever;
-    uint32_t last_scan_ms;
-    uint32_t scan_started_ms;
-    uint32_t scan_hit_until_ms;
-    bool     scan_hit_valid;
-
-    /* Home Wi-Fi delivered recently: until this, more home slots are expected and LTE
-     * waits for them. Cleared when a trip starts (the car may be leaving home). */
-    bool     home_wifi_ok;
-    uint32_t home_wifi_ok_until_ms;
 
     /* trip edge, for the LTE trigger */
     bool     trip_was_active;
@@ -191,10 +115,6 @@ typedef struct {
     bool     lte_in_flight;
     uint32_t lte_next_ok_ms;
     bool     lte_sent_since_trip;
-
-    /* audit counters, for the reported state */
-    uint32_t slots_total;
-    uint32_t slots_aborted;
 } cairn_uplink_t;
 
 void cairn_uplink_init(cairn_uplink_t *u, const cairn_uplink_config_t *cfg);
@@ -207,32 +127,8 @@ cairn_uplink_action_t cairn_uplink_tick(cairn_uplink_t *u, const cairn_uplink_ev
  * Report back. Every action tick() returns is a request: the caller does it and reports
  * it before the next tick, otherwise the same action is returned again.
  */
-void cairn_uplink_slot_announced(cairn_uplink_t *u);
-void cairn_uplink_slot_started(cairn_uplink_t *u, uint32_t now_ms);
-void cairn_uplink_slot_finished(cairn_uplink_t *u, const cairn_slot_result_t *r, uint32_t now_ms);
-void cairn_uplink_checkin_done(cairn_uplink_t *u, uint32_t now_ms);
-void cairn_uplink_scan_started(cairn_uplink_t *u, uint32_t now_ms);
-void cairn_uplink_scan_done(cairn_uplink_t *u, bool hit, uint32_t now_ms);
 void cairn_uplink_lte_started(cairn_uplink_t *u);
 void cairn_uplink_lte_finished(cairn_uplink_t *u, bool ok, uint32_t now_ms);
-
-/* Whether the no-phone home scan may run now, and why not. The scan is a Wi-Fi radio
- * use like any other, so it obeys the same gates as a slot, plus its own rate limit. */
-bool cairn_uplink_scan_allowed(const cairn_uplink_t *u, const cairn_uplink_evidence_t *ev,
-                               uint32_t now_ms);
-const char *cairn_uplink_scan_blocker(const cairn_uplink_t *u, const cairn_uplink_evidence_t *ev,
-                                      uint32_t now_ms);
-
-/* True from the moment an abort is ordered until the slot or scan is reported finished.
- * A transfer's should_abort callback returns this, so one ordered abort stops every
- * bundle still queued in the slot, not only the one in flight. */
-bool cairn_uplink_abort_pending(const cairn_uplink_t *u);
-
-/* The radio is owned by exactly one of BLE and Wi-Fi at any moment. */
-bool cairn_uplink_ble_may_advertise(const cairn_uplink_t *u);
-bool cairn_uplink_wifi_may_run(const cairn_uplink_t *u);
-
-const char *cairn_uplink_state_name(cairn_uplink_state_t s);
 
 /* ── per-bundle delivery with fallback ────────────────────────────────────── */
 
@@ -244,7 +140,7 @@ typedef enum {
     CAIRN_XFER_RECEIPT = 0,    /* committed, and a receipt for this bundle came back */
     CAIRN_XFER_PARTIAL,        /* some chunks accepted; try again or elsewhere */
     CAIRN_XFER_FAILED,         /* nothing usable happened on this path */
-    CAIRN_XFER_ABORTED         /* the caller's abort fired (trip, slot limit) */
+    CAIRN_XFER_ABORTED         /* the caller's abort fired (trip start) */
 } cairn_xfer_result_t;
 
 typedef struct {
@@ -256,7 +152,7 @@ typedef struct {
     /*
      * Move one bundle on this path until a receipt is in hand, it fails, or `should_abort`
      * says stop. Resumes from the chunks the other side already holds (the offer returns
-     * the missing set), so a second path or a second slot never starts over. `receipt`
+     * the missing set), so a second path or a second attempt never starts over. `receipt`
      * receives the receipt bytes on CAIRN_XFER_RECEIPT; their meaning is the prune
      * callback's business, not this module's.
      */
@@ -282,8 +178,8 @@ typedef struct {
     void *prune_ctx;
 } cairn_uplink_io_t;
 
-/* Which paths to try for a bundle now, best first. Returns the count (0..3). BLE and
- * Wi-Fi are never both in the list: the radio is time-sliced. */
+/* Which paths to try for a bundle now, best first. Returns the count (0..2):
+ * BLE when a phone is connected, then LTE when the user allows whole bundles. */
 size_t cairn_uplink_path_order(const cairn_uplink_t *u, const cairn_uplink_evidence_t *ev,
                                cairn_path_t out[CAIRN_PATH_COUNT]);
 

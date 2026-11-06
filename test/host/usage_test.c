@@ -444,12 +444,11 @@ static bool row_alert_thresholds_and_paths(void)
     cairn_usage_report(&g_u, &g_now, false, &r);
     CHECK((r.alerts & CAIRN_ALERT_MONTHLY_REACHED), "no REACHED alert at the cap");
 
-    /* Wi-Fi and BLE are counted, separately, and never count against LTE caps. */
-    cairn_usage_record(&g_u, CAIRN_PATH_WIFI, 5000000, 1000, &g_now);
+    /* BLE is counted, separately, and never counts against LTE caps. (The retired
+     * Wi-Fi slot stays in the image layout but nothing records to it.) */
     cairn_usage_record(&g_u, CAIRN_PATH_BLE, 3000, 4000, &g_now);
     cairn_usage_note_sim_counters(&g_u, 111, 222);
     cairn_usage_report(&g_u, &g_now, false, &r);
-    CHECK(r.period_up[CAIRN_PATH_WIFI] == 5000000 && r.period_down[CAIRN_PATH_WIFI] == 1000, "wifi count");
     CHECK(r.period_up[CAIRN_PATH_BLE] == 3000 && r.day_down[CAIRN_PATH_BLE] == 4000, "ble count");
     CHECK(r.period_up[CAIRN_PATH_LTE] == 94000 + 0 + 0 + 0 || r.period_up[CAIRN_PATH_LTE] == 94000, "lte up %llu",
           (unsigned long long)r.period_up[CAIRN_PATH_LTE]);
@@ -535,7 +534,7 @@ static bool row_survives_clean_restart_via_kv(void)
     g_now.mono_s = 0;
     CHECK(cairn_usage_init(&g_u, NULL, &t, &g_now) == CAIRN_LOAD_FRESH, "fresh");
     CHECK(enable(&g_u, 1000000, 500000, 200000), "enable");
-    cairn_usage_record(&g_u, CAIRN_PATH_WIFI, 12345, 678, &g_now);
+    cairn_usage_record(&g_u, CAIRN_PATH_BLE, 12345, 678, &g_now);
     sim_t m;
     memset(&m, 0, sizeof(m));
     cairn_usage_reason_t why;
@@ -548,7 +547,7 @@ static bool row_survives_clean_restart_via_kv(void)
     CHECK(cairn_usage_init(&again, NULL, &t, &g_now) == CAIRN_LOAD_OK, "reload");
     CHECK(lte_period_total(&again) == air_total(&m), "LTE count %llu, carrier %llu", (unsigned long long)lte_period_total(&again),
           (unsigned long long)air_total(&m));
-    CHECK(again.period_bytes[CAIRN_PATH_WIFI][0] == 12345, "wifi count lost");
+    CHECK(again.period_bytes[CAIRN_PATH_BLE][0] == 12345, "ble count lost");
     CHECK(again.cfg.lte_enabled && again.cfg.monthly_cap_bytes == 1000000, "config lost");
 
     cairn_kv_end();
@@ -715,11 +714,11 @@ static bool row_flash_writes_batched(void)
     CHECK(writes > 100, "only %u writes: the bytes are not being persisted", writes);
     CHECK(writes * 3 < chunks, "%u writes for %llu chunks", writes, (unsigned long long)chunks);
 
-    /* Wi-Fi bulk transfers are uncapped and best-effort, so they flush rarely. */
+    /* BLE bulk transfers are uncapped and best-effort, so they flush rarely. */
     base = g_u.flash_writes;
-    for (int i = 0; i < 20000; i++) cairn_usage_record(&g_u, CAIRN_PATH_WIFI, 1460, 100, &g_now);   /* 31 MB */
-    uint32_t wifi_writes = g_u.flash_writes - base;
-    CHECK(wifi_writes <= 31000000u / t.batch_other_bytes + 2, "%u writes for 31 MB of Wi-Fi", wifi_writes);
+    for (int i = 0; i < 20000; i++) cairn_usage_record(&g_u, CAIRN_PATH_BLE, 1460, 100, &g_now);   /* 31 MB */
+    uint32_t ble_writes = g_u.flash_writes - base;
+    CHECK(ble_writes <= 31000000u / t.batch_other_bytes + 2, "%u writes for 31 MB of BLE", ble_writes);
 
     /* If writes fail, the margin no longer bounds the error, so the gate closes. */
     mem_reset();

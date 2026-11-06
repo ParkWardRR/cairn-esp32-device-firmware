@@ -1,4 +1,4 @@
-/* Running the uplink schedule against the real radios. See uplink_runner.h. */
+/* Running the uplink schedule against the real modem. See uplink_runner.h. */
 
 #include "uplink_runner.h"
 
@@ -14,17 +14,9 @@
 #include "lifecycle.h"
 #include "sensor_task.h"
 #include "sensors.h"
-#include "wifiscan_runner.h"
-#if CAIRN_WIFI_UPLINK || CAIRN_LTE_UPLINK
-#include "net_upload.h"
-#endif
-
-#if CAIRN_WIFI_UPLINK
-#include <WiFi.h>
-#include "wifi_link.h"
-#endif
 #if CAIRN_LTE_UPLINK
 #include "lte_link.h"
+#include "net_upload.h"
 #endif
 
 static const char *TAG = "UPLINK";
@@ -33,11 +25,11 @@ static cairn_uplink_t s_u;
 static bool           s_busy;
 
 /*
- * The state the abort check needs, captured when a slot starts.
+ * The state the abort check needs, captured when a send starts.
  *
  * It cannot consult the Lifecycle: the tick that would refresh it is the one
  * blocked on this transfer, so every field in there is frozen at the moment the
- * slot began — including the motion score that is supposed to stop it.
+ * send began — including the motion score that is supposed to stop it.
  */
 static struct {
     uint32_t started_ms;
@@ -63,7 +55,7 @@ static void gather(const Lifecycle *lc, cairn_uplink_evidence_t *ev)
     ev->trip_active     = (lc->capture != CaptureState::Idle);
     ev->parked          = parked_enough(lc);
     /* A bundle no session can open is not waiting to be sent (net_upload_unreadable_last). */
-#if CAIRN_WIFI_UPLINK || CAIRN_LTE_UPLINK
+#if CAIRN_LTE_UPLINK
     uint32_t unreadable = net_upload_unreadable_last();
 #else
     uint32_t unreadable = 0;
@@ -76,18 +68,16 @@ static void gather(const Lifecycle *lc, cairn_uplink_evidence_t *ev)
      * the bench and on a unit whose co-processor has not answered yet the
      * reading is the unavailable sentinel, and refusing to ever upload because
      * a voltage could not be read is the wrong direction — the caps and the
-     * slot bound are what actually protect the car's battery.
+     * send bound are what actually protect the car's battery.
      */
     ev->battery_ok = (lc->last_battery_mv == CAIRN_U16_UNKNOWN) ||
                      (lc->last_battery_mv >= CAIRN_UPLINK_BATTERY_FLOOR_MV);
 
     /*
      * Home is not asserted yet. The phone-asserted trigger is a field in a BLE
-     * contract that is not released, and the no-phone scan is Wi-Fi radio use
-     * that the schedule gates on its own rules. Until one of those exists, a
-     * Wi-Fi slot is driven by the configured network being reachable, which is
-     * what the bench proved; CAIRN_HOME_NONE keeps the manager honest about
-     * which trigger it actually had.
+     * contract that is not released; until it is wired, CAIRN_HOME_NONE keeps
+     * the manager honest about which trigger it actually had. Its only effect
+     * now is to hold LTE back when the phone says the car is home.
      */
     ev->home = CAIRN_HOME_NONE;
 
@@ -102,19 +92,6 @@ static void gather(const Lifecycle *lc, cairn_uplink_evidence_t *ev)
     ev->path[CAIRN_PATH_BLE].configured = true;
     ev->path[CAIRN_PATH_BLE].available  = ev->phone_connected;
     ev->path[CAIRN_PATH_BLE].allowed    = true;
-
-#if CAIRN_WIFI_UPLINK
-    /*
-     * Wi-Fi works when the BLE controller is fully deinited for the slot.
-     * ble_companion_radio_off() now calls NimBLEDevice::deinit(false) which
-     * stops the controller while keeping GATT objects alive, and radio_on()
-     * calls init() to bring it back. The WPA2 handshake that failed under
-     * coexistence succeeds with the controller down.
-     */
-    ev->path[CAIRN_PATH_WIFI].configured = true;
-    ev->path[CAIRN_PATH_WIFI].available  = true;
-    ev->path[CAIRN_PATH_WIFI].allowed    = true;
-#endif
 
 #if CAIRN_LTE_UPLINK
     ev->path[CAIRN_PATH_LTE].configured = true;
@@ -139,14 +116,14 @@ static bool should_abort(void *)
     uint32_t elapsed = millis() - s_slot.started_ms;
     if (elapsed >= s_slot.limit_ms) {
         s_slot.aborting = true;
-        s_slot.why      = "the slot limit";
+        s_slot.why      = "the send limit";
         return true;
     }
 
     /*
      * A rising supply rail is the earliest honest sign of an engine start, and
      * it is what the lifecycle itself latches a drive on. Checked against the
-     * value when the slot began so a unit sitting on a steady 12.6 V rail is
+     * value when the send began so a unit sitting on a steady 12.6 V rail is
      * not mistaken for one being started.
      */
     uint16_t supply = 0;
@@ -181,110 +158,6 @@ static void slot_begin(uint32_t limit_ms)
 
 /* ── the actions ──────────────────────────────────────────────────────────── */
 
-#if CAIRN_WIFI_UPLINK
-/*
- * Is the configured network in range?
- *
- * This is what makes a Wi-Fi slot possible at all. The schedule refuses to open
- * one unless home is established — by a phone assertion, which is an unreleased
- * BLE contract field, or by this scan. With neither, effective_home() is always
- * NONE and no slot ever starts, which is how a first attempt at this wiring
- * ended up with a transport that could never run.
- *
- * A scan is Wi-Fi radio use like any other, so BLE goes down for it, and the
- * manager rate-limits and bounds it (it runs only when parked with bundles
- * waiting, never during a trip, never with a phone connected).
- *
- * Only the configured SSID is looked for, and the result is a single bit. The
- * device learns nothing about where it is and stores no survey.
- */
-__attribute__((unused)) static bool run_home_scan(uint32_t max_ms)
-{
-    CAIRN_LOGI(TAG, "home scan: looking for the configured network");
-
-    ble_companion_radio_off();
-    WiFi.mode(WIFI_STA);
-
-    uint32_t t0 = millis();
-    int n = WiFi.scanNetworks(/*async=*/false, /*show_hidden=*/false);
-
-    /* The strongest of the network's access points: the join goes to that one. */
-    bool found = false;
-    int best = -1, aps = 0;
-    for (int i = 0; i < n; i++) {
-        if (WiFi.SSID(i) != CAIRN_WIFI_SSID) continue;
-        found = true;
-        aps++;
-        if (best < 0 || WiFi.RSSI(i) > WiFi.RSSI(best)) best = i;
-    }
-    if (best >= 0) {
-        wifi_link_prefer_ap(WiFi.BSSID(best), WiFi.channel(best));
-        CAIRN_LOGI(TAG, "home scan: %d access point(s) for the network; strongest on channel %d at %d dBm, auth %d",
-                   aps, (int)WiFi.channel(best), (int)WiFi.RSSI(best), (int)WiFi.encryptionType(best));
-    } else {
-        wifi_link_forget_ap();
-    }
-
-    WiFi.scanDelete();
-    WiFi.mode(WIFI_OFF);
-    ble_companion_radio_on();
-
-    CAIRN_LOGI(TAG, "home scan: %s after %u ms (%d network(s) seen, bound %u ms)",
-               found ? "FOUND the configured network" : "not at home",
-               (unsigned)(millis() - t0), n, (unsigned)max_ms);
-    return found;
-}
-
-static void run_wifi_slot(Lifecycle *lc, uint8_t slot_no, uint32_t limit_ms)
-{
-    CAIRN_LOGI(TAG, "Wi-Fi slot %u: up to %u ms", (unsigned)slot_no,
-               (unsigned)limit_ms);
-
-    cairn_slot_result_t r;
-    memset(&r, 0, sizeof(r));
-
-    slot_begin(limit_ms);
-    s_busy = true;
-
-    /*
-     * One radio. BLE goes down first and comes back up after, and the phone has
-     * already been told (the announce action ran before this one).
-     */
-    ble_companion_radio_off();
-
-    uint32_t t0 = millis();
-    if (wifi_link_connect(CAIRN_UPLINK_ASSOCIATE_MS)) {
-        wifi_link_result_t w;
-        wifi_link_upload_pending(CAIRN_UPLINK_BUNDLES_PER_SLOT, should_abort,
-                                 nullptr, &w);
-        wifi_link_disconnect();
-
-        r.committed = w.delivered;
-        r.failed    = w.failed + w.retained + w.refused;
-        r.bytes     = w.bytes_up;
-    } else {
-        /* Could not associate: nothing attempted, and the manager's backoff is
-         * what keeps this from being retried immediately. */
-        r.failed = 1;
-    }
-    r.ms = millis() - t0;
-
-    if (s_slot.aborting) {
-        r.aborted_by = CAIRN_UL_REASON_TRIP;
-        CAIRN_LOGI(TAG, "slot %u aborted: %s", (unsigned)slot_no,
-                   s_slot.why ? s_slot.why : "unspecified");
-    }
-
-    ble_companion_radio_on();
-    s_busy = false;
-
-    cairn_uplink_slot_finished(&s_u, &r, millis());
-
-    /* The count on the card changed; let the next tick see it promptly. */
-    lc->next_pending_check_ms = millis();
-}
-#endif
-
 #if CAIRN_LTE_UPLINK
 static void run_lte_send(Lifecycle *lc)
 {
@@ -295,14 +168,14 @@ static void run_lte_send(Lifecycle *lc)
 
     /* LTE has its own radio and its own antenna, so BLE is left up: the phone
      * can stay connected throughout, and the modem's attach is unaffected by
-     * the 2.4 GHz side. That is also why LTE succeeded on a bundle Wi-Fi lost. */
+     * the 2.4 GHz side. */
     bool ok = false;
     cairn_lte_status_t st = lte_link_up();
     if (st == CAIRN_LTE_OK) {
         /*
          * Record what the network says the time is, while the modem is up.
          *
-         * This slot runs parked, after the trip's bundle has sealed, so the
+         * This send runs parked, after the trip's bundle has sealed, so the
          * observation cannot date the bundle about to be uploaded -- it lands in
          * the pre-roll and is written into the *next* capture, which means the
          * next trip is dated from its first frame instead of waiting on a GNSS
@@ -348,48 +221,18 @@ void uplink_runner_begin(void)
     cairn_uplink_config_t cfg;
     cairn_uplink_config_defaults(&cfg);
 
-    /*
-     * The defaults are placeholders the module's own documentation says must
-     * come from measurement (issue #19). Two are now measured rather than
-     * guessed: cellular moves about 3 KB/s on this hardware, so a bundle of
-     * around 230 KB needs roughly 80 seconds and a slot shorter than that would
-     * never finish one.
-     */
-    cfg.slot_max_ms      = CAIRN_UPLINK_SLOT_MAX_MS;
     cfg.lte_after_trip_ms = CAIRN_UPLINK_LTE_AFTER_TRIP_MS;
-    cfg.lte_auto         = true;
+    cfg.lte_auto          = true;
 
     cairn_uplink_init(&s_u, &cfg);
 
-    CAIRN_LOGI(TAG, "uplink schedule armed: slot %u ms, %u bundle(s) per slot, "
-                    "LTE %s, %u ms after a trip",
-               (unsigned)cfg.slot_max_ms,
+    CAIRN_LOGI(TAG, "uplink schedule armed: %u bundle(s) per send, LTE %s, %u ms after a trip",
                (unsigned)CAIRN_UPLINK_BUNDLES_PER_SLOT,
                cfg.lte_auto ? "automatic" : "manual",
                (unsigned)cfg.lte_after_trip_ms);
 }
 
 bool uplink_runner_busy(void) { return s_busy; }
-
-bool uplink_runner_owns_wifi(void)
-{
-    return s_busy || cairn_uplink_wifi_may_run(&s_u);
-}
-
-/*
- * The other half of the radio-ownership guard. A position scan runs asynchronously
- * across lifecycle ticks, so one may be in flight when the schedule decides to use
- * Wi-Fi: it is stopped and the radio put back to WIFI_OFF before the uplink touches it.
- * The scan is the one that yields because it has no deadline and loses only one
- * reading; a slot that waited would be holding a parked car's bundles for it.
- *
- * LTE does not use Wi-Fi, but an LTE send blocks this task for up to its limit, and a
- * scan left running underneath would complete unattended and be read minutes late.
- */
-static void take_radio_from_scanner(const char *why)
-{
-    if (wifiscan_runner_busy()) wifiscan_runner_cancel(why);
-}
 
 void uplink_runner_tick(Lifecycle *lc)
 {
@@ -402,90 +245,13 @@ void uplink_runner_tick(Lifecycle *lc)
     case CAIRN_UL_ACT_NONE:
         break;
 
-    case CAIRN_UL_ACT_ANNOUNCE_SLOT:
-        /*
-         * The wire format for this is an unreleased field in the BLE contract,
-         * so there is nothing to send yet. Reported as done rather than left
-         * pending: the alternative is a schedule that never advances, and the
-         * cost of not announcing is a phone that treats the disconnect as a
-         * failure, not lost data.
-         */
-        CAIRN_LOGI(TAG, "slot %u pending; the announce field is not in the "
-                        "released BLE contract, so the phone is not told",
-                   (unsigned)a.slot_no);
-        cairn_uplink_slot_announced(&s_u);
-        break;
-
-    case CAIRN_UL_ACT_START_WIFI_SLOT:
-        take_radio_from_scanner("an uplink Wi-Fi slot is starting");
-#if CAIRN_WIFI_UPLINK
-        cairn_uplink_slot_started(&s_u, millis());
-        run_wifi_slot(lc, a.slot_no, a.max_ms ? a.max_ms : CAIRN_UPLINK_SLOT_MAX_MS);
-#else
-        /* No Wi-Fi in this build: report the slot finished with nothing done so
-         * the manager backs off instead of asking again every tick. */
-        cairn_uplink_slot_started(&s_u, millis());
-        {
-            cairn_slot_result_t r;
-            memset(&r, 0, sizeof(r));
-            r.failed = 1;
-            cairn_uplink_slot_finished(&s_u, &r, millis());
-        }
-#endif
-        break;
-
-    case CAIRN_UL_ACT_ABORT_SLOT:
-    case CAIRN_UL_ACT_FORCE_RADIO_OFF:
-        /*
-         * Reached only if a slot is somehow still believed to be running after
-         * run_wifi_slot returned — it reports the slot finished itself, so the
-         * manager normally has nothing to abort. Cutting the radio is still the
-         * right response: the invariant is that Wi-Fi is down whenever BLE is
-         * meant to be up.
-         */
-        CAIRN_LOGW(TAG, "radio forced off by the schedule");
-        take_radio_from_scanner("the uplink forced the radio off");
-#if CAIRN_WIFI_UPLINK
-        wifi_link_disconnect();
-#endif
-        ble_companion_radio_on();
-        {
-            cairn_slot_result_t r;
-            memset(&r, 0, sizeof(r));
-            r.aborted_by = a.reason;
-            cairn_uplink_slot_finished(&s_u, &r, millis());
-        }
-        break;
-
-    case CAIRN_UL_ACT_CHECKIN:
-        /* Same as the announce: the check-in message is contract surface that
-         * is not released. The state transition still has to happen. */
-        cairn_uplink_checkin_done(&s_u, millis());
-        break;
-
-    case CAIRN_UL_ACT_SCAN_HOME:
-        take_radio_from_scanner("the uplink's home scan is starting");
-        cairn_uplink_scan_started(&s_u, millis());
-#if CAIRN_WIFI_UPLINK
-        {
-            bool found = run_home_scan(a.max_ms ? a.max_ms : 5000);
-            cairn_uplink_scan_done(&s_u, found, millis());
-        }
-#else
-        /* No Wi-Fi in this build, so there is no network to look for and nothing may touch the
-         * radio. Reported as "not found" rather than left pending: the schedule has to advance,
-         * and with home unknown it stops asking for slots, which is the point. The same shape as
-         * the START_WIFI_SLOT arm above. */
-        cairn_uplink_scan_done(&s_u, false, millis());
-#endif
-        break;
-
     case CAIRN_UL_ACT_LTE_SEND:
-        take_radio_from_scanner("an LTE send will block the controller");
 #if CAIRN_LTE_UPLINK
         cairn_uplink_lte_started(&s_u);
         run_lte_send(lc);
 #else
+        /* No LTE in this build: report the send finished with nothing done so
+         * the manager spaces its retries instead of asking again every tick. */
         cairn_uplink_lte_started(&s_u);
         cairn_uplink_lte_finished(&s_u, false, millis());
 #endif
