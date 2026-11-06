@@ -407,6 +407,13 @@ static bool build_gatt_and_advertise(void)
 {
     NimBLEDevice::init(CAIRN_BLE_NAME);
     NimBLEDevice::setMTU(185);
+    /* +9 dBm, the radio's maximum, up from the ~+3 default. The link budget is
+     * spent on a dongle buried at a footwell OBD port transmitting through car
+     * bodywork — bench RSSI from a Mac across the room reads -76..-82 dBm, and
+     * SMP at that level failed where an iPhone at arm's length paired 5/5. The
+     * power cost is bounded by the radio's duty cycle, which the advertising
+     * interval and connection latency already keep low. */
+    NimBLEDevice::setPower(9);
 
     /* Dev build: Just Works (SC without MITM). Encryption still negotiates, so the
      * READ_ENC/WRITE_ENC characteristics still work, but macOS does not need to accept a
