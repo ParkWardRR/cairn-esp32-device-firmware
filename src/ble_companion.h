@@ -14,9 +14,12 @@ extern "C" {
 bool ble_companion_begin(void);
 bool ble_companion_connected(void);
 
-void ble_companion_radio_off(void);
-void ble_companion_radio_on(void);
+/* Standby: BLE must be fully down before light sleep, and rebuilt on wake. */
+void ble_companion_stop(void);
+void ble_companion_start(void);
 void ble_companion_clear_bonds(void);
+/* Offload busy edges: tighten the connection for throughput, relax it after. */
+void ble_companion_conn_burst(bool active);
 /* Tells the BLE layer whether a trip is recording, so a failed pairing knows whether it may
  * recover a stale bond. Safe to call every loop. */
 void ble_companion_set_trip_active(bool active);
@@ -35,9 +38,10 @@ bool ble_companion_phone_charging(void);
 
 static inline bool ble_companion_begin(void) { return true; }
 static inline bool ble_companion_connected(void) { return false; }
-static inline void ble_companion_radio_off(void) {}
-static inline void ble_companion_radio_on(void) {}
+static inline void ble_companion_stop(void) {}
+static inline void ble_companion_start(void) {}
 static inline void ble_companion_clear_bonds(void) {}
+static inline void ble_companion_conn_burst(bool a) { (void)a; }
 static inline void ble_companion_set_trip_active(bool a) { (void)a; }
 static inline int  ble_companion_bond_count(void) { return 0; }
 static inline void ble_companion_notify_quality(uint8_t a, uint8_t b,

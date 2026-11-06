@@ -374,6 +374,35 @@
 #define CAIRN_PHONE_GNSS_STALE_MS 3000
 #endif
 
+/*
+ * Connection parameters, requested by this peripheral once the link is
+ * encrypted. The app deliberately sets none (its plan D2), so these are the
+ * firmware's to own — and before it owned them, iOS's defaults (short
+ * supervision timeout) killed every bench link at ~21 s with HCI reason 520
+ * once RSSI sat near -80 dBm. Units: interval ×1.25 ms, timeout ×10 ms.
+ *
+ * Idle: 30-50 ms with slave latency 4 — the companion traffic is 1 Hz fixes
+ * and notifies, so the radio may skip 4 events when it has nothing to say.
+ * Burst (an offload in progress): 15-30 ms, no latency, for throughput.
+ * Both ask for a 6 s supervision timeout: a weak link through a car's body
+ * work gets to ride out fades instead of dying on the spot.
+ */
+#define CAIRN_BLE_CONN_ITVL_MIN   24
+#define CAIRN_BLE_CONN_ITVL_MAX   40
+#define CAIRN_BLE_CONN_LATENCY     4
+#define CAIRN_BLE_CONN_TIMEOUT   600
+#define CAIRN_BLE_BURST_ITVL_MIN  12
+#define CAIRN_BLE_BURST_ITVL_MAX  24
+
+/*
+ * Advertising interval, ×0.625 ms: 152.5-211.25 ms, both values from Apple's
+ * accessory guidelines so iOS background scans latch quickly. The previous
+ * build left NimBLE's fast default running forever, which is a radio duty
+ * cycle the parked battery pays for.
+ */
+#define CAIRN_BLE_ADV_ITVL_MIN  244
+#define CAIRN_BLE_ADV_ITVL_MAX  338
+
 /* ── hand-off policy ──────────────────────────────────────────────────────── */
 
 /*

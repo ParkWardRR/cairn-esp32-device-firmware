@@ -1275,7 +1275,7 @@ static void maybe_standby(Lifecycle *lc)
 
     lc->last_standby_blocker = nullptr;
 
-    ble_companion_radio_off();
+    ble_companion_stop();
 
     emit_transition(lc, CAIRN_REGION_HEALTH, CAIRN_POWER_STATE_AWAKE,
                     CAIRN_POWER_STATE_STANDBY, CAIRN_TRIGGER_POWER, 0);
@@ -1367,7 +1367,7 @@ static void maybe_standby(Lifecycle *lc)
         emit_trip_event(lc, CAIRN_EVENT_HARSH_MOTION, "engine start detected");
     }
 
-    ble_companion_radio_on();
+    ble_companion_start();
 }
 
 /*

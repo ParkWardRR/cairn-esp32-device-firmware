@@ -32,7 +32,7 @@ static NimBLECharacteristic *s_chr_status  = nullptr;
 static NimBLEServer         *s_server      = nullptr;
 
 static volatile bool s_connected = false;
-static volatile bool s_radio_off = false;
+static volatile bool s_stopped   = false; /* BLE stack down for standby */
 static uint16_t      s_conn_handle = 0xFFFF;
 
 static uint16_t s_last_accepted_seq = 0;
@@ -257,13 +257,17 @@ class ServerCallbacks : public NimBLEServerCallbacks {
             reason == BLE_HS_EENCRYPT_KEY_SZ;
 
         if (peer_lost_keys && NimBLEDevice::getNumBonds() > 0) {
+            /* Only THIS peer's bond. With several drivers bonded (MAX_BONDS=4),
+             * one phone being restored or told to forget the dongle must not
+             * evict the household's other phones. */
             CAIRN_LOGW(TAG, "the peer could not decrypt the link (reason %d): it "
                             "has forgotten this device. Dropping our stale bond "
-                            "so the next connection can pair cleanly.", reason);
-            ble_companion_clear_bonds();
+                            "for this peer so the next connection can pair cleanly.",
+                       reason);
+            NimBLEDevice::deleteBond(info.getIdAddress());
         }
 
-        if (!s_radio_off)
+        if (!s_stopped)
             NimBLEDevice::startAdvertising();
     }
 
@@ -303,13 +307,31 @@ class ServerCallbacks : public NimBLEServerCallbacks {
                        (unsigned)info.getMTU(),
                        cairn_ble_pair_failure_reason(action));
 
-            if (action == CAIRN_BLE_DROP) ble_companion_clear_bonds();
+            /* Per-peer, same reason as the disconnect path: recovering from a
+             * stale bond with one phone must not log the other drivers out. A
+             * stranger with no bond makes this a no-op, which is even narrower
+             * than the clear-all the blesec guards were written against. */
+            if (action == CAIRN_BLE_DROP)
+                NimBLEDevice::deleteBond(info.getIdAddress());
 
             s_server->disconnect(info.getConnHandle());
             return;
         }
         CAIRN_LOGI(TAG, "paired: encrypted=%d bonded=%d",
                    info.isEncrypted(), info.isBonded());
+
+        /*
+         * The link is encrypted and about to be used; take ownership of the
+         * connection parameters (config.h). Requested here rather than in
+         * onConnect because a parameter request during the pairing dance is
+         * exactly the kind of collision iOS answers with a disconnect; by
+         * authentication-complete the link is quiet.
+         */
+        s_server->updateConnParams(info.getConnHandle(),
+                                   CAIRN_BLE_CONN_ITVL_MIN,
+                                   CAIRN_BLE_CONN_ITVL_MAX,
+                                   CAIRN_BLE_CONN_LATENCY,
+                                   CAIRN_BLE_CONN_TIMEOUT);
     }
 };
 
@@ -375,9 +397,10 @@ void ble_companion_clear_bonds(void)
 /*
  * Build the GATT server and start advertising.
  *
- * Separate from ble_companion_begin so a Wi-Fi slot can tear the whole BLE
- * stack down and this can put it back. Everything it touches -- the server, the
- * service, every characteristic pointer -- is recreated here, because
+ * Separate from ble_companion_begin so standby can tear the whole BLE stack
+ * down (classic ESP32 light sleep and a live BT controller do not mix) and
+ * wake can put it back. Everything it touches -- the server, the service,
+ * every characteristic pointer -- is recreated here, because
  * NimBLEDevice::deinit frees all of it.
  */
 static bool build_gatt_and_advertise(void)
@@ -396,7 +419,9 @@ static bool build_gatt_and_advertise(void)
     NimBLEDevice::setSecurityIOCap(io_cap);
     NimBLEDevice::setSecurityPasskey(CAIRN_BLE_PASSKEY);
 
-    /* NimBLE persists bonds in NVS (CONFIG_BT_NIMBLE_MAX_BONDS=1). A reflash that changed the
+    /* NimBLE persists bonds in NVS (CONFIG_BT_NIMBLE_MAX_BONDS=4: one slot per
+     * driver's phone, with one spare; a fifth pairing evicts the oldest bond,
+     * which is NimBLE's round-robin default). A reflash that changed the
      * passkey or the auth mode leaves a bond keyed to the old secret, which macOS tries to
      * re-encrypt with before any dialog, so the pair fails before the user is prompted: clear
      * bonds when (and only when) the pairing configuration changed. */
@@ -409,7 +434,7 @@ static bool build_gatt_and_advertise(void)
      * s_server_cbs is a static, not a heap allocation. The default is `true`, and
      * ~NimBLEServer() honours it, so deinit(true) ran `delete` on a pointer into .bss and the
      * heap assert fired: "free() target pointer is outside heap areas", then a panic loop.
-     * That is the whole of why deinit(true) "crashed" before and why radio_on() was left
+     * That is the whole of why deinit(true) "crashed" before and why the restart path was left
      * re-initing the host without rebuilding the GATT server (#71).
      *
      * Only the server does this. ~NimBLECharacteristic() deletes its descriptors but never its
@@ -493,6 +518,11 @@ static bool build_gatt_and_advertise(void)
     adv->addServiceUUID("A8E30000-4F5B-11EF-A017-325096B39F47");
     adv->setName(CAIRN_BLE_NAME);
     adv->enableScanResponse(true);
+    /* Apple-aligned interval (config.h): background scans still latch inside a
+     * second or two, and the parked radio duty cycle drops several-fold against
+     * NimBLE's fast default. */
+    adv->setMinInterval(CAIRN_BLE_ADV_ITVL_MIN);
+    adv->setMaxInterval(CAIRN_BLE_ADV_ITVL_MAX);
 
     /* Checked, because the phone scans *filtered by the service UUID* — it has to, to scan in
      * the background — so an advertisement that fails to carry the UUID is not a degraded link,
@@ -557,29 +587,54 @@ bool ble_companion_begin(void)
 }
 
 /*
- * Give Wi-Fi the quiet it needs for a slot.
+ * Tighten or relax the connection parameters around an offload.
+ *
+ * Called from the offload task on its busy edges. A transfer wants short
+ * intervals and no slave latency; the idle companion traffic (1 Hz fixes,
+ * occasional notifies) wants the radio allowed to doze. Both keep the long
+ * supervision timeout — throughput is negotiable, the link surviving a fade
+ * is not.
+ */
+void ble_companion_conn_burst(bool active)
+{
+    if (!s_connected || s_conn_handle == 0xFFFF || s_server == nullptr) return;
+    if (active) {
+        s_server->updateConnParams(s_conn_handle,
+                                   CAIRN_BLE_BURST_ITVL_MIN, CAIRN_BLE_BURST_ITVL_MAX,
+                                   0, CAIRN_BLE_CONN_TIMEOUT);
+    } else {
+        s_server->updateConnParams(s_conn_handle,
+                                   CAIRN_BLE_CONN_ITVL_MIN, CAIRN_BLE_CONN_ITVL_MAX,
+                                   CAIRN_BLE_CONN_LATENCY, CAIRN_BLE_CONN_TIMEOUT);
+    }
+}
+
+/*
+ * Stop BLE for standby. Classic ESP32 light sleep with the BT controller live
+ * is not supported, so the stack comes down before the first
+ * esp_light_sleep_start() and goes back up on wake.
  *
  * deinit(true), and the whole GATT server with it. That looks heavier than it needs to be, and
  * the lighter version was wrong in a way that cost a day of bench time (#71):
  *
- * deinit(false) keeps every GATT object allocated, so radio_on() only had to re-init the host
+ * deinit(false) keeps every GATT object allocated, so the restart only had to re-init the host
  * and start advertising again. But nimble_port_deinit() clears the *host's* attribute table,
  * and the retained NimBLEServer still has `m_gattsStarted == true` — deinit(false) does not
  * reset it. NimBLEServer::start() returns early on that flag, so there was no way to get the
  * services registered with the new host at all. The dongle came back advertising an empty
  * payload with no service UUID and no GATT database behind it: a central scanning for the
  * service could never match it, and one connecting by a remembered address found nothing. It
- * stayed that way until the next reboot, and a slot opens within ten seconds of every boot.
+ * stayed that way until the next reboot.
  *
  * So the objects have to go and be rebuilt. deinit(true) was tried before this and crashed —
  * "the next BLE scan hit InstrFetchProhibited at PC 0" — because the five static pointers to
  * freed GATT objects were still live. They are all nulled below, and every use of each of them
  * is already guarded on non-null, which is what makes this safe now and did not before.
  */
-void ble_companion_radio_off(void)
+void ble_companion_stop(void)
 {
-    if (s_radio_off) return;
-    s_radio_off = true;
+    if (s_stopped) return;
+    s_stopped = true;
 
     if (s_connected && s_conn_handle != 0xFFFF && s_server != nullptr) {
         s_server->disconnect(s_conn_handle);
@@ -594,23 +649,23 @@ void ble_companion_radio_off(void)
     s_chr_status  = nullptr;
     ble_offload_forget_characteristics();
 
-    CAIRN_LOGI(TAG, "BLE stack deinited for a Wi-Fi slot");
+    CAIRN_LOGI(TAG, "BLE stack deinited for standby");
 }
 
-void ble_companion_radio_on(void)
+void ble_companion_start(void)
 {
-    if (!s_radio_off) return;
-    s_radio_off = false;
+    if (!s_stopped) return;
+    s_stopped = false;
 
-    /* The same path the boot takes. Its own comment has always said it is "separate from
-     * ble_companion_begin so a Wi-Fi slot can tear the whole BLE stack down and this can put it
-     * back"; until #71 it was never actually called here. */
+    /* The same path the boot takes. The phone expects the dongle advertising
+     * within moments of any wake; a wake that cannot advertise is logged as
+     * exactly that. */
     if (build_gatt_and_advertise()) {
         CAIRN_LOGI(TAG, "BLE stack rebuilt, advertising as '%s'", CAIRN_BLE_NAME);
     } else {
         /* Logged loudly rather than swallowed: the old code announced "advertising resumed"
          * unconditionally, which is the line anyone debugging this would have trusted. */
-        CAIRN_LOGE(TAG, "BLE stack could not be rebuilt after a Wi-Fi slot; the dongle is "
+        CAIRN_LOGE(TAG, "BLE stack could not be rebuilt after standby; the dongle is "
                         "not advertising and only a reboot will fix it");
     }
 }

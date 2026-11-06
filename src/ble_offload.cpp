@@ -9,6 +9,7 @@
 #include <freertos/task.h>
 #include <string.h>
 
+#include "ble_companion.h"
 #include "boot_timing.h"
 #include "cairn_log.h"
 #include "cairn_offload.h"
@@ -130,7 +131,14 @@ static void offload_task(void *)
             for (int more = 0; more < 8 && xQueueReceive(s_queue, &ev, 0) == pdTRUE; more++) handle(ev);
         }
         cairn_offload_pump(&s_offload);
-        s_busy = cairn_offload_busy(&s_offload);
+        bool busy = cairn_offload_busy(&s_offload);
+        if (busy != s_busy) {
+            s_busy = busy;
+            /* Short intervals while a transfer runs, dozy ones after. Done on
+             * the edge, not per pump: a parameter request is an HCI procedure,
+             * not something to spam at the controller 40 times a second. */
+            ble_companion_conn_burst(busy);
+        }
     }
 }
 
@@ -179,9 +187,9 @@ void ble_offload_forget_characteristics(void)
 
 bool ble_offload_register(NimBLEService *svc)
 {
-    /* Called again after every Wi-Fi slot, because the GATT server is now rebuilt from scratch
+    /* Called again after every standby wake, because the GATT server is rebuilt from scratch
      * each time. The queue and the task must be created once and only once — a 12 KB task per
-     * slot would exhaust the heap within minutes — but the characteristics belong to the new
+     * wake would exhaust the heap — but the characteristics belong to the new
      * service object and have to be recreated every time. */
     static bool once = false;
 
