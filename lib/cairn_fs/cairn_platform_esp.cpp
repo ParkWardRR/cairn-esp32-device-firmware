@@ -21,7 +21,8 @@ void cairn_rng_fill(uint8_t *out, size_t len) { esp_fill_random(out, len); }
 void cairn_hw_unique_id(uint8_t out[6])
 {
     /* The efuse MAC is burned at manufacture, so it survives an NVS wipe and a
-     * firmware replacement. */
+     * firmware replacement. ESP_MAC_WIFI_STA is merely ESP-IDF's name for the
+     * base eFuse MAC; reading it does not touch the (deleted) Wi-Fi stack. */
     esp_read_mac(out, ESP_MAC_WIFI_STA);
 }
 

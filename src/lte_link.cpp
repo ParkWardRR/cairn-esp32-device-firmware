@@ -25,6 +25,8 @@
 
 static const char *TAG = "LTE";
 
+/* "altanwifi" is the carrier's APN string for this SIM (EIOTCLUB, North
+ * America row) — a cellular setting; nothing to do with the deleted Wi-Fi. */
 #ifndef CAIRN_LTE_APN
 #define CAIRN_LTE_APN "altanwifi"
 #endif

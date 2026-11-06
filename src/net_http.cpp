@@ -11,17 +11,6 @@ static const char *TAG = "HTTP";
 
 /* ── reading ──────────────────────────────────────────────────────────────── */
 
-/*
- * An abort check for the body reads of cairn_http_request, which may run for tens
- * of seconds over LTE. Set only for the duration of that call, on the one task that
- * does uploads; the intake flow polls its own abort check between requests and
- * leaves this unset.
- */
-static bool (*s_abort_fn)(void *);
-static void *s_abort_ctx;
-
-static bool aborting(void) { return s_abort_fn != NULL && s_abort_fn(s_abort_ctx); }
-
 /* One CRLF-terminated line, without the terminator. Returns false on timeout
  * or a closed socket. */
 static bool read_line(Client *c, char *out, size_t cap, uint32_t deadline)
@@ -54,7 +43,6 @@ static bool read_exact(Client *c, uint8_t *out, size_t len, uint32_t deadline)
 
     while (got < len) {
         if ((int32_t)(millis() - deadline) >= 0) return false;
-        if (aborting()) return false;
 
         int avail = c->available();
         if (avail <= 0) {
@@ -375,30 +363,6 @@ void cairn_http_as_intake(cairn_http_t *h, cairn_intake_http_t *out)
     out->write  = http_write;
     out->finish = http_finish;
     out->close  = http_close;
-}
-
-bool cairn_http_request(cairn_http_t *h, const char *method, const char *path,
-                        const char *content_type, const char *extra_header,
-                        const uint8_t *body, size_t body_len,
-                        int *status, uint8_t *resp, size_t resp_cap, size_t *resp_len,
-                        uint32_t timeout_ms, bool (*should_abort)(void *), void *abort_ctx)
-{
-    *status = 0;
-    *resp_len = 0;
-    if (!http_begin_typed(h, method, path, content_type, extra_header, body_len)) return false;
-    if (body_len > 0 && !http_write(h, body, body_len)) {
-        h->request_open = false;
-        return false;
-    }
-    s_abort_fn  = should_abort;
-    s_abort_ctx = abort_ctx;
-    bool ok = http_finish_within(h, status, resp, resp_cap, resp_len, timeout_ms);
-    s_abort_fn  = NULL;
-    s_abort_ctx = NULL;
-    /* Stopped part-way, the socket holds the rest of a body: it cannot be reused. */
-    if (!ok) h->must_reconnect = true;
-    h->request_open = false;
-    return ok;
 }
 
 void cairn_http_disconnect(cairn_http_t *h)

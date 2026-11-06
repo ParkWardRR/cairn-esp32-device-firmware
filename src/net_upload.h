@@ -1,19 +1,19 @@
 /*
- * Uploading the pending bundles over whichever link is up.
+ * Uploading the pending bundles over the network link.
  *
- * Wi-Fi and LTE differ in how a byte leaves the dongle and in nothing else, so
- * this owns everything above that: walking the card, reading each bundle,
- * driving lib/cairn_intake, and putting the receipt through the prune gate. The
- * two link files bring a Client up and hand it over.
+ * The link differs only in how a byte leaves the dongle, so this owns
+ * everything above that: walking the card, reading each bundle, driving
+ * lib/cairn_intake, and putting the receipt through the prune gate. The link
+ * file (lte_link.cpp) brings a Client up and hands it over. (It was written
+ * for two links — Wi-Fi mTLS and LTE — and the Wi-Fi one was deleted with the
+ * rest of the Wi-Fi stack; the split survives because it is the right shape,
+ * not because a second link remains.)
  *
  * It also owns the buffers, and that is not incidental. Each transport used to
  * hold its own cairn_bundle_t, HTTP state, scratch and receipt buffer, and once
  * both were in one image the static DRAM segment overflowed by 65 KB — the
- * build failed at link time. The schedule in lib/cairn_uplink never runs a
- * Wi-Fi slot and an LTE send at once (one radio, time-sliced; LTE is a separate
- * modem but still a separate action), so one set of buffers is not a compromise
- * but the accurate expression of that: the sharing is enforced by there being
- * only one, rather than asserted in a comment.
+ * build failed at link time. One set of buffers is the accurate expression of
+ * one upload running at a time.
  */
 
 #ifndef CAIRN_NET_UPLOAD_H
@@ -38,7 +38,7 @@ typedef struct {
 /*
  * Upload up to `max_bundles` bundles through `client`, which must already be
  * connected-capable (the HTTP layer connects it). `label` names the path in the
- * log so a line is attributable to Wi-Fi or LTE without guessing.
+ * log so a line is attributable without guessing.
  *
  * A bundle is pruned only when the server's receipt verifies against the key
  * pinned in firmware AND names that bundle's own content root. Every other
@@ -56,9 +56,10 @@ void net_upload_pending(Client *client, const char *host, uint16_t port,
 /*
  * Bundles the last session found it could not open. They stay on the card (only a
  * receipt deletes) but no session can send them, so the uplink does not count them as
- * waiting: a card whose only bundle had a manifest that does not decode opened a Wi-Fi
- * slot every few minutes that sent nothing (bench, 2026-10-26). A new bundle raises the
- * pending count above this and a session recounts.
+ * waiting: a card whose only bundle had a manifest that does not decode opened an
+ * upload session every few minutes that sent nothing (bench, 2026-10-26, back when the
+ * firmware still had Wi-Fi slots). A new bundle raises the pending count above this
+ * and a session recounts.
  */
 uint32_t net_upload_unreadable_last(void);
 

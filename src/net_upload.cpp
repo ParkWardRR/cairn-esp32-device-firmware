@@ -2,7 +2,7 @@
 
 #include "net_upload.h"
 
-#if CAIRN_WIFI_UPLINK || CAIRN_LTE_UPLINK
+#if CAIRN_LTE_UPLINK
 
 #include <Arduino.h>
 #include <esp_heap_caps.h>
@@ -16,7 +16,6 @@
 #include "cairn_prune.h"
 #include "cairn_store.h"
 #include "config.h"
-#include "gnss_hint.h"
 #include "net_http.h"
 
 static const char *TAG = "UPLOAD";
@@ -128,8 +127,6 @@ void net_upload_pending(Client *client, const char *host, uint16_t port,
     out->considered = found;
     if (found == 0) {
         CAIRN_LOGI(TAG, "[%s] nothing waiting on the card", label);
-        /* A session with no bundles may still be due the anchor table. */
-        gnss_hint_sync(&s_http, label, should_abort, abort_ctx);
         cairn_http_disconnect(&s_http);
         return;
     }
@@ -223,15 +220,6 @@ void net_upload_pending(Client *client, const char *host, uint16_t port,
         cairn_bundle_close(s_bundle);
     }
 
-    /*
-     * The anchor table rides the connection the bundles opened, after them, so it never
-     * delays a bundle and costs no handshake of its own; it is fetched only when the
-     * card's copy is missing or a day old, and the slot's abort (trip start, slot limit)
-     * stops it like a chunk (src/gnss_hint.cpp). Not after a bundle failed on the link:
-     * a session that is struggling should end, not spend its last seconds on this.
-     */
-    if (out->failed == 0) gnss_hint_sync(&s_http, label, should_abort, abort_ctx);
-
     cairn_http_disconnect(&s_http);
     out->ms = millis() - t0;
     s_unreadable_last = out->unreadable;
@@ -244,4 +232,4 @@ void net_upload_pending(Client *client, const char *host, uint16_t port,
                (unsigned)out->bytes_down, (unsigned)out->ms);
 }
 
-#endif /* CAIRN_WIFI_UPLINK || CAIRN_LTE_UPLINK */
+#endif /* CAIRN_LTE_UPLINK */

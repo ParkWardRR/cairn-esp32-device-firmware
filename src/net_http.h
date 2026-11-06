@@ -1,10 +1,11 @@
 /*
  * HTTP/1.1 over an Arduino Client, shaped as a cairn_intake_http_t.
  *
- * This is the half of the network path that is the same for Wi-Fi and LTE. The
- * two differ only in what Client they hand over — WiFiClientSecure in one case,
- * mbedTLS over a modem socket in the other — so the request framing, the
- * response parsing and the connection reuse live here once.
+ * This is the half of the network path that does not care what carries the
+ * bytes: the link hands over a Client (mbedTLS over a modem socket), and the
+ * request framing, the response parsing and the connection reuse live here
+ * once. (It served the deleted Wi-Fi uplink through the same interface, which
+ * is why it takes a Client rather than the modem directly.)
  *
  * Connection reuse is the point worth stating. A bundle is one offer, one
  * commit and up to CAIRN_MAX_CHUNKS chunk PUTs, so around thirty requests. A
@@ -53,21 +54,6 @@ void cairn_http_init(cairn_http_t *h, Client *client, const char *host, uint16_t
 
 /* Fill in the callbacks cairn_intake_deliver expects. */
 void cairn_http_as_intake(cairn_http_t *h, cairn_intake_http_t *out);
-
-/*
- * One request outside the intake flow, on the same connection: the Wi-Fi anchor
- * download (src/gnss_hint.cpp) rides the session a bundle upload already opened. content_type may be NULL (a GET). resp holds up to resp_cap
- * bytes of the body; the rest is drained. timeout_ms bounds the whole response,
- * since a body of tens of kilobytes over LTE (~3 KB/s measured) outlasts
- * CAIRN_HTTP_REPLY_TIMEOUT_MS, and should_abort (may be NULL) is polled while the
- * body arrives so a trip starting mid-download stops it. False on a transport
- * failure or an abort; any HTTP status is a successful exchange.
- */
-bool cairn_http_request(cairn_http_t *h, const char *method, const char *path,
-                        const char *content_type, const char *extra_header,
-                        const uint8_t *body, size_t body_len,
-                        int *status, uint8_t *resp, size_t resp_cap, size_t *resp_len,
-                        uint32_t timeout_ms, bool (*should_abort)(void *), void *abort_ctx);
 
 /* Close the socket. Call once per transfer, after cairn_intake_deliver returns;
  * the intake module's own close() ends a request, not the connection. */
